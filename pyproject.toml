@@ -1,0 +1,14 @@
+[project]
+name = "ica-project"
+version = "0.1.0"
+description = "Deep learning for immigrant collective action classification."
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+  "tensorflow-metal",
+  "tensorflow-text",
+  "keras",
+  "keras_hub",
+  "numpy",
+  "polars",
+]
