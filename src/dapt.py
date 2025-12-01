@@ -42,7 +42,7 @@ EPOCHS = 5
 # Data Loading
 path_prefix = os.path.abspath("/projects/ahd")
 
-ldc_data = src.data_setup.dapt_data.dapt_data_from_parquet(
+ldc_data = src.data_setup.dapt_data.data_from_parquet(
     path_prefix, "ldc_corpus"
 )  # the function includes "ldc_corpus" as a default arg
 
@@ -112,10 +112,10 @@ dapt_model = src.model_setup.dapt_setup.get_DAPT_model(
 # Set the learning rate schedule
 lr_schedule = keras.optimizers.schedules.CosineDecay(
     initial_learning_rate=5e-6,
-    decay_steps= 12000, #steps_per_epoch*3,
+    decay_steps=12000,  # steps_per_epoch*3,
     alpha=1e-3,  # note that this is given as a fraction of the initial rate
-    warmup_target=5e-5,  # higher LR w/ higher batch size. NOTE: when this was 5e-4, we were getting *reversed* training, partway into warmup
-    warmup_steps=1000, #steps_per_epoch/4,
+    warmup_target=5e-5,  # higher LR w/ higher batch size. NOTE: when this was 5e-4, we were getting *reversed* training starting partway into warmup
+    warmup_steps=1000,  # steps_per_epoch/4,
 )
 # lr_schedule = 1e-4
 
