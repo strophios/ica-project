@@ -136,32 +136,41 @@ def dataset_create(
     if path is not None:
         if weights is not None:
             dataset = [tf.data.Dataset.load(x) for x in path]
-            dataset = tf.data.Dataset.sample_from_datasets(
-                dataset,
-                weights=weights,
-                seed=seed,
-                stop_on_empty_dataset=True,
-                rerandomize_each_iteration=True,
-            )
         else:
             dataset = tf.data.Dataset.load(path)
     elif data is not None:
-        print("Note: creating a dataset from tensor slices can take several minutes.")
         if weights is not None:
-            dataset = [tf.data.Dataset.from_tensor_slices(x) for x in data]
-            dataset = tf.data.Dataset.sample_from_datasets(
-                dataset,
-                weights=weights,
-                seed=seed,
-                stop_on_empty_dataset=True,
-                rerandomize_each_iteration=True,
-            )
+            if not isinstance(data[0], tf.data.Dataset):
+                print(
+                    "Note: creating a dataset from tensor slices can take several minutes."
+                )
+                dataset = [tf.data.Dataset.from_tensor_slices(x) for x in data]
+            else:
+                dataset = data
         else:
-            dataset = tf.data.Dataset.from_tensor_slices(data)
+            if not isinstance(data, tf.data.Dataset):
+                print(
+                    "Note: creating a dataset from tensor slices can take several minutes."
+                )
+                dataset = tf.data.Dataset.from_tensor_slices(data)
+            else:
+                print(
+                    "Passed a single dataset object. Check inputs, as this may be an error."
+                )
+                dataset = data
     else:
         raise ValueError(
             "One of path or data must be provided."
         )  # not sure this is actually a value error; maybe a TypeError?
+    if weights is not None:
+        dataset = tf.data.Dataset.sample_from_datasets(
+            dataset,
+            weights=weights,
+            seed=seed,
+            stop_on_empty_dataset=True,
+            rerandomize_each_iteration=True,
+        )
+    assert isinstance(dataset, tf.data.Dataset), "dataset not of type tf.data.Dataset"
     dataset = dataset.shuffle(buffer_size=shuffle_buffer).batch(
         batch_size=batch_size, drop_remainder=True
     )
@@ -172,3 +181,36 @@ def dataset_create(
         dataset = dataset.map(preprocessor, num_parallel_calls=parallelism)
         dataset = dataset.prefetch(parallelism)
     return dataset
+
+
+# the below version is the most recent working version, but it only works for the lu_classifier, since it doesn't implement path
+# def dataset_create(
+#     shuffle_buffer,
+#     batch_size,
+#     preprocessor,
+#     data,
+#     weights=None,
+#     parallelism="default",
+#     seed=200,
+# ):
+#     if not isinstance(data[0], tf.data.Dataset):
+#         dataset = [tf.data.Dataset.from_tensor_slices(x) for x in data]
+#     else:
+#         dataset = data
+#     dataset = tf.data.Dataset.sample_from_datasets(
+#         dataset,
+#         weights=weights,
+#         seed=seed,
+#         stop_on_empty_dataset=True,
+#         rerandomize_each_iteration=True,
+#     )
+#     dataset = dataset.shuffle(buffer_size=shuffle_buffer).batch(
+#         batch_size=batch_size, drop_remainder=True
+#     )
+#     if parallelism == "default":
+#         dataset = dataset.map(preprocessor, num_parallel_calls=tf.data.AUTOTUNE)
+#         dataset = dataset.prefetch(tf.data.AUTOTUNE)
+#     else:
+#         dataset = dataset.map(preprocessor, num_parallel_calls=parallelism)
+#         dataset = dataset.prefetch(parallelism)
+#     return dataset
