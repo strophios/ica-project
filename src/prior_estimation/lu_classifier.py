@@ -14,9 +14,9 @@ import os
 import math
 
 # setting for automatic mixed precision
-# keras.config.set_dtype_policy(
-#     "mixed_float16"
-# )  # want to make sure this works on Explorer
+keras.config.set_dtype_policy(
+    "mixed_float16"
+)  # want to make sure this works on Explorer
 
 # Preprocessing params
 # SEQ_LENGTH and BATCH_SIZE of 128 for local testing (see below for rough assessment of how

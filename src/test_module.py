@@ -53,7 +53,6 @@ def classifier_from_dapt_checkpoint(backbone_path, full_model_path=None):
         dropout,
         name="pooled_dropout",
     )
-    hidden_dim = backbone.hidden_dim
     pooled_dense = keras.layers.Dense(
         backbone.hidden_dim,
         activation="relu",  # keras_hub defaults to tanh here, I'm following *Deep Learning with Python* for the moment. Maybe consider gelu?
@@ -117,7 +116,7 @@ class FLPULoss(keras.losses.Loss):
     lay out and what they've implemented.
 
     I'm also not totally sure whether we'd want the explicit overfitting walk-back if we're using this in
-    conjunction with ALUM.
+    conjunction with ALUM. @Ji2023 certainly doesn't indicate doing it (that I can tell, anyways).
     """
 
     def __init__(self, prior, focal_alpha=0.25, focal_gamma=2, nn_beta=0, nn_gamma=1):
@@ -200,6 +199,16 @@ class FLPULoss(keras.losses.Loss):
 # need to set up prior estimation
 
 
+# takes in the outputs of the embedding/encoding layer, the logits, and the targets
+# assume a model where we have:
+# inputs = backbone.input
+# encoded = backbone(inputs)
+# x = intermediate_layers(encoded)
+# logits = output_layer(x) # note that I think we could combine this with the ALUM layer if we wanted (i.e., have it contain a dense layer)
+# then the ALUMLayer would do this:
+# preds/logits (depending) = ALUMLayer(params)(encoded, logits, targets)
+# not totally sure how to structure the inputs here; i.e., do we need to include the targets explicitly in the same dict as tokens + padding?
+# or can we pass it in the same way as any other model? I think it might be the former, in which case we'd need to alter dataset creation
 class ALUMLayer(layers.Layer):
     def __init__(self):
         super().__init__()
