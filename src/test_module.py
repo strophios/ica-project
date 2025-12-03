@@ -9,7 +9,7 @@ import src.model_setup.dapt_setup
 from keras import ops
 import os
 
-path_prefix = "~/immigration_project/00_ML_data_expansion/00_explorer/"  # Probably will need to change this and move stuff around to fit the new project structure
+path_prefix = "~/immigration_project/00_ML_data_expansion/00_explorer"  # Probably will need to change this and move stuff around to fit the new project structure
 path_prefix = os.path.expanduser(path_prefix)
 
 PREDICTIONS_PER_SEQ = (
@@ -20,7 +20,7 @@ dapt_model = src.model_setup.dapt_setup.get_DAPT_model(
     PREDICTIONS_PER_SEQ, path=f"{path_prefix}/lm_head_weights.npy"
 )
 
-dapt_model.load_weights(f"{path_prefix}20251101_223754_dapt_checkpoint.keras")
+dapt_model.load_weights(f"{path_prefix}/20251101_223754_dapt_checkpoint.keras")
 
 dapt_model.layers[2].save_weights(
     f"{path_prefix}/dapt_backbone.weights.h5"

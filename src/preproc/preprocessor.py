@@ -2,10 +2,18 @@ import keras_hub
 
 
 class ClassifierPreprocessor:
-    def __init__(self, SEQ_LENGTH, text_key=None, label_key=None, tokenizer=None):
+    def __init__(
+        self,
+        SEQ_LENGTH,
+        text_key=None,
+        label_key=None,
+        tokenizer=None,
+        endpoint_model=False,
+    ):
         self.SEQ_LENGTH = SEQ_LENGTH
         self.text_key = text_key
         self.label_key = label_key
+        self.endpoint_model = endpoint_model
         if tokenizer is None:
             self.tokenizer = keras_hub.tokenizers.RobertaTokenizer.from_preset(
                 "roberta_base_en",  # also, they pass SEQ_LENGTH to their tokenizer, but I don't think it matters, since I'm packing next
@@ -35,14 +43,28 @@ class ClassifierPreprocessor:
                 "Either both or neither text_key and label_key must be provided (the input can only be indexed by keys *or* position)."
             )
         outputs = self.packer(outputs)
-        # Split the resulting data into a (features, labels, and weights)
-        # tuple that we can use with keras.Model.fit().
-        features = {
-            "token_ids": outputs[0],
-            "padding_mask": outputs[1],
-        }
-        labels = labels
-        return features, labels
+        # If we're piping into a standard model with losses handled outside the model's
+        # layers, then we create a (features, labels) tuple so .fit() will use the features
+        # for fitting the model and then have access to labels for calculating the loss
+        if not self.endpoint_model:
+            features = {
+                "token_ids": outputs[0],
+                "padding_mask": outputs[1],
+            }
+            labels = labels
+            return features, labels
+        else:
+            # But if we're feeding into a model where the losses are handled within the
+            # model itself (i.e., with endpoint layers), then we need to give the targets
+            # to the model, so we output just a single dict with everything we need.
+            features = {
+                "token_ids": outputs[0],
+                "padding_mask": outputs[1],
+                "targets": labels,
+            }
+            # labels = labels
+            # return features, labels
+            return features
         # return keras.utils.pack_x_y_sample_weight(features, labels)
 
 
@@ -124,4 +146,3 @@ class CustomPreprocessor:
 #         labels = outputs["mask_ids"]
 #         weights = outputs["mask_weights"]
 #         return features, labels, weights
-

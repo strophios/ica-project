@@ -171,8 +171,11 @@ def dataset_create(
             rerandomize_each_iteration=True,
         )
     assert isinstance(dataset, tf.data.Dataset), "dataset not of type tf.data.Dataset"
-    dataset = dataset.shuffle(buffer_size=shuffle_buffer).batch(
-        batch_size=batch_size, drop_remainder=True
+    # NOTE: trying out using .repeat() and just setting steps per epoch explicitly
+    dataset = (
+        dataset.shuffle(buffer_size=shuffle_buffer)
+        .repeat()
+        .batch(batch_size=batch_size, drop_remainder=True)
     )
     if parallelism == "default":
         dataset = dataset.map(preprocessor, num_parallel_calls=tf.data.AUTOTUNE)

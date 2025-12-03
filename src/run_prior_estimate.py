@@ -68,3 +68,6 @@ diffs = src.prior_estimation.dedpul_em.estimate_diff(
 alpha, posterior = src.prior_estimation.dedpul_em.estimate_poster_em(
     diffs, lu_preds_rev, lu_targets_rev
 )
+# Current estimates, based solely on validation data:
+# w/ tune = False: 0.98
+# w/ tune = True: 0.9596673650517707
