@@ -14,6 +14,10 @@ from keras import ops
 import os
 
 
+# decorator added cause otherwise Keras won't save it
+# when saving a model compiled with it,creating problems for loading
+# (at least that's the theory; don't know for certain it works)
+@keras.saving.register_keras_serializable()
 class FLPULoss(keras.losses.Loss):
     """
     A non-negative PU learning implementation of the focal loss.

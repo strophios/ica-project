@@ -62,10 +62,7 @@ class ClassifierPreprocessor:
                 "padding_mask": outputs[1],
                 "targets": labels,
             }
-            # labels = labels
-            # return features, labels
             return features
-        # return keras.utils.pack_x_y_sample_weight(features, labels)
 
 
 class CustomPreprocessor:

@@ -14,10 +14,15 @@ import src.prior_estimation.dedpul_utils
 
 import os
 
-path_prefix = os.path.expanduser(
-    "~/immigration_project/00_ML_data_expansion/00_explorer"
-)
-# path_prefix = os.path.abspath("/projects/ahd")
+# setting for automatic mixed precision
+keras.config.set_dtype_policy(
+    "mixed_float16"
+)  # want to make sure this works on Explorer
+
+# path_prefix = os.path.expanduser(
+#     "~/immigration_project/00_ML_data_expansion/00_explorer"
+# )
+path_prefix = os.path.abspath("/projects/ahd")
 
 # Load the fitted LU Classifier
 lu_classifier = keras.models.load_model(f"{path_prefix}/lu_classifier.keras")
@@ -38,8 +43,8 @@ if not os.path.isdir(f"{path_prefix}/cca_set/lu"):
     ldc_data = src.data_setup.dapt_data.create_classifier_data(
         ldc_data, separate_labels=False
     )
-    # prediction_set = pl.concat([ldc_data["train"], ldc_data["val"]])
-    prediction_set = ldc_data["val"]  # using just validation data for testing
+    prediction_set = pl.concat([ldc_data["train"], ldc_data["val"]])
+    # prediction_set = ldc_data["val"]  # using just validation data for testing
     prediction_set = prediction_set.select("headline_with_lead", "cca_label").to_dict()
     prediction_set = preprocess(prediction_set)
     lu_preds = lu_classifier.predict(

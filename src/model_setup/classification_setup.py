@@ -6,7 +6,9 @@ import keras
 import keras_hub
 
 
-def classifier_from_dapt_checkpoint(backbone_path, full_model_path=None):
+def classifier_from_dapt_checkpoint(
+    backbone_path, full_model_path=None, freeze_encoder=False
+):
     if backbone_path is None:
         dapt_model = keras.saving.load_model(full_model_path)
         backbone = dapt_model.layers[2]
@@ -39,6 +41,8 @@ def classifier_from_dapt_checkpoint(backbone_path, full_model_path=None):
         activation=None,  # or sigmoid (binary classification) or softmax (multiple classes) if I want probabilities instead of logits.
         name="logits",
     )
+    if freeze_encoder:
+        backbone.trainable = False
     # Create the model
     inputs = backbone.input
     # use the hidden representation of the first token, as done in the keras_hub.RobertaTextClassifier implementation

@@ -159,9 +159,7 @@ def dataset_create(
                 )
                 dataset = data
     else:
-        raise ValueError(
-            "One of path or data must be provided."
-        )  # not sure this is actually a value error; maybe a TypeError?
+        raise ValueError("One of path or data must be provided.")
     if weights is not None:
         dataset = tf.data.Dataset.sample_from_datasets(
             dataset,
@@ -171,12 +169,16 @@ def dataset_create(
             rerandomize_each_iteration=True,
         )
     assert isinstance(dataset, tf.data.Dataset), "dataset not of type tf.data.Dataset"
-    # NOTE: trying out using .repeat() and just setting steps per epoch explicitly
-    dataset = (
-        dataset.shuffle(buffer_size=shuffle_buffer)
-        .repeat()
-        .batch(batch_size=batch_size, drop_remainder=True)
-    )
+
+    if shuffle_buffer == 0:
+        dataset = dataset.repeat().batch(batch_size=batch_size, drop_remainder=True)
+    else:
+        dataset = (
+            dataset.shuffle(buffer_size=shuffle_buffer)
+            .repeat()
+            .batch(batch_size=batch_size, drop_remainder=True)
+        )
+
     if parallelism == "default":
         dataset = dataset.map(preprocessor, num_parallel_calls=tf.data.AUTOTUNE)
         dataset = dataset.prefetch(tf.data.AUTOTUNE)

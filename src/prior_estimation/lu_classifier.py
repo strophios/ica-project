@@ -78,6 +78,7 @@ preprocess = src.preproc.preprocessor.ClassifierPreprocessor(
 # note: creating the dataset takes multiple minutes with the full dataset on Explorer
 # so I check to see whether I've done it already, only do so if not (then save it)
 if not os.path.isdir(f"{path_prefix}/cca_set"):
+    os.mkdir(f"{path_prefix}/cca_set")
     for split in ldc_data.keys():
         for pu in ldc_data[split].keys():
             ldc_data[split][pu] = tf.data.Dataset.from_tensor_slices(
@@ -126,7 +127,6 @@ test_set = src.data_setup.dapt_data.dataset_create(
 # Setting steps_per_epoch and validation_steps
 # Train: 18300 positives, 1026418 unlabeled.
 # Val: 1017 positives, 57024 unlabeled.
-# NOTE: these are currently not working (in that they don't seem to stop us from exhausting the datasets and throwing warnings)
 steps_per_epoch = math.floor(18300 / (BATCH_SIZE / 6))
 validation_steps = math.floor(1017 / (BATCH_SIZE / 6))
 # ---- TRAINING ----
@@ -163,7 +163,5 @@ lu_classifier.fit(
     validation_steps=validation_steps,
     callbacks=callbacks_list,
 )
-
-# There may be an issue with the profiler; leads to a warning during training, may or may not impact the usefulness of profiler
 
 lu_classifier.save(f"{path_prefix}/lu_classifier.keras")
