@@ -76,7 +76,7 @@ At a very high level, the methodological challenge is in finding a way to turn h
 
 First, we have a data problem: while we actually have a pretty solid number of labeled positives to use for training (for both CCA events and articles relating to immigrants, separately), we have zero labeled negatives. As a result, instead of a standard Positive-Negative (PN) learning problem, we have a so-called Positive-Unlabeled (PU) learning task on our hands [@Bekker2020]. This complicates things somewhat, since the whole training process is premised on being able to show the model labeled examples from mutually exclusive classes. If we were to just assume that all unlabeled articles were negative (i.e., not reporting CCA events), we would get a biased (and poor) classifier, in proportion to level of unlabeled positives.[^pu-classifier] 
 
-[^pu-classifier]: Alternatively, labeling mechanism is non-random (i.e., there's a reason the labeled articles were labeled and the unlabeled ones weren't) we could end up with a very good, unbiased, classifier *that identifies whether an article would be labeled or not*, which is obviously a different thing. 
+[^pu-classifier]: Alternatively, if the labeling mechanism is non-random (i.e., there's a reason the labeled articles were labeled and the unlabeled ones weren't) we could end up with a very good, unbiased, classifier *that identifies whether an article would be labeled or not*, which is obviously a different thing. 
 
 I'm confident that we need to treat this as a PU problem based largely on findings from @Hanna2017, who found that a classifier trained on the DoCA data turned up significant numbers of false positives when applied back to the source *New York Times* data. However, when she hand coded a subset of these articles, she found that 31 of the 50 she checked were "false false positive"; i.e., articles that should have been in DoCA but were not [@Hanna2017]. This is worrying news for DoCA itself (the classifier was *correctly* identifying articles that had been omitted by DoCA coders, for whatever reason), but is actually somewhat encouraging for our project, in two ways. First, it demonstrates that, even within the span already covered by DoCA, there is more contentious collective action (or at least articles about it) to uncover. Second, and more helpfully, it shows that a classifier trained on DoCA articles is capable of correctly generalizing and identifying new events that were not in the original training data. And this was in 2017, using far weaker methods for representing and learning from text data than we have access to now (i.e., term frequency/inverse document frequency rather than word embeddings and support vector machines, logistic regression, or other linear methods rather than neural networks)<!-- phrasing; add cites in re the methods stuff? -->. (Although, to be fair, I believe Hanna may have been using the whole article.)
 
@@ -119,7 +119,7 @@ So, engage in domain-adaptive pretraining [@Gururangan2020]: before building our
 
 This same basic idea has two additional potential applications. First, it shows up in a more narrow way in task-oriented transfer learning (also called intermediate task transfer). Here, rather than adapting the model's broad understanding of English to the more specific "domain" of *NYT* style English, we are trying to give it a head start on learning our specific classification task (i.e., identifying articles reporting ICA events) by training it on "similarly shaped" task first [@Phang2019; @Pruksachatkun2020; @Vu2020]. The idea is to try and overcome the data limitations of the target task (that is, that we don't have a *ton* of labeled data and we don't know for certain that all positives are labeled, more about which below) by pretraining on a task for which lots of well labeled data is available [@Vu2020]. For instance, we could train the model to identify which section of the paper an article was in, or whether it has a given indexer-assigned label. To anthropomorphize a little bit: base RoBERTa has only ever been taught to encode text, it's never been asked to make judgments about (i.e., classify) it. Without this step, we're throwing RoBERTa into the deep end with a very tricky classification task and no prior experience. But if we first train it be very good at, e.g., identifying which articles were in the business section, then it at least has experience making judgments at all, and just needs to adapt that framework to a new application. 
 
-Second, a version of this may be what allows us to expand our model from just the past few decades to the full *NYT* corpus. In short, in the same way that we can use DAPT to teach base RoBERTa the idiosyncracies of *NYT* text, we can use text from 1900 to teach base RoBERTa about the idiosyncracies of English in 1900. For this to be useful, we need to do it in a way that teaches the model to better understand text from 1900 without causing it misunderstand text from the year 2000. The most basic way to do this is by bundling time (date) information together with the text during training and inference [@Dhingra2022; @Rosin2022a]. The standard transformer language model (like RoBERTa) is pretrained using only raw text, but there's no reason that other pieces of data can't be incorporated as well. So we can simply prepend a special time token (e.g., "<1900>") to the text being fed to the model. We can further add a specific "temporal masking" task to training, such that the time token is masked and the model learns to predict it. Because of the attention mechanism (discussed above) this time token will help the model interpret every other token in the sequence: in the same way that the model will encode "bank" differently if it appears in a sentence with "river" versus "teller", it can learn to encode words differently based on the time token [@Rosin2022a].<!-- could use a good example here; e.g., "we could end up with a model that encodes 'demonstration' similarly to 'protest' in 2000, but not in 1900" (except that I'm not sure that would actually be right) --> We could even take this further by modifying the attention mechanism itself so that it is structurally/mathetmatically conditioned on the provided time information [@Rosin2022], though this may be beyond the scope of the current project. 
+Second, a version of this may be what allows us to expand our model from just the past few decades to the full *NYT* corpus. In short, in the same way that we can use DAPT to teach base RoBERTa the idiosyncracies of *NYT* text, we can use text from 1900 to teach base RoBERTa about the idiosyncracies of English in 1900. For this to be useful, we need to do it in a way that teaches the model to better understand text from 1900 without causing it misunderstand text from the year 2000. The most basic way to do this is by bundling time (date) information together with the text during training and inference [@Dhingra2022; @Rosin2022a]. The standard transformer language model (like RoBERTa) is pretrained using only raw text, but there's no reason that other pieces of data can't be incorporated as well. So we can simply prepend a special time token (e.g., "<1900>") to the text being fed to the model. We can further add a specific "temporal masking" task to training, such that the time token is masked and the model learns to predict it. Because of the attention mechanism (discussed above) this time token will help the model interpret every other token in the sequence: in the same way that the model will encode "bank" differently if it appears in a sentence with "river" versus "teller", it can learn to encode words differently based on the time token [@Rosin2022a].<!-- could use a good example here; e.g., "we could end up with a model that encodes 'demonstration' similarly to 'protest' in 2000, but not in 1900" (except that I'm not sure that would actually be right) --> We could even take this further by modifying the attention mechanism itself so that it is structurally/mathematically conditioned on the provided time information [@Rosin2022], though this may be beyond the scope of the current project. 
 
 
 ## Data
@@ -148,50 +148,176 @@ And these tags as immigration: "immigration", "immigration and emigration", "imm
 
 One thing worth noting is that this does catch a somewhat different definition of CCA than DoCA does, both more and less expansive (including strikes + "normal" political rallies, not including lawsuits). There are likely enough DoCA events separately to get the stuff that this misses, but there isn't necessarily a good way to narrow this down. That said, we may want a different definition from DoCA anyways. Alternatively, we might want to aim for finer grained classification (e.g., street versus boycott versus conventional versus lawsuit). 
 
-
 ## Multi-headed Classifier
 
-The main reason that I'm not worried about our small number of specifically labeled ICA articles (as opposed to just articles about CCA events or immigrants) is that I'm planning to break the problem up. A deep learning model is just a sequence of transformations of the input data (frequently a *lot* of matrix multiplications)
+The main reason that I'm not worried about our small number of specifically labeled ICA articles (as opposed to just articles about CCA events or immigrants) is that I'm planning to break the problem up. As discussed above, the purpose of the transformer model backbone is to create a meaningful quantitative representation of any text we put into it. It does this by embedding each word of that text into a many-dimensional vector space (in our case, this space has 768 dimensions). To go from this meaningful representation to *classification* we need a way to squeeze this complex, multidimensional representation down in a single output (i.e., yes/no). This is basically fitting a logistic regression with 768 independent variables and the dependent variable is the probability of a "yes" label. But there's nothing preventing us from fitting *more than one* regression, with a different classification task (and thus different set of target output labels) each time. Put another way, the same underlying 768-dimension representation of the intput text can be fed into as many different output layers as we like, which will squeeze down those dimensions into different sets of yes/no predictions. We call each of these outputs a separatel classification "head". 
 
-represent complex data, many dimensions (these are the word embeddings, the meaningful representations of text)
-classifier: layers that squeeze the complex multi-dimensional representation down into a single output (i.e., yes/no)
-but there's no reason we can't take the same complex meaningful representation and feed it into multiple different sets of output layers, squeezing down into *different* yes/no predictions
-in fact, there's no reason we can't route outputs from different intermediate layers back together etc. So we could have several classification "heads" for different things, and then take those predictions, add them back to the original representation, and then feed *all* of that into a final output
+By having multiple classification heads, then, we can break down our actual problem of interest (identifying immigrant collective action events in the US) into separate component parts. Specifically, the plan is to have separate classification heads for: contentious collective action events (general), articles about immigrants, and articles about US events. We can even route the output of these different heads back together by simply making them inputs to another layer. For us, this means we can also have a final combined output head that takes the prediction for each component question (is it CCA? does it involve immigrants? is it in the US?) as inputs, alongside the same 768-dimension representation of the input text. This can allow the model to better understand and identify weird edge cases or dependencies among these components. 
 
-Any 
+Then, when training the model, we calculate the loss for each intermediate output (i.e., each component question) as well as the final output layer. We then use these to update the weights of each output layer accordingly. We can also combine the losses and use the combined loss to update the weights of the backbone model (though the payoff for this can be pretty variable, depending on empirical relationship between our different outputs in the training data). 
 
-Instead of training a classifier 
+Ultimately, this design allows us to leverage the larger labeled datasets for general collective action and immigrant involvement to make the end goal immigrant collective action classification task tractable despite the far smaller number of labeled articles. Each head shares the same backbone representations but learns task-specific decision boundaries.
 
+## Positive-Unlabeled Learning and Class Imbalance
 
-The US/not US identification task is far more balanced and far simpler. The overall final classifier output combines the output of the individual task heads with a combined ICA/not head. 
+As discussed above (in the "Methodological" subsection of "Parameterizing the Problem"), identifying articles reporting ICA events is made especially difficult by two things: 1) the lack of labeled negative examples (i.e., in our training data, we have articles we know report ICA events and articles where we don't know, but not articles that we know for certain don't report ICA events); and, 2) severe class imbalance (only a vanishingly small minority of articles report ICA events).[^theoretically-distinct] 
 
+[^theoretically-distinct]: These problems are theoretically distinct, but often overlap in practice (as they do here)
 
-combining losses + outputs (maybe goes with "multi-headed classifier")
+Breaking the problem down into its component parts does not, at least in our case, solve either of these issues, but they do impact the different component tasks differently. Indeed, the US/not US task is largely free from both of these issues: it is quite easy for us to have a confident set of both labeled positives and negatives and for that set to be relatively balanced. However, both the CCA and immigrant involvement identification tasks do suffer from both of these issues. 
 
-## Positive-Unlabeled Learning
+### Positive-Unlabeled Learning and Its Assumptions
 
+There are essentially three kinds of approaches to positive-unlabeled (PU) learning [@Bekker2020] which solve the problem of unlabeled data in different ways: 
 
-PU learning + class imbalance
-  re-balanced batches (rebalanced for ICA? for each task separately? question of whether to train the heads separately first and then combine, etc.)
-  focal loss
-  VAT
+- Two-step: identify reliable negative samples and the proceed with normal positive-negative (PN) learning using those negative samples. The obvious problem is that you need some way to identify those negative samples. The slightly less obvious problem is that your classifier may perform worse on the test set (or on real data) if your method for identifying negatives doesn't effectively cover the full distribution of negatives. That is, even if none of your identified negatives are actually positives, you still need to be doing a good job of identifying all the different kinds of negatives, or the model won't be able to learn about them. 
+- Biased learning: here, we treat the unlabeled data as noisy negative samples and then use some method to try and adjust for the noise, generally by down-weighting the "negative" samples in some way (e.g., penalizing misclassified positive samples more harshly). 
+- Class prior: these methods leverage knowledge (or estimates) of the positive *class prior* $\alpha = \Pr(y = 1)$ (i.e., the probability a random sample is positive). This can be done in different ways [@Bekker2020], but the one which concerns us is *unbiased* PU learning [@duPlessis2014; @Elkan2008]. Here, the class prior allows us to treat unlabeled data as both weighted positive and negative data at the same time [@Kiryo2017]. 
+
+All methods for PU learning rely on making some assumptions about the labeling mechanism, the data, or the class prior. I discuss the assumptions most relevant for our case, and omit the rest: 
+
+- The labeling mechanisms (i.e., how it comes to be that some positive samples are labeled but others are not): 
+  - Selected Completely At Random (SCAR): labeled positive samples are a completely random sample from the set of all positives, with all samples having an equal probability of being labeled. Note that this implies that there is no correlation between any of a sample's attributes and its chance of being labeled. This is the strongest assumption and is required for class prior methods (including unbiased PU) as well as some methods in the other two categories. 
+  - Selected At Random (SAR): labeled positive samples are a random biased sample from the set of all positives, with the bias towards selection being dependent on a sample's attributes. If we understand the labeling mechanism, then we can leverage our understanding of the labeling propensity to get an unbiased classifier. If we don't, then we need additional assumptions. 
+  - Probabilistic Gap PU (PGPU): a special case of SAR in which the chance to be labeled is proportional to the "probabilistic gap", the difference between the sample's probability to be positive, given its attributes, and its probability to be negative, given its attributes. In other words, positive samples that are more similar to negative samples are less likely to be labeled.
+- The data: 
+  - Smoothness: samples that are similar to each other are more likely to have the same label. If this assumption holds, then samples that are far from all the labeled (positive) samples should reliably be negative.
+
+These assumptions are, I think, the ones that depend most directly on our domain expertise: how *do* we think the labeling mechanism worked for our different sets of labels? Do we think that negatives are necessarily very different from positives?
+
+Currently, I am proceeding as though the labeled positive samples were selected completely at random. I doubt that this is literally perfectly true, but I think it's plausibly mostly true. However, I am absolutely open to disagreement here. It also may depend, to some degree, on the exact definitions of contentious collective action and immigrant involvement that we want to use. 
+
+That said, assuming the labeled samples were SCAR, I am using a modified version of unbiased PU learning [@Kiryo2017; @Ji2023] and testing different methods for estimating the class prior [@Garg2021; @Ivanov2020]. Crucially, there are specific two-step (and potentially biased) approaches that should be workable, assuming we're not comfortable with the SCAR assumption. Additionally, the modifications to the unbiased PU approach will be useful regardless of whether we stick with that method, since they also help address class imbalance and are applications of more general techniques to unbiased PU, rather than specific innovations on it. 
+
+### Class Imbalance and Other Techniques
+
+Class imbalance simply refers to the fact that, even ignoring the fact that not all positives are labeled, there are far far more negative than positive samples. That is, there are far more news articles that do not report a CCA event (or immigrant involvement) than there are articles that do. This is even more of an issue for class prior PU learning, since the class prior is used to weight the loss (meaning that the already uncommon positive samples will contribute even less to the training, relatively speaking). 
+
+We attempt to address this in three ways: 
+
+- Re-balanced training batches: instead of each training batch consisting of a random draw of samples, we instead draw from positive and unlabeled samples separately (currently one positive for every nine unlabeled). This ensures that every batch has some signal from labeled samples in it [@Ji2023]. 
+- Focal loss: a modified version of the cross-entropy loss (extremely common in deep learning) that dynamically weights each sample based on its difficulty: the more confident the model is in a (correct) prediction, the less weight that prediction contributes to the loss [@Lin2020]. Functionally, this serves to focus training on the small subset of difficult to classify samples, preventing the training from being overwhelmed by the multitude of easy to classify negatives (or, in our case, unlabeleds) [@Ji2023]. 
+- Virtual Adversarial Training: VAT attempts to ensure distributional smoothness in the output of the model [@Miyato2019]. Practically, this is a way of making the model more robust, such that small changes in input don't result in large changes in output. However, it also appears that it can improve the generalizability of the model as well [@Liu2020]. Conceptually, VAT works taking the embedding of the input text and perturbing in the direction that leads to the largest divergence in the output and we tweak the model parameters so as to maximize that divergence (as opposed to minimizing the standard loss). 
 
 
 ## Hyperparameter Search
 
+After preliminary testing, once we have a model structure that we basically like, we then need to search across potential hyperparameter values in order to find the ideal set for actually training and using the model [@Chollet2025]. Hyperparameters are simply parameters that control the learning process of a model. This includes things like the learning rate (how large a step we take each time we tweak the model parameters), the batch size $n$ (the number of samples that we process at once and after which we update the model), or the scaling factor for the focal loss. Unlike the model's normal parameters, they are not learned from the data directly. Instead, we must test each combination of hyperparameters by using them to fit the model. This can be a laborious process, but some shortcuts are possible (e.g., aborting training runs that are clearly worse than previous tests).
 
 
 ## Evaluation and Use
 
-evaluation
-  evaluating PU models - fully labeling a test set (but it doesn't need to be large)
-  precision/recall tradeoff, other possible metrics
-  practical questions of how we're using it: what error rate is acceptable, what kind of errors? is there a level of hand-checking we're comfortable with (so we go for high recall, low precision and check for false positives, etc.)
+Once we've fully trained the model, we can then evaluate its performance on a held-out test set. Evaluating the performance of PU learning models is made somewhat more complicated by the fact that the test set is also largely unlabeled. That said, it is still possible, with adjustments and assumptions [@Bekker2020]. Alternatively, we could put in the time to fully label a test set. Such a test set would not need to be terribly large (e.g., not more than 1000), so this may well be worth doing. 
+
+There are a number of different metrics we can use to evaluate performance, which we can discuss in detail in future. The important conceptual point to note is the precision/recall tradeoff: precision is the ratio of true positives to all positives (i.e., true positives / (true positives + false positives)), while recall is the fraction of positives the model found (i.e., true positives / (true positives + false negatives)). Generally speaking, there is going to be a tradeoff between how well you avoid false positives (precision) and how well you capture all positives/avoid false negatives (recall). 
+
+This tradeoff shows up in model calibration: the model doesn't output binary predictions (yes/no), it outputs *probabilities*; i.e., its confidence that a given input is an ICA event. What we do with those probabilities is up to us. Due to some of the complexities in dealing with PU learning and class imbalance, we can basically guarantee that we don't want to use .5 as a cutoff (i.e., label an article as ICA if the model's confidence is greater than one in two). Ultimately, we'll want to test different decision thresholds using first the test set and then by experimenting with some real new data. 
+
+There is not "correct answer" in all of this: how we balance the precision/recall tradeoff, what we consider to be a "good enough" model, etc. are all practical questions whose answers depend on how we are going to use it. To figure out where we come down, we'll want to think about questions like: 
+
+- what error rate is acceptable?
+- what kind of errors? are some kinds of errors preferable to others?
+- is there a level of hand-checking we're comfortable with (so we go for high recall, low precision and check for false positives, etc.)?
+
+Finally, should add that, with regard to dealing with missing data and difficult decision boundaries, I'm currently thinking about largely as a robustness issue: we keep track of it and see if it seems to be becoming a problem. That said, we can also treat it [a la @Oliver2023] as itself an interesting set of empirical results.
 
 
-dealing with missing data and difficult decision boundaries, I'm currently thinking about largely as a robustness issue: we keep track of it and see if it seems to be becoming a problem. but we can also treat it (a la @Oliver2023) as itself an interesting set of empirical results
 
 
+
+
+
+
+
+# Where We Are Now
+
+- DAPT on headlines/ledes: done
+- trained on the CCA task: done, needs revision
+  - Class prior estimation implemented using "Difference-of-Estimated-Densities-based Positive-Unlabeled Learning" (DEDPUL) [@Ivanov2020]
+  - Focal loss implemented
+  - Virtual adversarial training not implemented
+- Other classification heads: not done
+
+The quality of the current classifier: not great, but better than chance. Perhaps more importantly, I know how to improve it. A hand review of the least likely positives and most likely negatives indicates 1) the model has some idea what it's talking about; 2) I've been too generous with the NYT indexing service definitions. Fixing the second point is the highest leverage point of improvement.
+
+# Where We're Going
+
+<!-- That said, I have not yet done this for the DoCA articles from 1960-1984. (See Next Steps, at end.)
+The set of annotated tags that I'm using as labels for CCA and immigration are currently a first pass. They will need to be both conceptually and empirically validated. (See Next Steps, at end.) -->
+
+## Next steps
+
+- data stuff
+  - make better use of DoCA by using the NYT API to pull down those 35 years of headlines + leads, then match DoCA into it, allowing us to use all the DoCA events as positives (instead of just those we are able to match into the NYT Annotated corpus; that is, at most, those between 1990 and 1995, I think). 
+  - review the quality of the LDC index labeled events (both with regard to CCA and immigration, ideally). there are definitely a bunch that made it in that just aren't very good (i.e., aren't actually cca events) and I need to 1) figure out why; and, 2) remove them (and any that are likely to be bad inclusions in the same way)
+  - narrow down and hammer out our definition of CCA (potentially into multiple classes?). Are we trying to emulate DoCA as closely as possible? are we including lawsuits? boycotts? press conferences? etc. do we want to take a first pass with a narrower definition that will hopefully be less easily confused (i.e., focusing exclusively on "street" type events, or something similar). 
+    - this relates to the previous point about reviewing the LDC index events: it's quite possible that part of the issue is insufficient rigor or precision in my choices of which index descriptors to count for labeling purposes. 
+  - consider restricting the classifier to US events from the start? alternatively, make that a separate classification head as a first, easy go at a multi-head classifier.
+- modeling stuff:
+  - within this model: 
+    - implement Virtual Adversarial Training
+    - hyperparameter search/tuning; learning parameters (rate, weight decay, scheduler, dropout), focal loss parameters, sensitivity sweep across class prior estimates, 
+    - implement per-layer learning rates, freezing/unfreezing, etc.
+    - calibrate the outputs; can do this a number of ways, but don't want to just use a .5 threshold, for a number of reasons
+  - broadening from the CCA ID model: the ultimate goal is a model that will accurately ID *immigrant* contentious collective action, specifically. we want to do this by creating a multi-headed classifier; a shared encoder feeding into separate heads with different objectives; one classifying CCA/not, one immigrant involved/not, one trying to capture ICA overall, being fed partly by the other two, etc.
+    - also worth testing just using multiple models (or even ensembling a single head multiples together with a multi-headed model?); not sure it'd be worth it though
+    - so adding these heads, testing a few different structures and training procedures (i.e., are we still using VAT? if so, are we implementing that on a per-head basis? that dramatically increases training time, but might be worth it for generalizability and robustness, perhaps especially because of how individual the individual heads then feed into a combined output head); hyperparameter tuning
+
+
+potentially adding some active learning elements: hard-negative mining (making sure to overrepresent known difficult cases in training, e.g., make sure each batch has at least 20% drawn from the top 5k unlabeled by predicted p, or something); this could include a certain amount of hand classification of some of these cases (so we wind up with a couple hundred to a thousand difficult cases with known labels applied). 
+
+currently, model evaluation is somewhat hamstrung by the nature of the PU learning problem. we *can* evaluate the models, but we're definitely guessing to a certain degree. the solution to this is to hand classify a small subset of articles (as few as a couple hundred) drawn totally at random, so that we can then evaluate the performance of the model (trained on a PU dataset) on the actual PN problem that we care about. (this would also give another way of estimating the class prior)
+
+this is a different thing than the active learning, hard-negative mining stuff I mention first; they're doing different things. the random draw is good for model evaluation because it gives us a set that is representative of the actual distribution we're training on so we can accurately evaluate performance with a minimum of re-weighting, calibration, etc. Hard-negative mining doesn't actually require any labeling at all, though it is more powerful if you do. Either way, it is a strategy for augmenting the training of the model, ensuring that it is actually getting a chance to learn from informative examples. If we do label cases, then we're doing even better: for the most informative cases, we've turned the PU problem into a PN problem (we can do this on a case-by-case basis by using a different loss and loss weighting technique for those cases).
+
+## Down the Road
+
+Some miscellaneous thoughts on what comes after the haystack problem. In other words, how to get a model that can usefully code the articles the first model identifies. 
+
+training the cca classifier to ID relevant sections of text? or, alternatively, restructuring the model so that we can tell what sections of the text are influencing the CCA/not judgement as a kind of workaround to get at a similar idea.
+
+- use DoCA: 
+  - maybe this: we use the DoCA coding to train classifiers to ID the various pieces of info in article texts, then use that (maybe plus the overall CCA/not classifier) to tag relevant text by IDing the parts of the text that are influencing their decisions. then, use that labeling to train a "relevant info" classifier directly, which could then be used to classify sentences within an article. 
+  - could also potentially enforce a narrowing process? like, structure the model so that an early step (maybe within the transformer? or something) is explicitly about tossing out non-relevant parts of the text. then, once we've trained a bunch of classifiers on the different relevant pieces of info in this way, we take that first step and see how it does IDing the generally relevant-to-event text, or something?
+  - alternatively (or also? this is maybe a different question), try and use DoCA to train an "event recognizer" to parse articles to ID and differentiate the event(s) reported within an article. something like the following: we train a set of models to be good at just pulling out the various pieces of info we care about from (small amounts of) text; e.g., a model to look at an article (or sentence?) and pull out participant numbers, targets, claims, whether there was violence, etc. Then, we use those as, essentially, post-processors to allow us to train an "article parser" where we give it an article and its task is to bucket the text from that article into not-event-related and event 1/event 2/etc. related. We then feed each of the "event" buckets into the "post-processors" and they spit out a set of event records, based on the text they were given. Then, the model is assessed based on whether an the output records match any of the records in DoCA for that article. 
+    - this is probably too cute/over-complicated, but there's maybe something here. 
+
+
+
+# Misc (to cut)
+
+questions for them/stuff to discuss in the meeting: 
+
+- honing in on a definition of "CCA", in particular considering the list of available descriptors (which I should provide them)
+- resources/time available for article labeling
+- questions for how to move forward, both immediate next steps (and after that, other things at the classification stage) and further down the road (e.g., maybe getting into the issues of event identification and coding within an article text, theoretical issues related to @Oliver2023, etc.)
+
+
+- wu et al. 2018 replaces the segment embeddings used by BERT with label embeddings, allowing the inclusion of label information the MLM task (so a sequence "The actor was good" tagged "positive" with "good" masked will ultimately learn to generate predictions like "excellent", "enthralling", etc. and not "bad", "boring", and so on). 
+
+Not sure where to mention this: Crucially, getting part way there is still useful. While getting a fully coded DoCA-equivalent dataset out at the end is the ideal, even getting a reasonably confident subset of "articles reporting ICA events" would be helpful going forward. 
+
+@Baden2022 
+
+
+note to self: consider changing the `:Telescope zotero` command so that it exits to insert mode if it inserts text in the document (i.e., if it adds the (at)ref)
+
+task-oriented transfer / intermediate task transfer:
+
+- @Phang2019
+  - "During target task training, the encoder must learn and adapt enough to be able to solve the target task—potentially involving a very different input distribution and output label space than was seen in pretraining—but it must also avoid overfitting or catastrophic forgetting of what was learned during pretraining." (1)
+  - "This work explores the possibility that the use of a second stage of pretraining with data-rich intermediate supervised tasks might mitigate this brittleness, improving both the robustness and effectiveness of the resulting target task model. We name this approach, which is meant to be combined with existing approaches to pretraining, Supplementary Training on Intermediate Labeled data Tasks (STILTs)." (1)
+  - "Experiments with sentence encoders on STILTs take the following form: (i) A model is first trained on an unlabeled-data task like language modeling that can teach it to reason about the target language; (ii) The model is then further trained on an intermediate, labeled-data task for which ample data is available; (iii) The model is finally fine-tuned further on the target task and evaluated."
+- @Pruksachatkun2020 
+  - "We observe that tasks that require complex reasoning and inference tend to make good intermediate tasks." p. 5236
+  - "We do not find differences in intermediate-task dataset size to have any substantial consistent impact on downstream target task performance." p. 5236
+  - "In addition, we find that smaller target tasks such as RTE, BoolQ, MultiRC, WiC, WSC benefit the most from intermediate-task training." p. 5236
+- @Vu2020 (including on text classification specifically)
+  - "Our results show that transfer learning is more beneficial than previously thought, especially when target task data is scarce, and can improve performance even with low-data source tasks that differ substantially from the target task (e.g., part-ofspeech tagging transfers well to the DROP QA dataset). 
+  - "We also develop task embeddings that can be used to predict the most transferable source tasks for a given target task, and we validate their effectiveness in experiments controlled for source and target data size."
+  - "We show that the benefits of transfer learning are more pronounced than previously thought, especially when target training data is limited, and we develop methods that learn vector representations of tasks that can be used to reason about the relationships between them." p. 7890
+
+@Chalkidis2020: actually just about DAPT, shows it to be useful in the legal domain and that it seems to be generally comparable (in that domain) to pre-training from scratch on the domain. 
 
 
 I am using a **pre-trained transformer based model (specifically RoBERTa) as the backbone** for a **multi-headed classifier** which takes as **input the headline and lead sentence** of an *NYT* article and returns the probabilities that the article reports 1) a CCA event, 2) on immigrants, 3) on events in the US, and finally an overall probability that the article reports an ICA event taking place in the US. The training data come from a combination of DoCA and the NYT Annotated Corpus. 
@@ -199,13 +325,6 @@ I am using a **pre-trained transformer based model (specifically RoBERTa) as the
 Before training the classifier, the RoBERTa backbone was given a round of **domain-adapted pretraining on headline-lead pairs (a similar strategy may be employed to deal with linguistic variability)**. The CCA and immigrant identification tasks are both clear **Positive Unlabeled learning tasks and, to different degrees, highly class imbalanced**. As such, those classification heads are trained on **re-balanced batches** with a **focal loss** and **virtual adversarial training**. The US/not US identification task is far more balanced and far simpler. The overall final classifier output combines the output of the individual task heads with a combined ICA/not head. 
 
 Once the structure of the model is fully setup, I'll run a **search across potential hyperparameter values in order to find the ideal set for actually training and using the model**. Then we can fully train the model and **evaluate its performance on a held-out test set, ideally one which has been hand coded to be fully and correctly labeled (i.e., PN rather PU)**. There are a number of **different metrics we can use to evaluate performance and decide what counts as a "good enough" model, depending on how exactly we want to use it**. At this point we will also **calibrate the model and our decision threshold**, based in part on these same metrics and our intended use for the model. 
-
-
-
-Strategy: I've been thinking about the problem in two steps: first, identify ICA articles based on headlines (and ledes); then, code the events reported in those articles (i.e., number of participants, tactics, domain, etc.). I am very confident we can manage a good solution to the first part, and reasonably confident that we can get something at least useful for the second, even if we can't get everything we want. 
-
-There's a bunch more detail to get into, but the one thing to highlight here, is that the plan is for the headline model to be a multi-task model. Basically, we train a single model ID CCA articles as one output, ID immigration articles as a separate output, and then combine those outputs (potentially along with a third "task" that tries to ID specifically ICA articles). This helps us sidestep the fact that we really don't have very many ICA events specifically, but we do have plenty of both CCA and immigration articles. 
-
 
 
 
@@ -237,29 +356,6 @@ evaluation
 
 
 
-
-training the cca classifier to ID relevant sections of text? or, alternatively, restructuring the model so that we can tell what sections of the text are influencing the CCA/not judgement as a kind of workaround to get at a similar idea.
-
-- use DoCA: 
-  - maybe this: we use the DoCA coding to train classifiers to ID the various pieces of info in article texts, then use that (maybe plus the overall CCA/not classifier) to tag relevant text by IDing the parts of the text that are influencing their decisions. then, use that labeling to train a "relevant info" classifier directly, which could then be used to classify sentences within an article. 
-  - could also potentially enforce a narrowing process? like, structure the model so that an early step (maybe within the transformer? or something) is explicitly about tossing out non-relevant parts of the text. then, once we've trained a bunch of classifiers on the different relevant pieces of info in this way, we take that first step and see how it does IDing the generally relevant-to-event text, or something?
-  - alternatively (or also? this is maybe a different question), try and use DoCA to train an "event recognizer" to parse articles to ID and differentiate the event(s) reported within an article. something like the following: we train a set of models to be good at just pulling out the various pieces of info we care about from (small amounts of) text; e.g., a model to look at an article (or sentence?) and pull out participant numbers, targets, claims, whether there was violence, etc. Then, we use those as, essentially, post-processors to allow us to train an "article parser" where we give it an article and its task is to bucket the text from that article into not-event-related and event 1/event 2/etc. related. We then feed each of the "event" buckets into the "post-processors" and they spit out a set of event records, based on the text they were given. Then, the model is assessed based on whether an the output records match any of the records in DoCA for that article. 
-    - this is probably too cute/over-complicated, but there's maybe something here. 
-
-
-why not ChatGPT and what it might be useful for (synthetic data)
-
-
-
-
-
-
-incorporating date/other metadata into the model - linguistic variability; may even allow a degree of generalization beyond the periods where we have training examples (ideally, DAPT to teach the model about linguistic change over time will result in it representing words that *mean* the same thing at different times similarly, even the actual words are different)
-
-dealing with missing data and difficult decision boundaries, I'm currently thinking about largely as a robustness issue: we keep track of it and see if it seems to be becoming a problem. but we can also treat it (a la @Oliver2023) as itself an interesting set of empirical results
-
-
-
 what we could do and why we are or are not doing it
 
 what we are actually doing and planning to do (i.e., how I'm thinking about the problem + breaking it down)
@@ -270,84 +366,13 @@ maybe a bit more on problems at the technical level (e.g., deeper discussion of 
 
 talk about why not ChatGPT?
 
+why not ChatGPT and what it might be useful for (synthetic data)
 
 
-# Where We Are Now
+incorporating date/other metadata into the model - linguistic variability; may even allow a degree of generalization beyond the periods where we have training examples (ideally, DAPT to teach the model about linguistic change over time will result in it representing words that *mean* the same thing at different times similarly, even the actual words are different)
 
-DAPT on headlines/leads: done
-trained on the CCA task: done, needs revision
-  Class prior estimation implemented (DEDPUL)
-  FL implemented
-  VAT not implemented
-Other classification heads: not done
+dealing with missing data and difficult decision boundaries, I'm currently thinking about largely as a robustness issue: we keep track of it and see if it seems to be becoming a problem. but we can also treat it (a la @Oliver2023) as itself an interesting set of empirical results
 
-quality of the current classifier: not great, but kind of okay. I know how to improve it. 
-  hand review of least likely positives and most likely negatives indicates 1) the model has some idea what it's talking about; 2) I've been too generous with the NYT indexing service defs
-
-
-# Where We're Going
-
-light sketch of where we're going next
-
-detailed discussion of next steps and considerations for the meeting
-
-
-That said, I have not yet done this for the DoCA articles from 1960-1984. (See Next Steps, at end.)
-The set of annotated tags that I'm using as labels for CCA and immigration are currently a first pass. They will need to be both conceptually and empirically validated. (See Next Steps, at end.)
-
-
-## Overall
-
-## Immediate Issues
-
-@Baden2022 
-
-
-
-
-
-Not sure where to mention this: Crucially, getting part way there is still useful. While getting a fully coded DoCA-equivalent dataset out at the end is the ideal, even getting a reasonably confident subset of "articles reporting ICA events" would be helpful going forward. 
-
-
-note to self: consider changing the `:Telescope zotero` command so that it exits to insert mode if it inserts text in the document (i.e., if it adds the (at)ref)
-
-
-questions for them/stuff to discuss in the meeting: 
-
-- honing in on a definition of "CCA", in particular considering the list of available descriptors (which I should provide them)
-- resources/time available for article labeling
-- questions for how to move forward, both immediate next steps (and after that, other things at the classification stage) and further down the road (e.g., maybe getting into the issues of event identification and coding within an article text, theoretical issues related to @Oliver2023, etc.)
-
-
-stuff to talk about in next steps: 
-
-- data stuff
-  - make better use of DoCA by using the NYT API to pull down those 35 years of headlines + leads, then match DoCA into it, allowing us to use all the DoCA events as positives (instead of just those we are able to match into the NYT Annotated corpus; that is, at most, those between 1990 and 1995, I think). 
-  - review the quality of the LDC index labeled events (both with regard to CCA and immigration, ideally). there are definitely a bunch that made it in that just aren't very good (i.e., aren't actually cca events) and I need to 1) figure out why; and, 2) remove them (and any that are likely to be bad inclusions in the same way)
-  - narrow down and hammer out our definition of CCA (potentially into multiple classes?). Are we trying to emulate DoCA as closely as possible? are we including lawsuits? boycotts? press conferences? etc. do we want to take a first pass with a narrower definition that will hopefully be less easily confused (i.e., focusing exclusively on "street" type events, or something similar). 
-    - this relates to the previous point about reviewing the LDC index events: it's quite possible that part of the issue is insufficient rigor or precision in my choices of which index descriptors to count for labeling purposes. 
-  - consider restricting the classifier to US events from the start? alternatively, make that a separate classification head as a first, easy go at a multi-head classifier.
-- modeling stuff:
-  - within this model: 
-    - implement Virtual Adversarial Training
-    - hyperparameter search/tuning; learning parameters (rate, weight decay, scheduler, dropout), focal loss parameters, sensitivity sweep across class prior estimates, 
-    - implement per-layer learning rates, freezing/unfreezing, etc.
-    - calibrate the outputs; can do this a number of ways, but don't want to just use a .5 threshold, for a number of reasons
-    - ?
-  - broadening from the CCA ID model: the ultimate goal is a model that will accurately ID *immigrant* contentious collective action, specifically. we want to do this by creating a multi-headed classifier; a shared encoder feeding into separate heads with different objectives; one classifying CCA/not, one immigrant involved/not, one trying to capture ICA overall, being fed partly by the other two, etc.
-    - also worth testing just using multiple models (or even ensembling a single head multiples together with a multi-headed model?); not sure it'd be worth it though
-    - so adding these heads, testing a few different structures and training procedures (i.e., are we still using VAT? if so, are we implementing that on a per-head basis? that dramatically increases training time, but might be worth it for generalizability and robustness, perhaps especially because of how individual the individual heads then feed into a combined output head); hyperparameter tuning
-
-
-potentially adding some active learning elements: hard-negative mining (making sure to overrepresent known difficult cases in training, e.g., make sure each batch has at least 20% drawn from the top 5k unlabeled by predicted p, or something); this could include a certain amount of hand classification of some of these cases (so we wind up with a couple hundred to a thousand difficult cases with known labels applied). 
-
-currently, model evaluation is somewhat hamstrung by the nature of the PU learning problem. we *can* evaluate the models, but we're definitely guessing to a certain degree. the solution to this is to hand classify a small subset of articles (as few as a couple hundred) drawn totally at random, so that we can then evaluate the performance of the model (trained on a PU dataset) on the actual PN problem that we care about. (this would also give another way of estimating the class prior)
-
-this is a different thing than the active learning, hard-negative mining stuff I mention first; they're doing different things. the random draw is good for model evaluation because it gives us a set that is representative of the actual distribution we're training on so we can accurately evaluate performance with a minimum of re-weighting, calibration, etc. Hard-negative mining doesn't actually require any labeling at all, though it is more powerful if you do. Either way, it is a strategy for augmenting the training of the model, ensuring that it is actually getting a chance to learn from informative examples. If we do label cases, then we're doing even better: for the most informative cases, we've turned the PU problem into a PN problem (we can do this on a case-by-case basis by using a different loss and loss weighting technique for those cases).
-
-
-
-- wu et al. 2018 replaces the segment embeddings used by BERT with label embeddings, allowing the inclusion of label information the MLM task (so a sequence "The actor was good" tagged "positive" with "good" masked will ultimately learn to generate predictions like "excellent", "enthralling", etc. and not "bad", "boring", and so on). 
 
 
 
@@ -361,19 +386,3 @@ array([-2.0704633 , -1.65113395, -1.52599957, -1.34085094, -1.12222061,
 # References
 
 
-task-oriented transfer / intermediate task transfer:
-
-- @Phang2019
-  - "During target task training, the encoder must learn and adapt enough to be able to solve the target task—potentially involving a very different input distribution and output label space than was seen in pretraining—but it must also avoid overfitting or catastrophic forgetting of what was learned during pretraining." (1)
-  - "This work explores the possibility that the use of a second stage of pretraining with data-rich intermediate supervised tasks might mitigate this brittleness, improving both the robustness and effectiveness of the resulting target task model. We name this approach, which is meant to be combined with existing approaches to pretraining, Supplementary Training on Intermediate Labeled data Tasks (STILTs)." (1)
-  - "Experiments with sentence encoders on STILTs take the following form: (i) A model is first trained on an unlabeled-data task like language modeling that can teach it to reason about the target language; (ii) The model is then further trained on an intermediate, labeled-data task for which ample data is available; (iii) The model is finally fine-tuned further on the target task and evaluated."
-- @Pruksachatkun2020 
-  - "We observe that tasks that require complex reasoning and inference tend to make good intermediate tasks." p. 5236
-  - "We do not find differences in intermediate-task dataset size to have any substantial consistent impact on downstream target task performance." p. 5236
-  - "In addition, we find that smaller target tasks such as RTE, BoolQ, MultiRC, WiC, WSC benefit the most from intermediate-task training." p. 5236
-- @Vu2020 (including on text classification specifically)
-  - "Our results show that transfer learning is more beneficial than previously thought, especially when target task data is scarce, and can improve performance even with low-data source tasks that differ substantially from the target task (e.g., part-ofspeech tagging transfers well to the DROP QA dataset). 
-  - "We also develop task embeddings that can be used to predict the most transferable source tasks for a given target task, and we validate their effectiveness in experiments controlled for source and target data size."
-  - "We show that the benefits of transfer learning are more pronounced than previously thought, especially when target training data is limited, and we develop methods that learn vector representations of tasks that can be used to reason about the relationships between them." p. 7890
-
-@Chalkidis2020: actually just about DAPT, shows it to be useful in the legal domain and that it seems to be generally comparable (in that domain) to pre-training from scratch on the domain. 
