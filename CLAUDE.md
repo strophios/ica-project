@@ -2,6 +2,8 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
+*Last updated: 2026-04-20 (after Tier 1 audit and cleanup).*
+
 ## Project Overview
 
 This project builds an ML system to identify **Immigrant Collective Action (ICA)** events in New York Times articles, enabling expansion of protest event datasets (like the Dynamics of Collective Action / DoCA) without massive manual coding effort. The approach uses **Positive-Unlabeled (PU) learning** with a RoBERTa backbone, built on Keras 3 + TensorFlow, targeting both local macOS (tensorflow-metal) and the HPC cluster "Explorer" (tensorflow + CUDA, paths like `/projects/ahd`).
@@ -27,10 +29,12 @@ This decomposition lets us leverage the larger labeled datasets for CCA and immi
 
 - **Python 3.12**, managed with `uv`
 - Activate environment: `source .venv/bin/activate`
-- Install dependencies: `uv sync`
-- No test framework is currently configured; no `__init__.py` files exist (implicit namespace packages)
+- Install dependencies: `uv sync` (runtime), `uv sync --group dev` (adds pytest)
+- No `__init__.py` files exist (implicit namespace packages)
 - All scripts must be run from the **project root** (imports use `src.*` paths, e.g., `import src.model_setup.dapt_setup`)
 - **Path handling**: scripts switch between local (`~/immigration_project/...`) and cluster (`/projects/ahd`) paths; look for `path_prefix` at the top of each script
+- **Tests**: pytest is configured (`pyproject.toml [tool.pytest.ini_options]`, `pythonpath = ["."]`). Run with `pytest` from the project root. Current coverage is narrow — invariant tests for `FLPULoss` and for the train/val/test split logic in `create_classifier_data` (32 tests, all passing). See `tests/test_flpu_loss.py` and `tests/test_data_splits.py`.
+- **Reproducibility**: training scripts call `keras.utils.set_random_seed(200)` to match the `seed=200` used by the polars `.sample()` splits in `src/data_setup/dapt_data.py`.
 
 ## Architecture: Three-Phase ML Pipeline
 
@@ -47,14 +51,14 @@ The project implements a three-phase pipeline, each with dedicated training scri
 ### Phase 2: Class Prior Estimation — IMPLEMENTED, NEEDS REVISION
 - **Scripts:** `src/prior_estimation/lu_classifier.py` (train L/U classifier), `src/run_prior_estimate.py` (estimate prior)
 - Trains a linear classifier (frozen DAPT backbone + single Dense layer) to distinguish labeled vs. unlabeled samples
-- Feeds predictions into **DEDPUL** (Ivanov 2020) EM algorithm to estimate the positive class prior (α ≈ 0.03 for CCA)
-- `src/prior_estimation/dedpul_em.py` and `dedpul_utils.py` are adapted from the [DEDPUL repo](https://github.com/dimonenka/DEDPUL/). Note: DEDPUL expects reversed prediction semantics (probability of *unlabeled*, not labeled), so predictions/targets are flipped before being passed in.
+- Feeds predictions into **DEDPUL** (Ivanov 2020) EM algorithm to estimate the positive class prior. Current best estimate is π_pos ≈ 0.02 for CCA (robust across `kde_mode` and bandwidth choices); `src/run_cca_classification.py` still passes `prior=0.03` for continuity with existing trained models and is flagged for update on the next CCA retrain.
+- `src/prior_estimation/dedpul_em.py` and `dedpul_utils.py` are adapted from the [DEDPUL repo](https://github.com/dimonenka/DEDPUL/). DEDPUL expects the *probability* of being unlabeled (its convention is 0 = labeled, 1 = unlabeled); `run_prior_estimate.py` applies `sigmoid` + `1 - p` to convert the L/U classifier's logit output. An earlier version fed logits directly (and attributed the effect of the fix to the sigmoid — the bulk of the observed shift was actually DEDPUL's bandwidth grid being mis-calibrated for logit-scale inputs; see `scripts/compare_dedpul_logit_vs_prob.py` for the four-variant attribution table).
 - `src/prior_estimation/ramaswamy2016.py` is an alternative kernel-based prior estimation method (requires `cvxopt`, currently commented out in dependencies)
 
 ### Phase 3: CCA Classification — IMPLEMENTED, NEEDS REVISION
 - **Script:** `src/run_cca_classification.py` (train), `src/eval_cca_classifier.py` (evaluate)
 - Binary classifier: `src/model_setup/classification_setup.py` builds `backbone → [CLS] token → dropout → dense(hidden_dim, relu) → dropout → dense(1, no activation)`
-- Uses **FLPULoss** (`src/loss_functions/loss.py`): focal loss + non-negative PU learning (Kiryo 2017), parameterized by the estimated class prior
+- Uses **FLPULoss** (`src/loss_functions/loss.py`): focal cross-entropy (Lin 2020, γ=2) wrapped in non-negative PU learning (Kiryo 2017), parameterized by the estimated class prior. The focal-loss `alpha` knob has been removed (see the FLPU docstring and `docs/notes/pinned-questions.md` for the cost-sensitive-nnPU interpretation and the reasoning behind defaulting α=off). `docs/notes/pinned-questions.md` also lays out a four-layer composition framing (risk definition / PU estimation / sample allocation / optimization-level regularization) that should guide any future changes to how mechanisms stack.
 - Currently trains with **frozen encoder** and classification head only; per-layer learning rates and encoder unfreezing are planned
 - `src/test_script.py` is a sandbox for local testing with validation-only data and the endpoint layer pattern
 - Current quality: better than chance, but hand review shows the NYT indexer tag definitions are too generous (highest-leverage improvement is refining label definitions)
@@ -87,15 +91,16 @@ The project implements a three-phase pipeline, each with dedicated training scri
 - Class prior estimation via DEDPUL
 
 **Priority open items:**
+- **Tier 2 refactor** (next focus, still being designed): per-layer learning rates + encoder unfreezing, and the structural groundwork for the planned multi-head classifier.
 - Implement ALUM/VAT (Virtual Adversarial Training); incomplete sketch exists in `src/test_module.py`
 - Benchmarking and comparative testing (FLPU vs. ALUM, etc.)
 - Refine NYT indexer tag definitions for CCA and immigration labels (current definitions are too generous)
 - Pull DoCA article headlines (1960-1984) via NYT Archive API to expand training data
 - Build additional classification heads (immigration, US, combined ICA)
-- Per-layer learning rates and encoder unfreezing
 - Hyperparameter search
 - Output calibration (decision threshold, not just raw .5)
 - Hand-label a small PN test set (~200-1000 articles) for proper evaluation
+- Retrain CCA classifier with the corrected prior (π_pos ≈ 0.02 rather than 0.03)
 
 ## Key References (cited in code and memo)
 
