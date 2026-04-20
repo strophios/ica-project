@@ -153,10 +153,13 @@ optimizer = keras.optimizers.AdamW(
 )  # Need to better set these
 
 # Create the losses.
-# The prior=0.03 value is the midpoint of the old (pre-C1-fix) DEDPUL
-# estimates. The post-fix estimate on the cached val+train L/U predictions
-# gives π_pos ≈ 0.02 (see scripts/compare_dedpul_logit_vs_prob.py and
-# run_prior_estimate.py). Next training run should use the corrected prior.
+# prior=0.03 is stale: it was the midpoint of two pre-fix DEDPUL estimates
+# that were themselves suffering from a bandwidth-scale bug (see
+# scripts/compare_dedpul_logit_vs_prob.py and the comment block in
+# run_prior_estimate.py). The corrected estimate on the cached L/U
+# predictions is π_pos ≈ 0.02, robust across kde_mode and bandwidth
+# choices. Kept at 0.03 here for continuity with existing trained models;
+# set to 0.02 on the next CCA retrain.
 flpu_loss = src.loss_functions.loss.FLPULoss(prior=0.03, kiryo_clawback=False)
 
 # With a ~3% class prior and 50/50-weighted validation batches, BinaryAccuracy

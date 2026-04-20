@@ -17,12 +17,16 @@ Design choices:
 
   - Tests use small, hand-constructable batches with known expected behavior
     rather than fitting on real data.
-  - Tests assert *invariants* (loss is non-negative; order doesn't matter;
-    correct predictions give low loss) rather than specific numerical values,
-    so they survive minor implementation changes.
-  - One test (`test_known_value_easy_batch`) does pin a specific numerical
-    behavior — that an easy batch under the default config gives loss ≈ 0
-    after the negative-risk clipping. This locks in the no-clawback math.
+  - Most tests assert *invariants* (loss is non-negative; order doesn't
+    matter; correct predictions give low loss) rather than specific numerical
+    values, so they survive minor implementation changes.
+  - One test (`test_matches_numpy_reference`) pins the full numerical value
+    against an independent numpy implementation of FLPU. This is the strongest
+    test in the suite and catches algorithmic errors the structural tests miss
+    (mask swaps, prior misplacement, denominator swaps, etc.).
+  - Separate classes exercise the clawback branch (two sub-cases), the
+    edge-case batches (all-positive / all-unlabeled), mixed_float16 dtype
+    handling, and the focal-loss shape contract that FLPU's masking relies on.
 """
 
 import numpy as np
@@ -55,6 +59,68 @@ def _batch(positive_logits, unlabeled_logits):
 def _scalar(loss_output):
     """Convert a Keras Loss return value (TF tensor) to a Python float."""
     return float(np.asarray(loss_output))
+
+
+def _numpy_reference_flpu(
+    y_true,
+    y_pred,
+    prior,
+    focal_gamma=2.0,
+    nn_beta=0.0,
+    nn_gamma=1.0,
+    kiryo_clawback=False,
+):
+    """Reference implementation of FLPU computed in numpy.
+
+    Used to cross-check the production FLPU against an independent computation
+    of the same formula. If the production code has a mask swap, denominator
+    swap, prior misplacement, or sign error in the bias-correction term,
+    this reference disagrees.
+
+    Mirrors the math in `src/loss_functions/loss.py` but constructs every
+    intermediate in numpy from primitives, so a bug in the Keras-side
+    implementation does not mask itself here.
+    """
+    y_true = np.asarray(y_true).reshape(-1).astype(np.float64)
+    y_pred = np.asarray(y_pred).reshape(-1).astype(np.float64)
+
+    def sigmoid(x):
+        return 1.0 / (1.0 + np.exp(-x))
+
+    def focal(y, logit):
+        """Focal loss without class balancing, per Keras's
+        `BinaryFocalCrossentropy(apply_class_balancing=False, gamma=γ,
+        from_logits=True, reduction='none')`."""
+        p = sigmoid(logit)
+        # p_t is the predicted probability of the true class
+        p_t = np.where(y == 1, p, 1.0 - p)
+        # Clip to avoid log(0) in case of extreme logits
+        p_t = np.clip(p_t, 1e-12, 1.0 - 1e-12)
+        return -((1.0 - p_t) ** focal_gamma) * np.log(p_t)
+
+    positive = (y_true == 1).astype(np.float64)
+    unlabeled = (y_true == 0).astype(np.float64)
+    n_positive = max(positive.sum(), 1.0)
+    n_unlabeled = max(unlabeled.sum(), 1.0)
+
+    fl_as_labeled = focal(y_true, y_pred)
+    fl_flipped = focal(1 - y_true, y_pred)
+
+    y_positive = fl_as_labeled * positive
+    y_unlabeled = fl_as_labeled * unlabeled
+    y_positive_inv = fl_flipped * positive
+
+    positive_risk = prior * y_positive.sum() / n_positive
+    negative_risk = (
+        y_unlabeled.sum() / n_unlabeled
+        - prior * y_positive_inv.sum() / n_positive
+    )
+
+    if not kiryo_clawback:
+        return float(positive_risk + max(0.0, negative_risk))
+    if negative_risk < -nn_beta:
+        return float(-nn_gamma * negative_risk)
+    return float(positive_risk + negative_risk)
 
 
 # -----------------------------------------------------------------------------
@@ -189,4 +255,228 @@ class TestPriorSensitivity:
         assert out_low != out_high, (
             f"Different priors should give different losses, "
             f"got {out_low} (prior=0.05) vs {out_high} (prior=0.5)"
+        )
+
+    def test_higher_prior_amplifies_adversarial_loss(self):
+        """On an adversarial batch (positives misclassified as negative,
+        unlabeled misclassified as positive), both the positive-risk term
+        and the positive-as-negative bias-correction term grow with π_p.
+        The positive_risk term dominates, so higher prior should give
+        higher total loss. This is a stronger check than mere inequality:
+        it verifies the direction of sensitivity is correct, which mere
+        inequality would miss if the prior were accidentally applied to
+        the wrong term."""
+        y_true, y_pred = _batch(
+            positive_logits=[-3.0, -3.0, -3.0],  # positives predicted very negative
+            unlabeled_logits=[3.0, 3.0, 3.0],  # unlabeled predicted very positive
+        )
+        out_low = _scalar(FLPULoss(prior=0.05)(y_true, y_pred))
+        out_mid = _scalar(FLPULoss(prior=0.25)(y_true, y_pred))
+        out_high = _scalar(FLPULoss(prior=0.5)(y_true, y_pred))
+
+        assert out_low < out_mid < out_high, (
+            f"Expected monotonic increase with prior, got "
+            f"π=0.05: {out_low}, π=0.25: {out_mid}, π=0.5: {out_high}"
+        )
+
+
+# -----------------------------------------------------------------------------
+# Numerical correctness vs independent reference
+# -----------------------------------------------------------------------------
+
+class TestNumpyReference:
+    """Cross-check the production FLPU against a numpy reference implementation
+    computed from the formula independently. This is the strongest test in the
+    suite — it catches mask swaps, denominator swaps, sign errors, and prior
+    misplacements that pure-structural tests would miss."""
+
+    def test_matches_numpy_reference_asymmetric_batch(self):
+        """A multi-sample batch with asymmetric positive/unlabeled counts and
+        logits spanning the sigmoid domain. Structural tests with 1-of-each
+        batches cannot distinguish many plausible implementation bugs
+        (e.g., swapping n_positive and n_unlabeled gives the same answer
+        when both are 1). This test uses 3 positives and 4 unlabeled with
+        varied logits so those degeneracies are broken."""
+        loss = FLPULoss(prior=0.1, focal_gamma=2.0)
+        y_true, y_pred = _batch(
+            positive_logits=[2.0, 1.0, -1.0],
+            unlabeled_logits=[-3.0, -1.0, 0.0, 1.0],
+        )
+        actual = _scalar(loss(y_true, y_pred))
+        expected = _numpy_reference_flpu(
+            y_true,
+            y_pred,
+            prior=0.1,
+            focal_gamma=2.0,
+        )
+        np.testing.assert_allclose(actual, expected, rtol=1e-4)
+
+    def test_matches_numpy_reference_gamma_zero(self):
+        """With γ=0, focal loss reduces to plain BCE. Test that FLPU still
+        matches the reference in this simpler case — a check that the
+        reference and production agree on the easy case before trusting
+        agreement on harder ones."""
+        loss = FLPULoss(prior=0.2, focal_gamma=0.0)
+        y_true, y_pred = _batch(
+            positive_logits=[1.5, -0.5],
+            unlabeled_logits=[0.3, -1.2, 0.8],
+        )
+        actual = _scalar(loss(y_true, y_pred))
+        expected = _numpy_reference_flpu(
+            y_true, y_pred, prior=0.2, focal_gamma=0.0
+        )
+        np.testing.assert_allclose(actual, expected, rtol=1e-4)
+
+
+# -----------------------------------------------------------------------------
+# Kiryo clawback branch
+# -----------------------------------------------------------------------------
+
+class TestKiryoClawback:
+    """The clawback branch (`kiryo_clawback=True`) has its own math: when
+    `negative_risk < -nn_beta`, return `-nn_gamma * negative_risk` instead
+    of clipping. It uses `ops.cond` with Python lambdas and was previously
+    untested — this suite exercises both the in-bound and out-of-bound
+    cases."""
+
+    def test_in_bound_returns_positive_plus_negative(self):
+        """When negative_risk ≥ -nn_beta (in-bound), clawback returns
+        `positive_risk + negative_risk` directly (no clipping, no flip)."""
+        loss_cb = FLPULoss(prior=0.1, kiryo_clawback=True)
+        # Adversarial batch: positives misclassified, unlabeled misclassified.
+        # negative_risk will be positive (R_u^- large, π * R_p^- small),
+        # so we are in-bound.
+        y_true, y_pred = _batch(
+            positive_logits=[-3.0, -3.0],
+            unlabeled_logits=[3.0, 3.0, 3.0],
+        )
+        out = _scalar(loss_cb(y_true, y_pred))
+        expected = _numpy_reference_flpu(
+            y_true, y_pred, prior=0.1, kiryo_clawback=True
+        )
+        np.testing.assert_allclose(out, expected, rtol=1e-4)
+        # Sanity: the in-bound case returns the raw sum, which should be
+        # positive on an adversarial batch.
+        assert out > 0
+
+    def test_out_of_bound_returns_flipped_negative_risk(self):
+        """When negative_risk < -nn_beta (out-of-bound), clawback returns
+        `-nn_gamma * negative_risk`, which is positive. Uses an easy batch
+        where negative_risk goes very negative (positives predicted
+        correctly but still contribute large positive-as-negative loss)."""
+        loss_cb = FLPULoss(prior=0.5, kiryo_clawback=True, nn_gamma=1.0)
+        # Easy batch: positive at logit=+10, unlabeled at logit=-10.
+        # negative_risk = ~0 - 0.5 × large ≈ very negative → clawback fires.
+        y_true, y_pred = _batch(
+            positive_logits=[10.0],
+            unlabeled_logits=[-10.0],
+        )
+        out = _scalar(loss_cb(y_true, y_pred))
+        expected = _numpy_reference_flpu(
+            y_true, y_pred, prior=0.5, kiryo_clawback=True, nn_gamma=1.0
+        )
+        np.testing.assert_allclose(out, expected, rtol=1e-4)
+        # The clawback return value is -γ * negative_risk, so it is positive.
+        assert out > 0
+
+    def test_clawback_nn_gamma_scales_output(self):
+        """In the out-of-bound branch, the return is `-nn_gamma *
+        negative_risk`, so doubling nn_gamma should double the output."""
+        y_true, y_pred = _batch([10.0], [-10.0])
+
+        out_g1 = _scalar(FLPULoss(prior=0.5, kiryo_clawback=True, nn_gamma=1.0)(y_true, y_pred))
+        out_g2 = _scalar(FLPULoss(prior=0.5, kiryo_clawback=True, nn_gamma=2.0)(y_true, y_pred))
+
+        np.testing.assert_allclose(out_g2, 2.0 * out_g1, rtol=1e-4)
+
+
+# -----------------------------------------------------------------------------
+# Edge-case batches
+# -----------------------------------------------------------------------------
+
+class TestEdgeCaseBatches:
+    """The `min_count=1.0` floor in FLPU exists specifically to handle
+    batches that are missing one class entirely. These tests exercise that
+    path and lock in the intended behavior."""
+
+    def test_all_positive_batch(self):
+        """No unlabeled samples. y_unlabeled = 0, y_positive_inv contributes
+        nothing to negative_risk since there's no unlabeled-as-negative term,
+        so negative_risk = -π_p × mean(y_positive_inv) ≤ 0. Under
+        no-clawback clipping, total = positive_risk."""
+        loss = FLPULoss(prior=0.1)
+        y_true, y_pred = _batch(
+            positive_logits=[1.0, 2.0, 3.0],
+            unlabeled_logits=[],
+        )
+        actual = _scalar(loss(y_true, y_pred))
+        expected = _numpy_reference_flpu(y_true, y_pred, prior=0.1)
+        np.testing.assert_allclose(actual, expected, rtol=1e-4)
+        assert actual >= 0
+
+    def test_all_unlabeled_batch(self):
+        """No positive samples. y_positive = 0, y_positive_inv = 0. Total
+        reduces to `max(0, mean(focal(y=0, x_u)))`, i.e., the mean
+        unlabeled-as-negative loss."""
+        loss = FLPULoss(prior=0.1)
+        y_true, y_pred = _batch(
+            positive_logits=[],
+            unlabeled_logits=[-1.0, -2.0, -3.0],
+        )
+        actual = _scalar(loss(y_true, y_pred))
+        expected = _numpy_reference_flpu(y_true, y_pred, prior=0.1)
+        np.testing.assert_allclose(actual, expected, rtol=1e-4)
+        assert actual >= 0
+
+
+# -----------------------------------------------------------------------------
+# Production configuration: mixed_float16 and the focal-loss shape contract
+# -----------------------------------------------------------------------------
+
+class TestProductionConfiguration:
+    """FLPU is used in scripts with mixed_float16 dtype policy. The mask
+    tensors in FLPU are explicitly cast to float32, which creates a dtype
+    interaction with pn_loss under mixed precision. Also, FLPU's masking
+    relies on `BinaryFocalCrossentropy(reduction='none')` producing per-
+    sample output matching the batch dim; if a Keras upgrade ever silently
+    changes that contract, the masking silently broadcasts and produces
+    garbage. These tests are the tripwires for those regressions."""
+
+    def test_focal_loss_produces_per_sample_output(self):
+        """Lock in the shape contract FLPU's masking depends on. If this
+        fails, Keras's reduction='none' semantics have changed and FLPU's
+        math is silently wrong regardless of how clean the tests below
+        look — a dedicated early-warning tripwire."""
+        fl = keras.losses.BinaryFocalCrossentropy(
+            apply_class_balancing=False,
+            gamma=2.0,
+            from_logits=True,
+            reduction="none",
+        )
+        y_true = np.array([1.0, 0.0, 1.0, 0.0], dtype=np.float32)
+        y_pred = np.array([[2.0], [-1.0], [0.5], [-0.5]], dtype=np.float32)
+        out = fl(y_true, y_pred)
+        out_arr = np.asarray(out)
+        assert out_arr.shape == (4,), (
+            f"Expected per-sample focal loss shape (4,), got {out_arr.shape}. "
+            f"Keras's reduction='none' semantics may have changed; FLPU's "
+            f"masking in src/loss_functions/loss.py will silently produce "
+            f"wrong losses if this contract has broken."
+        )
+
+    def test_flpu_accepts_float16_predictions(self):
+        """Simulates the mixed_float16 production configuration where the
+        classifier head produces float16 logits. FLPU must still produce
+        a finite loss. Does not flip the global dtype policy because that
+        has side effects on other tests; just feeds float16 input."""
+        loss = FLPULoss(prior=0.1)
+        y_true, y_pred = _batch(
+            positive_logits=[1.0, 2.0],
+            unlabeled_logits=[-1.0, -2.0, -3.0],
+        )
+        y_pred_fp16 = y_pred.astype(np.float16)
+        out = _scalar(loss(y_true, y_pred_fp16))
+        assert np.isfinite(out), (
+            f"FLPU produced non-finite loss under float16 inputs: {out}. "
+            f"mixed_float16 training would immediately NaN."
         )

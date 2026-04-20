@@ -26,7 +26,9 @@ class FLPULoss(keras.losses.Loss):
       - R_p^+(g) = mean focal loss over positives, treated as positive.
       - R_u^-(g) = mean focal loss over unlabeled samples, treated as negative.
       - R_p^-(g) = mean focal loss over positives, treated as negative
-                   (the bias-correction term).
+                   (the bias-correction term; both "negative-side" terms
+                   come from the same expectation π_n·E_{p_n}[ℓ], which is
+                   why they must share coefficients — see "Why no α" below).
 
     Parameters
     ----------
@@ -49,23 +51,41 @@ class FLPULoss(keras.losses.Loss):
 
     Why no α (focal-loss class balancing)
     --------------------------------------
-    Standard focal loss has an α knob (e.g., α=0.25 in Lin et al. 2020) that
-    asymmetrically weights the y=1 vs y=0 sample contributions. Applied
-    directly in FLPU, this asymmetry compounds with the π_p prior weighting
-    in ways that don't have a clean theoretical justification: the same
-    labeled-positive sample gets different α weights in its "positive" role
-    (R_p^+) vs. its "positive-treated-as-negative" role (R_p^-), despite
-    both terms being part of the same bias-corrected risk estimate.
+    Standard focal loss has an α knob (e.g., α=0.25 in Lin et al. 2020)
+    that weights y=1 samples by α and y=0 samples by (1-α). Plugged into
+    FLPU, this turns out to be a well-defined construction: both
+    "negative-side" terms (R_u^-, the unlabeled risk, and R_p^-, the
+    bias-correction) receive the same (1-α) coefficient (because Keras's
+    focal loss applies the weight by label and both are y=0), so the
+    underlying distributional identity is preserved. The resulting
+    estimator is unbiased (up to the max(0, ·) clip) for a
+    *cost-sensitive* nnPU risk with cost ratio α : (1-α). It is not
+    "broken" — it is cost-sensitive PU learning.
 
-    Ji et al. 2023's Eq. 14 writes a uniform α across all three terms, which
-    factors out as a global scalar multiplier on the entire loss — redundant
-    with the learning rate. We therefore drop α entirely. The class prior π_p
-    is what does the class balancing in nnPU; the focal γ is what
-    down-weights easy examples. They serve distinct purposes; α has no
-    distinct purpose to serve here.
+    We nonetheless default to α=off, for three reasons:
+
+    1. For the CCA head, we do not have a deliberate cost-sensitivity
+       preference (both false positives and false negatives are roughly
+       equally costly for the research goal of building a filterable
+       candidate set).
+    2. Lin 2020's canonical α=0.25 specifically down-weights the positive
+       class. For a rare-positive PU problem, this is the wrong sign of
+       adjustment.
+    3. If we do want cost-sensitive PU later (perhaps on a different head),
+       we should parameterize α_pos and α_neg directly as deliberate knobs
+       rather than importing them from the Lin 2020 α, (1-α) convention.
+
+    Ji et al. 2023's Eq. 14 writes a uniform α across all three terms,
+    which under the default `nn_beta=0` factors out as a global scalar
+    multiplier on the loss (redundant with the learning rate). This
+    "factors out" property does NOT hold when `nn_beta > 0`, because the
+    clawback threshold `R_u^- - π_p · R_p^- < -nn_beta` is not α-invariant
+    — so if anyone ever turns on nn_beta>0, the Ji 2023 uniform-α reading
+    needs a fresh look.
 
     See `docs/notes/pinned-questions.md` for the full discussion of how the
-    different mechanisms (nnPU prior, focal modulation, ALUM) compose.
+    different mechanisms (nnPU identity, focal γ, α as cost-sensitivity,
+    Ratio Batch, ALUM) compose across four layers of the loss stack.
     """
 
     def __init__(
@@ -113,13 +133,21 @@ class FLPULoss(keras.losses.Loss):
         n_unlabeled = ops.maximum(ops.sum(unlabeled), self.min_count)
 
         # Per-sample focal loss over the whole batch; we zero out irrelevant
-        # entries via the masks below. We evaluate over the full batch (rather
-        # than slicing) to keep the graph static for autograph/jit.
+        # entries via the masks below. We evaluate over the full batch
+        # (rather than slicing) to keep the graph static for autograph/jit.
+        #
+        # Shape expectation: `pn_loss` is 1-D of length batch_size, matching
+        # `positive` and `unlabeled` after their reshape. This depends on
+        # `BinaryFocalCrossentropy(reduction="none")` returning per-sample
+        # losses. A Python-level assert here would not be a runtime guard:
+        # under `tf.function` tracing, asserts run only at trace time, and
+        # an asserted shape equality on tensors with partially-unknown dims
+        # could silently pass. Instead, the shape invariant is guarded by
+        # the test suite (tests/test_flpu_loss.py, TestOutputStructure and
+        # the production-configuration test for mixed_float16). If a Keras
+        # upgrade ever changes reduction="none" semantics, those tests are
+        # the intended tripwire, not this comment.
         pn_loss = self.focal_loss(y_true, y_pred)
-        assert pn_loss.shape == positive.shape, (
-            f"Loss component output ({pn_loss.shape}) and masking tensor "
-            f"({positive.shape}) must have the same shape."
-        )
 
         # Three FLPU components.
         y_positive = pn_loss * positive  # positives, treated as positive
