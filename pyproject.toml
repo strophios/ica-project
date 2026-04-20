@@ -19,3 +19,14 @@ dependencies = [
   "pydot>=4.0.1",
   "graphviz>=0.21",
 ]
+
+[dependency-groups]
+dev = [
+    "pytest>=9.0.3",
+]
+
+[tool.pytest.ini_options]
+# Run pytest from the project root; src/ uses implicit namespace packages,
+# so we add "." to pythonpath to allow `import src.foo.bar` to resolve.
+pythonpath = ["."]
+testpaths = ["tests"]
