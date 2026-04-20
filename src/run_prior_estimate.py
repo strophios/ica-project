@@ -60,11 +60,19 @@ else:
     lu_targets = np.load(f"{path_prefix}/cca_set/lu/lu_targets.npy")
 
 lu_preds = np.reshape(lu_preds, lu_preds.shape[0])
-# Note that DEDPUL wants the reverse of what everyone else does: they want to predict
-# the probability of being *unlabeled*, rather than labeled, so we have to reverse our
-# predictions and targets (i.e., 0 = labeled, 1 = unlabeled)
-lu_preds_rev = lu_preds - (2 * lu_preds)
-lu_targets_rev = lu_targets - (2 * lu_targets) + 1  # could also use np.absolute
+# DEDPUL wants the *probability of being unlabeled* (its convention is 0 = labeled
+# positive, 1 = unlabeled), in [0, 1]. Our `lu_classifier` outputs raw logits for
+# the labeled class (no final activation; loss uses from_logits=True). To convert:
+#   P(labeled | x)   = sigmoid(logit)
+#   P(unlabeled | x) = 1 - sigmoid(logit)
+# An earlier version of this file did `lu_preds - 2*lu_preds == -lu_preds`, which
+# is the unlabeled-class *logit*, not a probability — DEDPUL's KDE step then ran in
+# the wrong space. See `scripts/compare_dedpul_logit_vs_prob.py` for the empirical
+# comparison; switching to the sigmoid-then-subtract form changes π_pos from
+# ~0.04 to ~0.02 on the cached L/U predictions, which is large enough to matter
+# for downstream FLPU training.
+lu_preds_rev = 1.0 - (1.0 / (1.0 + np.exp(-lu_preds)))
+lu_targets_rev = 1 - lu_targets
 
 # Feed those predictions into one of the DEDPUL algorithms
 diffs = src.prior_estimation.dedpul_em.estimate_diff(
@@ -73,6 +81,16 @@ diffs = src.prior_estimation.dedpul_em.estimate_diff(
 alpha, posterior = src.prior_estimation.dedpul_em.estimate_poster_em(
     diffs, lu_preds_rev, lu_targets_rev
 )
-# Current estimates, based solely on validation data:
-# w/ tune = False: 0.98
-# w/ tune = True: 0.9596673650517707
+# Current estimates (from the cached val+train L/U predictions):
+#
+# Pre-fix (logits passed directly to DEDPUL — incorrect):
+#   tune=False → α=0.98     → π_pos ≈ 0.02
+#   tune=True  → α=0.9597   → π_pos ≈ 0.04
+#   midpoint:  → α≈0.97     → π_pos ≈ 0.03  (this is the value baked into
+#                                            run_cca_classification.py)
+#
+# Post-fix (sigmoid-then-reverse — correct):
+#   tune=True  → α=0.9800   → π_pos ≈ 0.02  (see scripts/compare_dedpul_logit_vs_prob.py)
+#
+# So the correct prior is closer to 0.02 than 0.03. When CCA training is
+# rerun, FLPULoss(prior=...) should be updated accordingly.
