@@ -12,10 +12,9 @@ dependencies = [
   "keras_hub",
   "numpy",
   "polars",
-  # "cvxopt>=1.3.2", # these are only needed if we decide to use
-  # "scipy>=1.16.3", # the Ramaswamy et al 2016 prior estimation method
+  # "cvxopt>=1.3.2",  # only needed for ramaswamy2016 prior estimation (not in use)
   "scikit-learn>=1.7.2",
-  "scipy>=1.16.3",
+  "scipy>=1.16.3",  # used by DEDPUL (gaussian_kde in dedpul_em.py)
   "pandas>=2.3.3",
   "pydot>=4.0.1",
   "graphviz>=0.21",

@@ -21,6 +21,10 @@ keras.config.set_dtype_policy(
     "mixed_float16"
 )  # want to make sure this works on Explorer
 
+# Seed Python, NumPy, and the Keras backend RNG so training is reproducible.
+# Matches the seed=200 used for the polars `.sample()` splits.
+keras.utils.set_random_seed(200)
+
 # Preprocessing params
 # SEQ_LENGTH and BATCH_SIZE of 128 for local testing (see below for rough assessment of how
 # much truncation that causes); maybe bump SEQ_LENGTH back to 256 for Explorer? Not sure.
@@ -30,25 +34,28 @@ SEQ_LENGTH = 128
 # Training params
 EPOCHS = 7
 
-path_prefix = os.path.expanduser(
-    "~/immigration_project/00_ML_data_expansion/00_explorer"
-)
-path_prefix = os.path.abspath("/project/ahd")
+# Local path (commented out when running on cluster); cluster path below.
+# A proper platform-aware paths module is a Tier 2 refactor item.
+# path_prefix = os.path.expanduser(
+#     "~/immigration_project/00_ML_data_expansion/00_explorer"
+# )
+path_prefix = os.path.abspath("/projects/ahd")
 
 # ---- Load and Process Data ----
-ldc_data = src.data_setup.dapt_data.data_from_parquet(
-    path_prefix,
-    "ldc_corpus",
-    addl_columns=["cca", "cca_descriptor", "immig", "immig_descriptor"],
-)  # the function includes "ldc_corpus" as a default arg
-
-ldc_data = src.data_setup.dapt_data.create_classifier_data(
-    ldc_data, separate_labels=True
-)
-
-# note: creating the dataset takes multiple minutes with the full dataset on Explorer
-# so I check to see whether I've done it already, only do so if not (then save it)
+# Load + split only if the cached tf.data datasets don't already exist on
+# disk; otherwise skip straight to loading from disk. (Building the polars
+# dataframe and turning it into tensor slices takes minutes on the full
+# corpus, and the old code ran these unconditionally even when it was about
+# to overwrite `ldc_data` with the cache load below.)
 if not os.path.isdir(f"{path_prefix}/cca_set"):
+    ldc_data = src.data_setup.dapt_data.data_from_parquet(
+        path_prefix,
+        "ldc_corpus",
+        addl_columns=["cca", "cca_descriptor", "immig", "immig_descriptor"],
+    )
+    ldc_data = src.data_setup.dapt_data.create_classifier_data(
+        ldc_data, separate_labels=True
+    )
     os.mkdir(f"{path_prefix}/cca_set")
     for split in ldc_data.keys():
         for pu in ldc_data[split].keys():
@@ -145,14 +152,30 @@ optimizer = keras.optimizers.AdamW(
     weight_decay=5e-3,  # not sure the optimum weight decay
 )  # Need to better set these
 
-# Create the losses
+# Create the losses.
+# The prior=0.03 value is the midpoint of the old (pre-C1-fix) DEDPUL
+# estimates. The post-fix estimate on the cached val+train L/U predictions
+# gives π_pos ≈ 0.02 (see scripts/compare_dedpul_logit_vs_prob.py and
+# run_prior_estimate.py). Next training run should use the corrected prior.
 flpu_loss = src.loss_functions.loss.FLPULoss(prior=0.03, kiryo_clawback=False)
-# note that the current implementation of flpu_loss assumes from_logits = True
 
+# With a ~3% class prior and 50/50-weighted validation batches, BinaryAccuracy
+# alone is misleading (the model can score well by being very cautious about
+# positives). Precision/Recall/PR-AUC capture the actual classification
+# behavior under imbalance.
+#
+# Thresholds are set for logit output: sigmoid(0) = 0.5, so threshold=0.0
+# on a logit is equivalent to threshold=0.5 on a probability. (AUC takes
+# logits directly via from_logits=True.)
+#
+# F1 is not included as a metric because keras.metrics.F1Score requires
+# threshold in (0, 1] (probability output); computing F1 from the logged
+# precision and recall post-hoc is straightforward.
 metrics_list = [
-    # keras.metrics.F1Score(threshold=0.0),  # threshold = 0 cause from_logits = True
-    # keras.metrics.BinaryCrossentropy(from_logits=True),
-    keras.metrics.BinaryAccuracy(),
+    keras.metrics.BinaryAccuracy(threshold=0.0),
+    keras.metrics.Precision(thresholds=0.0, name="precision"),
+    keras.metrics.Recall(thresholds=0.0, name="recall"),
+    keras.metrics.AUC(curve="PR", from_logits=True, name="pr_auc"),
 ]
 
 # Compile the model
@@ -217,8 +240,17 @@ test_results = cca_classifier.evaluate(
     test_set, steps=validation_steps, return_dict=True
 )
 
+# Per-subset prediction for qualitative review. shuffle_buffer=0 means no
+# shuffling — important for test data so the scores line up with the order
+# of the underlying polars dataframe when we attach them in eval.
+#
+# TODO: the use of `steps=validation_steps` here is wrong — it was computed
+# from the val-positives count, not test. Combined with the .repeat() inside
+# `dataset_create`, this makes predict() loop over the test set and produce
+# duplicate predictions, which downstream code works around by slicing to
+# the real dataframe length. A proper fix is to use a finite (non-repeated)
+# dataset for prediction, sized to the actual data.
 test_pos = tf.data.Dataset.load(f"{path_prefix}/cca_set/test_pos.tf")
-# test_pos = test_pos.map(preprocess, num_parallel_calls = tf.data.AUTOTUNE)
 test_pos = src.data_setup.dapt_data.dataset_create(
     shuffle_buffer=0, batch_size=BATCH_SIZE, preprocessor=preprocess, data=test_pos
 )
@@ -228,7 +260,7 @@ pos_scores = cca_classifier.predict(
 
 test_unl = tf.data.Dataset.load(f"{path_prefix}/cca_set/test_unl.tf")
 test_unl = src.data_setup.dapt_data.dataset_create(
-    shuffle_buffer, BATCH_SIZE, preprocess, data=test_unl
+    shuffle_buffer=0, batch_size=BATCH_SIZE, preprocessor=preprocess, data=test_unl
 )
 unl_scores = cca_classifier.predict(
     test_unl, batch_size=BATCH_SIZE, steps=validation_steps

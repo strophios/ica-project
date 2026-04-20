@@ -24,6 +24,12 @@ keras.config.set_dtype_policy(
     "mixed_float16"
 )  # want to make sure this works on Explorer
 
+# Seed Python, NumPy, and the Keras backend RNG. Matches the seed=200 used by
+# polars `.sample()` calls elsewhere in the pipeline so the whole pipeline is
+# reproducible. Needs to happen before any model construction or dataset
+# creation (for sample_from_datasets / shuffle / MaskedLMMaskGenerator).
+keras.utils.set_random_seed(200)
+
 # Preprocessing params
 # SEQ_LENGTH and BATCH_SIZE of 128 for local testing (see below for rough assessment of how
 # much truncation that causes); maybe bump SEQ_LENGTH back to 256 for Explorer? Not sure.
@@ -220,26 +226,3 @@ dapt_model.save(f"{path_prefix}/dapt_current_model.keras")
 # Epoch 3: Loss: 0.4024 - sparse_categorical_accuracy: 0.7157 - val_loss: 0.3660 - val_sparse_categorical_accuracy: 0.7380
 
 # TF 2.19.1
-
-
-EPOCHS = 1
-steps_per_epoch = 100
-validation_steps = 10
-for test_size in batch_sizes:
-    preprocess = CustomPreprocessor(SEQ_LENGTH, MASK_RATE, PREDICTIONS_PER_SEQ)
-    shuffle_buffer = 10000  # keep in mind that I ideally want to increase this, but may actually need to decrease it
-    training_set = src.data_setup.dapt_data.dataset_create(
-        shuffle_buffer,
-        test_size,
-        preprocess,
-        path=f"{path_prefix}/dapt_training_set.tf",
-    )
-    validation_set = src.data_setup.dapt_data.dataset_create(
-        shuffle_buffer,
-        test_size,
-        preprocess,
-        path=f"{path_prefix}/dapt_validation_set.tf",
-    )
-    dapt_model = src.model_setup.dapt_setup.get_DAPT_model(
-        PREDICTIONS_PER_SEQ, path=f"{path_prefix}/lm_head_weights.npy"
-    )

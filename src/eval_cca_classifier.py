@@ -15,10 +15,18 @@ import src.loss_functions.loss
 path_prefix = os.path.expanduser(
     "~/immigration_project/00_ML_data_expansion/00_explorer"
 )
-# path_prefix = os.path.abspath("/project/ahd")
+# path_prefix = os.path.abspath("/projects/ahd")
+
+# Seed for reproducibility (shouldn't matter much at eval time but keeps
+# any incidental shuffling / sampling deterministic).
+keras.utils.set_random_seed(200)
 
 BATCH_SIZE = 256
 SEQ_LENGTH = 128
+# TODO: this is the val_steps number (from 1017 val positives). Using it as
+# the `steps=` argument to predict() below makes predictions loop over the
+# (repeated) test data; downstream code slices back to the real dataframe
+# length. A cleaner fix is to size steps from the actual test split.
 validation_steps = math.floor(1017 / (BATCH_SIZE / 2))
 
 preprocess = src.preproc.preprocessor.ClassifierPreprocessor(

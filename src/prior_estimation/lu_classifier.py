@@ -18,6 +18,10 @@ keras.config.set_dtype_policy(
     "mixed_float16"
 )  # want to make sure this works on Explorer
 
+# Seed Python, NumPy, and the Keras backend RNG so the whole pipeline is
+# reproducible; matches the seed=200 used in polars `.sample()` splits.
+keras.utils.set_random_seed(200)
+
 # Preprocessing params
 # SEQ_LENGTH and BATCH_SIZE of 128 for local testing (see below for rough assessment of how
 # much truncation that causes); maybe bump SEQ_LENGTH back to 256 for Explorer? Not sure.
@@ -90,7 +94,10 @@ if not os.path.isdir(f"{path_prefix}/cca_set"):
 else:
     split = ["train", "val", "test"]
     pu = ["pos", "unl"]
-    ldc_data = {}
+    # Pre-populate the nested dict so the inner assignment below doesn't
+    # raise KeyError. (Earlier version had `ldc_data = {}`, which only
+    # worked on the cold-start path above.)
+    ldc_data = {s: {} for s in split}
     for i in split:
         for t in pu:
             ldc_data[i][t] = tf.data.Dataset.load(f"{path_prefix}/cca_set/{i}_{t}.tf")
@@ -148,8 +155,13 @@ lu_classifier.compile(
 
 # Set callbacks
 callbacks_list = [
-    # Early stopping
-    keras.callbacks.EarlyStopping(monitor="recall", min_delta=0.005, verbose=1),
+    # Early stopping on the validation recall. Keras names validation metrics
+    # by prepending "val_" to the training metric name; monitoring plain
+    # "recall" would watch training recall instead, which is easier to game
+    # and not what we want for a stopping criterion.
+    keras.callbacks.EarlyStopping(
+        monitor="val_recall", mode="max", min_delta=0.005, verbose=1
+    ),
 ]
 
 # ---- TRAIN THE MODEL ----

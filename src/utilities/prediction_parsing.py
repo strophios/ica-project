@@ -1,8 +1,11 @@
 import re
-import numpy as np
+import numpy as np  # noqa: F401  (kept for downstream callers that import via *)
 import keras
 import tensorflow as tf
-import torch
+
+# `torch` is only needed when the Keras backend is "torch". Importing it
+# unconditionally fails in TF-only environments, which is what the project
+# normally uses. Import lazily inside the two code paths that need it.
 
 
 def get_predicted_tokens(preds, tokenizer, as_list=False):
@@ -29,6 +32,8 @@ def get_predicted_tokens(preds, tokenizer, as_list=False):
 
 def get_tokens_as_list(token_ids, tokenizer):
     if keras.backend.backend() == "torch":
+        import torch  # lazy: only needed on the torch backend
+
         if isinstance(token_ids, torch.Tensor):
             token_ids = token_ids.detach().cpu().tolist()
     tmp_vocab = list(tokenizer.get_vocabulary())

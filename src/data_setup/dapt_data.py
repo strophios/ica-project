@@ -12,7 +12,14 @@ def data_from_parquet(path_prefix, db_folder="ldc_corpus", addl_columns=None):
 
     ldc_data = ldc_pq.select(pl.col(cols_to_select))
     ldc_data = ldc_data.collect()
-    # Replacing missing headlines and leads with empty strings
+    # Replace missing headlines and leads with empty strings. Missing values
+    # may appear either as the literal string "NA" (legacy upstream export
+    # convention) or as a true polars null; both need to become "" before
+    # the string concatenation below, which would otherwise raise on None.
+    ldc_data = ldc_data.with_columns(
+        pl.col("headline").fill_null(""),
+        pl.col("lead_paragraph").fill_null(""),
+    )
     ldc_data = ldc_data.with_columns(
         pl.when(pl.col.headline == "NA")
         .then(pl.lit(""))
@@ -47,6 +54,16 @@ def create_classifier_data(dataset, separate_labels=False):
 
     :param: separate_labels sets whether we return a dict of three data sets (train/val/test) or six (train pos/train unlabeled/etc.)
     """
+    # The train/val/test split below uses `sample(fraction=...)` followed by
+    # `is_in(train_ids).not_()` to carve out the held-out splits. That only
+    # gives correct splits when `id` is unique. Assert the invariant up front
+    # so a silent labeling bug upstream surfaces here instead of producing
+    # data leakage between splits.
+    assert dataset["id"].n_unique() == dataset.shape[0], (
+        f"`id` column is not unique: {dataset.shape[0]} rows but "
+        f"{dataset['id'].n_unique()} distinct ids. The split logic in "
+        f"`create_classifier_data` requires unique ids."
+    )
     ldc_data = dataset.with_columns(
         cca_label=pl.when(pl.col("cca") | pl.col("cca_descriptor"))
         .then(1)
