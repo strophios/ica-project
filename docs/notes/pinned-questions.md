@@ -261,3 +261,94 @@ Open threads worth working through when this comes off the pin:
   example.
 
 ---
+
+## 2. Extending to multi-class heads
+
+**Pinned:** 2026-04-21 (during Tier 2 Piece 1, the `ClassificationHead`
+design discussion).
+
+### The question
+
+Can / should `ClassificationHead` (and the pipeline around it) support
+multi-class classification? The planned tasks (CCA, immigrant
+involvement, combined ICA) are all binary, but realistic future
+variants — fine-grained CCA typologies (street protest / boycott /
+strike / lawsuit / ...) or immigration-action subtypes — would be
+multi-class.
+
+A `num_classes` constructor parameter was briefly added to
+`ClassificationHead` during implementation and then removed, because
+the head's output width is only one small piece of what multi-class
+support actually requires.
+
+### What "multi-class support" actually touches
+
+Adding `num_classes > 1` in the head alone produces a model that
+silently trains on nonsense — binary-mask loss math applied to
+multi-class targets. For real support, the following would also need
+to change:
+
+- **Loss function.** FLPU's math is binary-specific: the nnPU identity
+  $\pi_n p_n = p_u - \pi_p p_p$ is a binary mixture decomposition; the
+  `y_true == 1` / `y_true == 0` masks in `FLPULoss.call` don't extend
+  to multi-class targets. A multi-class PU formulation (one-vs-rest
+  PU, or the multi-class extensions of nnPU in e.g. Xu 2017) would
+  need to be implemented.
+- **Per-sample loss.** `BinaryFocalCrossentropy` would become
+  `CategoricalFocalCrossentropy` (or sparse variant), depending on
+  target encoding.
+- **Target encoding.** The preprocessor currently emits scalar 0/1
+  labels via `cca_label`. Multi-class would need integer class indices
+  or one-hot vectors; the preprocessor's `label_key` abstraction would
+  need to know which encoding is expected.
+- **Metrics.** `BinaryAccuracy`, `Precision(thresholds=0.0)`,
+  `Recall(thresholds=0.0)`, `AUC(curve="PR", from_logits=True)` are
+  all binary-specific. Multi-class needs `SparseCategoricalAccuracy`
+  or top-k variants, per-class precision/recall, and probably an
+  average-precision metric appropriate to the number of classes and
+  the task.
+- **Calibration and thresholding.** Binary uses a single decision
+  threshold; multi-class uses argmax (possibly with temperature) or
+  top-k. Output-interpretation code and the hand-review workflow would
+  both need updating.
+- **Activation semantics.** `BinaryFocalCrossentropy(from_logits=True)`
+  internally uses sigmoid; multi-class needs softmax. Downstream
+  "turn logits into calibrated probabilities" code would change.
+
+### What we're doing in the meantime
+
+- `ClassificationHead` stays strictly binary. No `num_classes`
+  parameter. A future `MultiClassClassificationHead` (or a
+  parameterized rework of `ClassificationHead` with appropriate
+  guards) can be added when needed.
+- `FLPULoss` stays binary. A separate `MultiClassFLPULoss` would be a
+  new class.
+- The preprocessor and metrics stay binary.
+
+### What deeper engagement would look like
+
+When we pick this up:
+
+1. Decide whether any head we care about is actually multi-class, vs.
+   whether binary-with-subsequent-clustering would serve the research
+   goal. Multi-class requires labeled multi-class training data, which
+   we may not have for the tasks where multi-class would be most
+   interesting.
+2. If yes, survey multi-class PU formulations (Xu 2017 and successors)
+   and decide which to adapt.
+3. Decide whether to parameterize existing classes or add parallel
+   multi-class classes. Parallel is probably cleaner — the binary and
+   multi-class code paths have enough structural differences that
+   trying to unify them with a `num_classes` parameter tends to
+   produce code that is neither clean-binary nor clean-multi-class.
+
+### Related code touchpoints
+
+- `src/model_setup/heads.py` — `ClassificationHead`.
+- `src/loss_functions/loss.py` — `FLPULoss` (binary).
+- `src/preproc/preprocessor.py` — `ClassifierPreprocessor`, target
+  encoding.
+- `src/run_cca_classification.py` — metrics list, compile-time loss
+  handling.
+
+---
