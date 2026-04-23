@@ -15,6 +15,11 @@ See `docs/notes/tiers-and-checkpoints.md` for the overall frame and
 
 ## Piece 1: Model setup and head composition
 
+**Status:** Implemented in commit `789d88c`. `ClassificationHead` at
+`src/model_setup/heads.py`; tests at `tests/test_heads.py`.
+`CombinedClassificationHead` design is captured below but not yet
+implemented — the gradient-flow "Open decision" remains unresolved.
+
 ### Decision
 
 Heads are implemented as `keras.layers.Layer` subclasses (Option B in the
@@ -133,6 +138,14 @@ pending.
 ---
 
 ## Piece 2: Per-layer learning rates and selective unfreezing
+
+**Status:** Implemented in commit `ad0f94b`. `LayerLRModel` at
+`src/model_setup/layer_lr_model.py`; tests at
+`tests/test_layer_lr_model.py`. A companion callback module for
+time-varying multipliers (`src/model_setup/lr_scheduling.py`) was
+scoped in the design but deferred until a use case arises; the
+current `set_multiplier` API is sufficient for hand-constructed
+schedules.
 
 ### Decision
 

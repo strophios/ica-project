@@ -2,7 +2,7 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
-*Last updated: 2026-04-20 (after Tier 1 audit and cleanup).*
+*Last updated: 2026-04-23 (mid-Tier-2 pause).*
 
 ## Project Overview
 
@@ -33,7 +33,7 @@ This decomposition lets us leverage the larger labeled datasets for CCA and immi
 - No `__init__.py` files exist (implicit namespace packages)
 - All scripts must be run from the **project root** (imports use `src.*` paths, e.g., `import src.model_setup.dapt_setup`)
 - **Path handling**: scripts switch between local (`~/immigration_project/...`) and cluster (`/projects/ahd`) paths; look for `path_prefix` at the top of each script
-- **Tests**: pytest is configured (`pyproject.toml [tool.pytest.ini_options]`, `pythonpath = ["."]`). Run with `pytest` from the project root. Current coverage is narrow — invariant tests for `FLPULoss` and for the train/val/test split logic in `create_classifier_data` (32 tests, all passing). See `tests/test_flpu_loss.py` and `tests/test_data_splits.py`.
+- **Tests**: pytest is configured (`pyproject.toml [tool.pytest.ini_options]`, `pythonpath = ["."]`). Run with `pytest` from the project root. Current coverage is narrow: 53 tests passing — invariant tests for `FLPULoss` (`tests/test_flpu_loss.py`) and the train/val/test split logic in `create_classifier_data` (`tests/test_data_splits.py`), plus construction/shape/contract tests for the Tier 2 `ClassificationHead` (`tests/test_heads.py`, 11 tests) and `LayerLRModel` (`tests/test_layer_lr_model.py`, 10 tests).
 - **Reproducibility**: training scripts call `keras.utils.set_random_seed(200)` to match the `seed=200` used by the polars `.sample()` splits in `src/data_setup/dapt_data.py`.
 
 ## Architecture: Three-Phase ML Pipeline
@@ -63,6 +63,11 @@ The project implements a three-phase pipeline, each with dedicated training scri
 - `src/test_script.py` is a sandbox for local testing with validation-only data and the endpoint layer pattern
 - Current quality: better than chance, but hand review shows the NYT indexer tag definitions are too generous (highest-leverage improvement is refining label definitions)
 
+**Tier 2 abstractions that exist but are not yet on the training path:**
+- `src/model_setup/heads.py` — `ClassificationHead`, a `keras.layers.Layer` subclass supporting both standard mode (loss handled by outer `compile()`) and endpoint mode (loss registered via `add_loss`, needed for FLPU and eventual ALUM). Added in Tier 2 Piece 1 (commit `789d88c`).
+- `src/model_setup/layer_lr_model.py` — `LayerLRModel`, a `keras.Model` subclass overriding `train_step` to scale gradients by per-variable multipliers before optimizer apply. Supports discriminative fine-tuning (fixed geometric multipliers) and gradual unfreezing (callback-updated multipliers). Added in Tier 2 Piece 2 (commit `ad0f94b`).
+- **Not yet integrated.** Training/eval scripts (`run_cca_classification.py`, `eval_cca_classifier.py`) still build the model via `classifier_from_dapt_checkpoint` in `src/model_setup/classification_setup.py`. Wiring the new abstractions in is Tier 2 Piece 4's job, after Piece 3 (preprocessor refactor) delivers multi-head-shaped batches.
+
 ## Key Design Decisions
 
 - **Models output logits** (no final activation), so all losses use `from_logits=True`
@@ -91,7 +96,12 @@ The project implements a three-phase pipeline, each with dedicated training scri
 - Class prior estimation via DEDPUL
 
 **Priority open items:**
-- **Tier 2 refactor** (next focus, still being designed): per-layer learning rates + encoder unfreezing, and the structural groundwork for the planned multi-head classifier.
+- **Tier 2 refactor, in progress (paused mid-tier, 2 of 4 pieces landed).** See `docs/notes/tiers-and-checkpoints.md` for full status and `docs/notes/tier2-design.md` for design decisions. Pieces 1 (`ClassificationHead`) and 2 (`LayerLRModel`) are implemented and tested but not yet wired into training. Remaining:
+  - **Piece 3: `ClassifierPreprocessor` refactor for multi-head targets.** Take a list/dict of label keys rather than a single `label_key`; emit a model-inputs dict (e.g., `{"token_ids", "padding_mask", "cca_targets", "immig_targets"}`) suitable for endpoint-layer heads. This is what unlocks multi-head *training* — Pieces 1 and 2 built the model machinery; Piece 3 produces the batches to feed it.
+  - **Piece 4: Paths/config + integration.** Consolidate scattered `path_prefix` blocks into a `paths.py` with platform detection; rename `data_setup/dapt_data.py` (mis-scoped); wire the refactored preprocessor + `ClassificationHead` + `LayerLRModel` into the training scripts; retire `classifier_from_dapt_checkpoint`.
+  - **Integration pass.** End-to-end smoke test on dummy data.
+  - **Adversarial review of Tier 2.** Likely the `code-reviewer` subagent (plan/architecture framing).
+- **Deferred empirical checks** (batched until Piece 4 when environment handling is settled): smoke training run with updated FLPU + corrected prior (≈ 0.02); confirm training dynamics under `mixed_float16` + removed-α FLPU; sensitivity sweep on Ratio Batch (currently 1:10, more aggressive than Ji 2023).
 - Implement ALUM/VAT (Virtual Adversarial Training); incomplete sketch exists in `src/test_module.py`
 - Benchmarking and comparative testing (FLPU vs. ALUM, etc.)
 - Refine NYT indexer tag definitions for CCA and immigration labels (current definitions are too generous)
@@ -101,6 +111,11 @@ The project implements a three-phase pipeline, each with dedicated training scri
 - Output calibration (decision threshold, not just raw .5)
 - Hand-label a small PN test set (~200-1000 articles) for proper evaluation
 - Retrain CCA classifier with the corrected prior (π_pos ≈ 0.02 rather than 0.03)
+
+**Handoff docs for picking up mid-work:**
+- `docs/notes/tiers-and-checkpoints.md` — tier plan, commit-level status, and "how to pick up" instructions.
+- `docs/notes/tier2-design.md` — per-piece design reasoning for Tier 2 (Pieces 1 and 2 marked implemented; Piece 3 not yet added).
+- `docs/notes/pinned-questions.md` — deliberately deferred substantive questions, currently covering (1) composing nnPU + α + γ + ALUM across a four-layer framing and (2) extension to multi-class heads.
 
 ## Key References (cited in code and memo)
 
