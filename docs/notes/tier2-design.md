@@ -131,3 +131,137 @@ pending.
   how multi-head training is expressed idiomatically.
 
 ---
+
+## Piece 2: Per-layer learning rates and selective unfreezing
+
+### Decision
+
+A custom `keras.Model` subclass (`LayerLRModel`) that overrides
+`train_step` to apply per-variable **learning-rate multipliers** before
+invoking the base optimizer. A single base optimizer + single LR
+schedule + per-variable multipliers handles both patterns we care about:
+
+- **Discriminative fine-tuning**: set multipliers geometrically by
+  layer depth (head = 1.0, encoder layer 11 = 0.95, layer 10 = 0.9,
+  …, embeddings = small-or-zero). Stays fixed during training.
+- **Gradual / selective unfreezing**: set some multipliers to 0
+  initially and update them via a callback at epoch boundaries.
+  Zero-multiplier is equivalent to "this group contributes nothing
+  to gradient updates right now" without disrupting optimizer state.
+
+### Reasoning
+
+Considered three approaches: multiple optimizers (Option A), single
+optimizer with per-variable multipliers (Option B, chosen), and
+callback-based `trainable` flag flipping (Option C, ruled out because
+it doesn't cover discriminative fine-tuning).
+
+Option B is chosen over Option A because:
+
+- All groups naturally share the same schedule *shape* (warmup →
+  cosine decay), just scaled by their multiplier. We don't need
+  per-group schedules with different shapes.
+- Fewer moving parts: one optimizer's state to maintain, one schedule
+  to configure, one place the LR actually lives.
+- Multiplier=0 gives clean semantics for freezing without
+  optimizer-state surgery; Adam's moments keep updating symmetrically
+  (multiplied by the decay factors), and unfreezing by flipping the
+  multiplier is discontinuity-free.
+- If we ever need totally independent per-group schedule shapes, the
+  migration from B to A is not a big refactor.
+
+### The `trainable=False` vs. `multiplier=0` composition
+
+These are not competing mechanisms; they cover different cases and
+compose cleanly:
+
+- **`trainable=False`** (permanently frozen): the variable is not
+  watched by `GradientTape`, so the backward pass doesn't flow
+  through those layers. Real compute savings (substantial for a
+  frozen 12-layer transformer). Use for parameters that will never
+  train in this run.
+- **`multiplier=0`** (temporarily frozen): variable is in the
+  trainable set and gradients are computed, but scaled to zero before
+  application. Costs the forward + backward compute, but lets us
+  toggle freeze status mid-training via callback without optimizer
+  surgery. Use for gradual-unfreezing scenarios.
+
+`LayerLRModel.train_step` iterates over `self.trainable_variables` (so
+`trainable=False` ones are naturally excluded) and applies multipliers
+to what remains.
+
+### Contracts
+
+**`LayerLRModel(inputs, outputs, group_fn, multipliers, **kwargs)`**
+
+- `group_fn: Callable[[tf.Variable], str]` — maps each trainable
+  variable to a group name. For a transformer backbone plus named
+  heads, this is typically implemented by inspecting `variable.name` (NOTE: check whether this should be `variable.path`)
+  (e.g., `"cca_head/intermediate_dense/kernel"` → `"cca_head"`).
+- `multipliers: dict[str, float]` — maps group names to scalar
+  multipliers in [0, ∞). Missing entries default to 1.0.
+- `**kwargs` forwarded to `keras.Model.__init__` (so the usual
+  functional API `inputs=..., outputs=...` works, plus `name`, etc.).
+
+**`LayerLRModel.get_multiplier(variable) -> float`**
+
+Look up the scalar multiplier for a given variable by calling
+`self.group_fn(variable)` and looking up the result in
+`self.multipliers`. Returns 1.0 for variables whose group isn't in
+the dict — so "no configuration" means "train normally."
+
+**`LayerLRModel.set_multiplier(group_name, value)`**
+
+Update a single group's multiplier. Called by callbacks at epoch
+boundaries for gradual unfreezing.
+
+**`LayerLRModel.train_step(data)`**
+
+Overrides `keras.Model.train_step`. Computes gradients via
+`tf.GradientTape`, scales each by its variable's multiplier, applies
+via `self.optimizer.apply_gradients`. Updates metrics and returns the
+standard log dict.
+
+### Layout
+
+- `src/model_setup/layer_lr_model.py` — `LayerLRModel` class.
+- `src/model_setup/lr_scheduling.py` — callback(s) for time-varying
+  multipliers (gradual unfreezing schedules). To be added in a
+  follow-on commit once the base class works — kept separate so the
+  base abstraction can be tested without schedule machinery.
+- `tests/test_layer_lr_model.py` — tests for the Model subclass.
+
+### Patterns introduced
+
+- **`Model.train_step` override**: Keras's documented way to
+  customize per-step training behavior while keeping `fit()` and its
+  infrastructure (callbacks, checkpoints, metrics, distribution
+  strategies). This is *the* pattern for custom training logic in
+  Keras — when ALUM lands, it will reach for the same pattern.
+- **Per-variable gradient scaling**: mathematically equivalent to
+  per-variable LR. `var -= lr * m * grad == var -= lr * (m*grad)`.
+  Cheaper and simpler than a custom optimizer when the optimizer's
+  update rule itself is standard.
+- **Dynamic multiplier updates via callback**: standard Keras
+  callback API. `on_epoch_begin` mutates `model.multipliers`, next
+  epoch trains with new multipliers. No retraining-from-scratch, no
+  optimizer reinitialization.
+- **`GradientTape` and `compute_loss`**: the low-level pieces. `tape`
+  records ops, `tape.gradient(loss, vars)` extracts gradients,
+  `model.compute_loss(x, y, y_pred)` aggregates compile-time loss
+  with `add_loss` contributions from endpoint layers. Understanding
+  these is fundamental for any Level-2+ custom training.
+
+### Backend-agnosticism note
+
+Using `tf.GradientTape` in `train_step` commits this particular code
+path to the TensorFlow backend. This is a deliberate choice: our data
+pipeline (`tf.data.Dataset`) already commits us to TF, so the
+training-loop commitment is free. Writing a backend-agnostic
+train_step via Keras's stateless API would add complexity we don't
+benefit from, since we have no plans to migrate backends.
+
+The Layers (heads, FLPU) remain backend-agnostic via `keras.ops`; only
+the training-step machinery is TF-specific.
+
+---

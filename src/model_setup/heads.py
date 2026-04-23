@@ -104,18 +104,12 @@ class ClassificationHead(keras.layers.Layer):
         # names of the form "<head_name>/<sublayer_name>" in model
         # summaries, which is important once we have multiple head
         # instances and a backbone in the same Model.
-        self.dropout_1 = keras.layers.Dropout(
-            rate=dropout, name="pre_dense_dropout"
-        )
+        self.dropout_1 = keras.layers.Dropout(rate=dropout, name="pre_dense_dropout")
         self.dense = keras.layers.Dense(
             units=self.hidden_dim, activation="relu", name="intermediate_dense"
         )
-        self.dropout_2 = keras.layers.Dropout(
-            rate=dropout, name="post_dense_dropout"
-        )
-        self.logits = keras.layers.Dense(
-            units=1, activation=None, name="logits"
-        )
+        self.dropout_2 = keras.layers.Dropout(rate=dropout, name="post_dense_dropout")
+        self.logits = keras.layers.Dense(units=1, activation=None, name="logits")
 
     def call(self, features, targets=None):
         """
