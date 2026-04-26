@@ -600,7 +600,10 @@ Decisions deferred to 4b.
 
 ## Piece 4a: Config consolidation + dapt_data rename
 
-**Status:** In progress (about to be implemented).
+**Status:** Implemented in commit `4d8cba9`. `src/config.py` is new;
+`src/data_setup/data.py` is renamed from `src/data_setup/dapt_data.py`
+via `git mv` (98% similarity preserved). All callers updated. Test
+suite: 65 passing (unchanged — rename is mechanical).
 
 ### Decision
 

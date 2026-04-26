@@ -94,7 +94,7 @@ history; the substantive findings are addressed in `8685c47`.
   multi-head shape contracts in both modes, source→output routing,
   and dtype casting. Lives in `src/preproc/preprocessor.py`; tests at
   `tests/test_preprocessor.py`.
-- *(this commit)* — Piece 4a: `src/config.py` introduced as the
+- `4d8cba9` — Piece 4a: `src/config.py` introduced as the
   single source of truth for platform-conditional values (paths +
   dtype policy). File-existence detection on `/projects/ahd` with
   `ICA_ENV` env-var override; granular paths exposed as
@@ -196,7 +196,7 @@ a signal we designed the shape wrong.
    Design and reasoning in `docs/notes/tier2-design.md` Piece 3.
 4. **[IN PROGRESS] Paths / config + data pipeline rename, and
    integration.** Piece 4. Subdivided into 4a/4b/4c.
-   - **4a [DONE — this commit]**: `src/config.py` introduced
+   - **4a [DONE — commit `4d8cba9`]**: `src/config.py` introduced
      (platform detection + paths + dtype policy);
      `data_setup/dapt_data.py` renamed to `data_setup/data.py`;
      all callers updated. Mechanical; design and reasoning in
