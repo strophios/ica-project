@@ -6,20 +6,20 @@ import keras
 import keras_hub
 import tensorflow as tf
 
-import os
-import warnings
 import math
 import datetime
 
+import src.config as config
 import src.model_setup.dapt_setup
-import src.data_setup.dapt_data  # should rename this, since it's not just dapt stuff anymore
+import src.data_setup.data
 import src.preproc.preprocessor
 import src.model_setup.classification_setup
 import src.loss_functions.loss
 
-keras.config.set_dtype_policy(
-    "mixed_float16"
-)  # want to make sure this works on Explorer
+# Platform-conditional dtype policy (mixed_float16 on cluster CUDA;
+# float32 locally — MPS mixed-precision support is patchy and there
+# are no Tensor Cores to motivate it).
+keras.config.set_dtype_policy(config.DTYPE_POLICY)
 
 # Seed Python, NumPy, and the Keras backend RNG so training is reproducible.
 # Matches the seed=200 used for the polars `.sample()` splits.
@@ -34,29 +34,22 @@ SEQ_LENGTH = 128
 # Training params
 EPOCHS = 7
 
-# Local path (commented out when running on cluster); cluster path below.
-# A proper platform-aware paths module is a Tier 2 refactor item.
-# path_prefix = os.path.expanduser(
-#     "~/immigration_project/00_ML_data_expansion/00_explorer"
-# )
-path_prefix = os.path.abspath("/projects/ahd")
-
 # ---- Load and Process Data ----
 # Load + split only if the cached tf.data datasets don't already exist on
 # disk; otherwise skip straight to loading from disk. (Building the polars
 # dataframe and turning it into tensor slices takes minutes on the full
 # corpus, and the old code ran these unconditionally even when it was about
 # to overwrite `ldc_data` with the cache load below.)
-if not os.path.isdir(f"{path_prefix}/cca_set"):
-    ldc_data = src.data_setup.dapt_data.data_from_parquet(
-        path_prefix,
+if not config.CCA_SET_DIR.is_dir():
+    ldc_data = src.data_setup.data.data_from_parquet(
+        config.PROJECT_ROOT,
         "ldc_corpus",
         addl_columns=["cca", "cca_descriptor", "immig", "immig_descriptor"],
     )
-    ldc_data = src.data_setup.dapt_data.create_classifier_data(
+    ldc_data = src.data_setup.data.create_classifier_data(
         ldc_data, separate_labels=True
     )
-    os.mkdir(f"{path_prefix}/cca_set")
+    config.CCA_SET_DIR.mkdir()
     for split in ldc_data.keys():
         for pu in ldc_data[split].keys():
             ldc_data[split][pu] = tf.data.Dataset.from_tensor_slices(
@@ -64,14 +57,16 @@ if not os.path.isdir(f"{path_prefix}/cca_set"):
                 .select(["headline_with_lead", "cca_label"])
                 .to_dict()
             )
-            ldc_data[split][pu].save(f"{path_prefix}/cca_set/{split}_{pu}.tf")
+            ldc_data[split][pu].save(str(config.CCA_SET_DIR / f"{split}_{pu}.tf"))
 else:
     split = ["train", "val", "test"]
     pu = ["pos", "unl"]
     ldc_data = {"train": {}, "val": {}, "test": {}}
     for i in split:
         for t in pu:
-            ldc_data[i][t] = tf.data.Dataset.load(f"{path_prefix}/cca_set/{i}_{t}.tf")
+            ldc_data[i][t] = tf.data.Dataset.load(
+                str(config.CCA_SET_DIR / f"{i}_{t}.tf")
+            )
 
 
 preprocess = src.preproc.preprocessor.ClassifierPreprocessor(
@@ -85,7 +80,7 @@ preprocess = src.preproc.preprocessor.ClassifierPreprocessor(
 shuffle_buffer = 100000  # keep in mind that I ideally want to increase this, but may actually need to decrease it
 
 # current batch ratio: 9 unl to 1 pos
-training_set = src.data_setup.dapt_data.dataset_create(
+training_set = src.data_setup.data.dataset_create(
     shuffle_buffer,
     BATCH_SIZE,
     preprocess,
@@ -95,14 +90,14 @@ training_set = src.data_setup.dapt_data.dataset_create(
 # NOTE: Not sure what weights I want for validation and test sets.
 # Actually, pretty sure I should be using just positives and known
 # negatives for validation and test, so this is maybe moot anyways.
-validation_set = src.data_setup.dapt_data.dataset_create(
+validation_set = src.data_setup.data.dataset_create(
     shuffle_buffer,
     BATCH_SIZE,
     preprocess,
     data=[ldc_data["val"]["pos"], ldc_data["val"]["unl"]],
     weights=[0.5, 0.5],
 )
-test_set = src.data_setup.dapt_data.dataset_create(
+test_set = src.data_setup.data.dataset_create(
     shuffle_buffer,
     BATCH_SIZE,
     preprocess,
@@ -118,7 +113,7 @@ validation_steps = math.floor(1017 / (BATCH_SIZE / 2))
 
 # ---- CREATE AND TRAIN MODEL ----
 cca_classifier = src.model_setup.classification_setup.classifier_from_dapt_checkpoint(
-    f"{path_prefix}/dapt_backbone.weights.h5",
+    str(config.DAPT_BACKBONE_WEIGHTS),
     freeze_encoder=True,  # dropout = .2?,
 )  # at the very least has identical shape to RobertaTextClassifier
 # NOTE: I'm currently training only the classification head (and freezing the encoder)
@@ -189,17 +184,18 @@ cca_classifier.compile(
     jit_compile="auto",  # probably set to true for Explorer?
 )
 
-if not os.path.isdir(f"{path_prefix}/cca_classifier"):
-    os.mkdir(f"{path_prefix}/cca_classifier")
+if not config.CCA_CLASSIFIER_DIR.is_dir():
+    config.CCA_CLASSIFIER_DIR.mkdir()
 
-if not os.path.isdir(f"{path_prefix}/cca_logs"):
-    os.mkdir(f"{path_prefix}/cca_logs")
+if not config.CCA_LOGS_DIR.is_dir():
+    config.CCA_LOGS_DIR.mkdir()
 # Set callbacks
+_run_stamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
 callbacks_list = [
     # Saves the current weights after every epoch
     keras.callbacks.ModelCheckpoint(
         # Path to the destination model file
-        filepath=f"{path_prefix}/cca_classifier/{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}_checkpoint.keras",
+        filepath=str(config.CCA_CLASSIFIER_DIR / f"{_run_stamp}_checkpoint.keras"),
         # These two arguments mean you won't overwrite the model file
         # unless val_loss has improved, which allows you to keep the
         # best model seen during training.
@@ -208,7 +204,7 @@ callbacks_list = [
     ),
     # TensorBoard
     keras.callbacks.TensorBoard(
-        log_dir=f"{path_prefix}/cca_logs/{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}",
+        log_dir=str(config.CCA_LOGS_DIR / _run_stamp),
         histogram_freq=1,
         write_steps_per_second=False,
         update_freq="epoch",
@@ -236,8 +232,8 @@ cca_classifier.fit(
 
 # There may be an issue with the profiler; leads to a warning during training, may or may not impact the usefulness of profiler
 
-cca_classifier.save(f"{path_prefix}/cca_classifier.keras")
-cca_classifier.save_weights(f"{path_prefix}/cca_classifier.weights.h5")
+cca_classifier.save(str(config.CCA_CLASSIFIER_MODEL))
+cca_classifier.save_weights(str(config.CCA_CLASSIFIER_WEIGHTS))
 
 test_results = cca_classifier.evaluate(
     test_set, steps=validation_steps, return_dict=True
@@ -253,16 +249,16 @@ test_results = cca_classifier.evaluate(
 # duplicate predictions, which downstream code works around by slicing to
 # the real dataframe length. A proper fix is to use a finite (non-repeated)
 # dataset for prediction, sized to the actual data.
-test_pos = tf.data.Dataset.load(f"{path_prefix}/cca_set/test_pos.tf")
-test_pos = src.data_setup.dapt_data.dataset_create(
+test_pos = tf.data.Dataset.load(str(config.CCA_SET_DIR / "test_pos.tf"))
+test_pos = src.data_setup.data.dataset_create(
     shuffle_buffer=0, batch_size=BATCH_SIZE, preprocessor=preprocess, data=test_pos
 )
 pos_scores = cca_classifier.predict(
     test_pos, batch_size=BATCH_SIZE, steps=validation_steps
 )
 
-test_unl = tf.data.Dataset.load(f"{path_prefix}/cca_set/test_unl.tf")
-test_unl = src.data_setup.dapt_data.dataset_create(
+test_unl = tf.data.Dataset.load(str(config.CCA_SET_DIR / "test_unl.tf"))
+test_unl = src.data_setup.data.dataset_create(
     shuffle_buffer=0, batch_size=BATCH_SIZE, preprocessor=preprocess, data=test_unl
 )
 unl_scores = cca_classifier.predict(

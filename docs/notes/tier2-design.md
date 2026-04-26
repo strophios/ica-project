@@ -458,3 +458,244 @@ won't disturb callers that don't need it.
   it.
 
 ---
+
+## Piece 4: Paths/config consolidation, data-pipeline rename, and integration
+
+**Status:** In progress (design 2026-04-26). Subdivided into three
+commits: 4a (config.py + dapt_data rename), 4b (backbone.py +
+assembly.py), 4c (training/eval script integration + retirement of
+`classifier_from_dapt_checkpoint`).
+
+### Overall framing
+
+Piece 4 is where the abstractions from Pieces 1–3 (`ClassificationHead`,
+`LayerLRModel`, multi-head `ClassifierPreprocessor`) actually meet the
+training and eval scripts. No new model abstractions are introduced;
+the work is plumbing — connecting things that already exist.
+
+The piece is large enough to subdivide. Three sub-commits:
+
+- **4a — Config consolidation + dapt_data rename.** Mechanical:
+  introduce `src/config.py` with platform detection + paths +
+  dtype-policy default; rename `src/data_setup/dapt_data.py` to
+  `src/data_setup/data.py`; update all callers. No semantic changes;
+  test suite stays green by construction.
+- **4b — Backbone + assembly abstractions.** Add `src/model_setup/backbone.py`
+  (DAPT-checkpoint loading split out from `classifier_from_dapt_checkpoint`)
+  and `src/model_setup/assembly.py` (wires backbone + heads into a
+  full model, returning a `LayerLRModel` for forward-compatibility
+  with discriminative LR / unfreezing). Adds an integration test that
+  exercises the assembled stack end-to-end on dummy data. Doesn't
+  yet touch training/eval scripts.
+- **4c — Wiring + retirement.** Rewrite `run_cca_classification.py`
+  and `eval_cca_classifier.py` to use the new abstractions; delete
+  `classifier_from_dapt_checkpoint` and the now-empty
+  `src/model_setup/classification_setup.py`.
+
+### Why `config.py`, not `paths.py`
+
+The platform-detection bit (`IS_CLUSTER`) is the same regardless of
+what we use it for. Several values become platform-conditional once
+we have it:
+
+- **Paths** (`/projects/ahd/...` vs. local `~/...`).
+- **Dtype policy** (`mixed_float16` on cluster CUDA; `float32` on
+  local MPS — mixed precision support on MPS has historically been
+  patchy and the speedup motivation evaporates anyway).
+- **`jit_compile`**, eventually (XLA on Linux+CUDA is reliable; MPS
+  XLA less so). Currently `"auto"` works fine; deferred until it
+  becomes friction.
+- Possibly later: per-platform parallelism, batch-size fallbacks.
+
+If we put detection in `paths.py`, then add `precision.py` later,
+either the detection duplicates (drift risk) or `paths.py` exports
+an `IS_CLUSTER` symbol that other modules import — which is awkward
+because the symbol has nothing to do with paths *qua* paths. A single
+`config.py` cleanly absorbs all the platform-conditional defaults
+under one name. Adding new platform-conditional values later is a
+one-file edit, not a new architectural decision.
+
+### Decisions made (overall)
+
+1. **Detection mechanism: file-existence.** `Path("/projects/ahd").exists()`
+   decides cluster vs. local. Simple and robust; the failure mode
+   (a laptop that happens to have `/projects/ahd` mounted) is rare
+   and survivable via an `ICA_ENV=local` env-var override. Hostname
+   detection was rejected because cluster compute nodes have varied
+   names. Env-var-only detection was rejected because it requires
+   discipline that's easy to forget.
+2. **Granular paths.** `config.PROJECT_ROOT` plus named constants
+   (`CCA_SET_DIR`, `DAPT_BACKBONE_WEIGHTS`, `LDC_CORPUS`,
+   `CCA_CLASSIFIER_DIR`, etc.). Becomes a glossary of "where things
+   live in this project," with documentation value beyond convenience.
+3. **Single rename, single neutral name.** `src/data_setup/dapt_data.py`
+   → `src/data_setup/data.py`. Splitting into `loading.py` +
+   `pipeline.py` was considered; deferred to Tier 4 hygiene if the
+   need persists. Tier 2 is about shape, not perfection.
+4. **`LayerLRModel` wired in 4b/4c, not deferred.** Default multipliers
+   are no-op (1.0); current freeze-encoder behavior is preserved.
+   Establishing the wiring now closes the question; cost is near-zero.
+5. **Delete `classifier_from_dapt_checkpoint` and `classification_setup.py`
+   outright in 4c.** Once nothing calls them, keeping them is dead
+   code. Git history preserves them if ever needed.
+6. **Explicit dtype-policy application at call sites.**
+   `config.DTYPE_POLICY` is a value; scripts call
+   `keras.config.set_dtype_policy(config.DTYPE_POLICY)` themselves.
+   Import-time side effects were considered and rejected for
+   surprise reasons — tests want to override; future readers
+   shouldn't have to know that importing `config` mutates global
+   Keras state. The repetition cost is two lines per script in fewer
+   than five scripts.
+
+### Open decisions, to resolve before writing 4b
+
+These belong to 4b's implementation; flagging here so they aren't
+forgotten during 4a.
+
+**Train-vs-inference model split.** The training model has
+`cca_targets` as a `keras.Input` (endpoint-layer pattern); the
+inference model can't, because predict-time data has no targets.
+Two patterns:
+- Build two models that share head-layer instances (weights shared
+  by Python identity within one process).
+- Build two separate models and load weights by name across them
+  (weights shared by serialization).
+
+The first is cleaner inside `run_cca_classification.py` (one process,
+fit + predict); the second is what `eval_cca_classifier.py` needs
+(separate process, weights from disk). Probably both patterns get
+used. Decision deferred to 4b design discussion.
+
+**`assemble_classifier` signature.** Sketch:
+
+```python
+def assemble_classifier(
+    backbone,                                    # already-loaded
+    heads: dict[str, ClassificationHead],        # output_name -> head
+    seq_length: int,
+    target_dtype: str = "float32",
+    freeze_encoder: bool = False,
+    layer_multipliers: dict[str, float] | None = None,
+    mode: Literal["train", "inference"] = "train",
+) -> LayerLRModel:
+    ...
+```
+
+Open: should `mode` be a param of one function, or two functions?
+Should `target_dtype` be inferred from heads vs. specified here?
+Should `freeze_encoder` and `layer_multipliers` be exclusive?
+Decisions deferred to 4b.
+
+### Layout (anticipated)
+
+- `src/config.py` — platform detection, paths, dtype policy. New in 4a.
+- `src/data_setup/data.py` — renamed from `dapt_data.py`. 4a.
+- `src/model_setup/backbone.py` — backbone-loading utilities split
+  out of `classifier_from_dapt_checkpoint`. New in 4b.
+- `src/model_setup/assembly.py` — assembly function. New in 4b.
+- `src/model_setup/classification_setup.py` — deleted in 4c.
+- `tests/test_assembly.py` — integration test. New in 4b.
+
+---
+
+## Piece 4a: Config consolidation + dapt_data rename
+
+**Status:** In progress (about to be implemented).
+
+### Decision
+
+`src/config.py` exports:
+
+- `IS_CLUSTER: bool` — `Path("/projects/ahd").exists()`, with
+  `ICA_ENV` env var as override (`ICA_ENV=local` forces False;
+  `ICA_ENV=cluster` forces True).
+- `PROJECT_ROOT: pathlib.Path` — `/projects/ahd` if cluster else
+  `~/immigration_project/00_ML_data_expansion/00_explorer`.
+- Granular paths derived from `PROJECT_ROOT`: `LDC_CORPUS`,
+  `CCA_SET_DIR`, `DAPT_BACKBONE_WEIGHTS`, `DAPT_LM_HEAD_WEIGHTS`,
+  `CCA_CLASSIFIER_DIR`, `CCA_LOGS_DIR`, `DAPT_CHECKPOINTS_DIR`,
+  `DAPT_LOGS_DIR`, `DAPT_TRAINING_SET`, `DAPT_VALIDATION_SET`. All
+  `pathlib.Path` instances.
+- `DTYPE_POLICY: str` — `"mixed_float16"` if `IS_CLUSTER` else
+  `"float32"`.
+
+`src/data_setup/dapt_data.py` is renamed to `src/data_setup/data.py`.
+Imports in `run_cca_classification.py`, `eval_cca_classifier.py`,
+`run_prior_estimate.py`, `lu_classifier.py` (and any other callers)
+are updated. The file's contents are unchanged — only the filename
+moves.
+
+### Reasoning
+
+**Why `pathlib.Path` for the granular paths.** `pathlib.Path`
+supports `/` for joining, has methods like `.exists()` and `.mkdir()`,
+plays well with both `os.path.isdir(str(path))` (current usage) and
+modern `path.is_dir()`. Avoids the `f"{path_prefix}/cca_set"` string
+concatenation pattern that's currently strewn across scripts.
+
+**Why granular paths over a single `PROJECT_ROOT`.** Reading the
+current scripts, the same path constants are reconstructed across
+files (e.g., `f"{path_prefix}/cca_set"` appears in
+`run_cca_classification.py`, `eval_cca_classifier.py`, and
+`run_prior_estimate.py`). Naming them once in `config.py` makes
+"where does the cached CCA set live?" answerable without grep, and
+catches any drift between scripts at config-load time.
+
+**Env-var override syntax.** `ICA_ENV=local`, `ICA_ENV=cluster`, or
+unset (use the file-existence default). Any other value is treated
+as unset (with a warning), so a typo doesn't silently change
+behavior.
+
+### Layout
+
+- `src/config.py` — new file.
+- `src/data_setup/data.py` — renamed from `dapt_data.py`.
+- All callers updated: `run_cca_classification.py`,
+  `eval_cca_classifier.py`, `dapt.py`, `run_prior_estimate.py`,
+  `lu_classifier.py`, and any other modules importing from
+  `data_setup.dapt_data` or referencing `path_prefix`.
+
+### Contracts
+
+**`config.py`** — module-level constants. No functions, no classes.
+Importing the module is enough to use the values. Side effects:
+none — `keras.config.set_dtype_policy(...)` is left to callers
+(per the explicit-application decision above).
+
+**`config.IS_CLUSTER`**: bool. `True` when `/projects/ahd` exists or
+`ICA_ENV=cluster`; `False` when `ICA_ENV=local`; defaults to
+`Path("/projects/ahd").exists()`.
+
+**`config.PROJECT_ROOT`**: `pathlib.Path`. `Path("/projects/ahd")` if
+cluster, else `Path.home() / "immigration_project" / "00_ML_data_expansion" / "00_explorer"`.
+
+**Named granular paths**: all `pathlib.Path` derived from
+`PROJECT_ROOT`. Names follow the existing folder structure:
+`CCA_SET_DIR = PROJECT_ROOT / "cca_set"` etc.
+
+**`config.DTYPE_POLICY`**: str. `"mixed_float16"` if cluster else
+`"float32"`.
+
+### Patterns introduced
+
+- **Single-source-of-truth platform detection**: one bit
+  (`IS_CLUSTER`) is computed once at config load; all
+  platform-conditional values flow from it.
+- **Env-var override for boolean detection**: simple, debuggable,
+  and survives the rare case where automatic detection is wrong.
+- **Module-level path constants**: paths as named values rather
+  than reconstructed strings. Mostly an ergonomic + reliability
+  win, but also turns `config.py` into a glossary of project
+  artifact locations.
+
+### Test impact
+
+No new tests in 4a — there's no logic to test beyond the platform
+detection itself, which depends on the runtime environment and is
+brittle to mock without sacrificing the test's value. The test
+suite verifies the rename mechanically: imports in test files
+either still resolve (if `data_setup.data` is correctly created
+and old name removed) or fail loudly. Existing 65 tests should
+continue to pass.
+
+---

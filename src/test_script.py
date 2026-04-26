@@ -6,12 +6,11 @@ import keras
 import keras_hub
 import tensorflow as tf
 
-import os
-import warnings
 import math
 
+import src.config as config
 import src.model_setup.dapt_setup
-import src.data_setup.dapt_data  # should rename this, since it's not just dapt stuff anymore
+import src.data_setup.data
 import src.preproc.preprocessor
 import src.model_setup.classification_setup
 import src.loss_functions.loss
@@ -25,14 +24,10 @@ SEQ_LENGTH = 128
 # Training params (though I will rarely be fully training a model here, I think)
 EPOCHS = 5
 
-path_prefix = os.path.expanduser(
-    "~/immigration_project/00_ML_data_expansion/00_explorer"
-)
-
 backbone = keras_hub.models.Backbone.from_preset(
     "roberta_base_en", preprocessor=None, load_weights=False
 )
-backbone.load_weights(f"{path_prefix}/dapt_backbone.weights.h5")
+backbone.load_weights(str(config.DAPT_BACKBONE_WEIGHTS))
 
 # cca_classifier = src.model_setup.classification_setup.classifier_from_dapt_checkpoint(
 #     f"{path_prefix}dapt_backbone.weights.h5"
@@ -74,8 +69,12 @@ backbone.load_weights(f"{path_prefix}/dapt_backbone.weights.h5")
 
 # We make a toy model by just using the validation data
 trial_data = {}
-trial_data["pos"] = tf.data.Dataset.load(f"{path_prefix}/trial_set/val_pos.tf")
-trial_data["unl"] = tf.data.Dataset.load(f"{path_prefix}/trial_set/val_unl.tf")
+trial_data["pos"] = tf.data.Dataset.load(
+    str(config.PROJECT_ROOT / "trial_set" / "val_pos.tf")
+)
+trial_data["unl"] = tf.data.Dataset.load(
+    str(config.PROJECT_ROOT / "trial_set" / "val_unl.tf")
+)
 
 preprocess = src.preproc.preprocessor.ClassifierPreprocessor(
     SEQ_LENGTH=SEQ_LENGTH,
@@ -88,7 +87,7 @@ preprocess = src.preproc.preprocessor.ClassifierPreprocessor(
 shuffle_buffer = 10000  # keep in mind that I ideally want to increase this, but may actually need to decrease it
 
 # current batch ratio: 9 unl to 1 pos
-trial_set = src.data_setup.dapt_data.dataset_create(
+trial_set = src.data_setup.data.dataset_create(
     shuffle_buffer,
     BATCH_SIZE,
     preprocess,
@@ -194,7 +193,7 @@ preprocess = src.preproc.preprocessor.ClassifierPreprocessor(
 )
 
 cca_classifier = src.model_setup.classification_setup.classifier_from_dapt_checkpoint(
-    f"{path_prefix}/dapt_backbone.weights.h5"
+    str(config.DAPT_BACKBONE_WEIGHTS)
 )  # at the very least has identical shape to RobertaTextClassifier
 cca_classifier.compile(
     optimizer=optimizer,

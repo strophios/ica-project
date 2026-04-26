@@ -1,6 +1,6 @@
 # Audit and Refactor: Tiers, Checkpoints, and Process
 
-*Last updated: 2026-04-26 (Piece 3 landed; Pieces 1, 2, 3 done).*
+*Last updated: 2026-04-26 (Piece 4a landed; Pieces 1–3 + 4a done, 4b/4c remaining).*
 
 This doc exists so that a new session — whether picked up by you after
 weeks away, by a fresh LLM collaborator, or by someone else entirely —
@@ -65,7 +65,7 @@ agent after the first three commits. Found several real issues
 (see `8685c47` commit message). Review transcript lives in session
 history; the substantive findings are addressed in `8685c47`.
 
-**Tier 2 in progress.** Three of four pieces landed.
+**Tier 2 in progress.** Piece 4 underway; sub-piece 4a landed. Pieces 1, 2, 3, and 4a complete; 4b and 4c remaining.
 
 - `789d88c` — Piece 1: `ClassificationHead` for multi-head refactor.
   Head-as-Layer abstraction, supports both standard mode (loss via
@@ -94,29 +94,59 @@ history; the substantive findings are addressed in `8685c47`.
   multi-head shape contracts in both modes, source→output routing,
   and dtype casting. Lives in `src/preproc/preprocessor.py`; tests at
   `tests/test_preprocessor.py`.
+- *(this commit)* — Piece 4a: `src/config.py` introduced as the
+  single source of truth for platform-conditional values (paths +
+  dtype policy). File-existence detection on `/projects/ahd` with
+  `ICA_ENV` env-var override; granular paths exposed as
+  `pathlib.Path` constants (`PROJECT_ROOT`, `CCA_SET_DIR`,
+  `DAPT_BACKBONE_WEIGHTS`, etc.); `DTYPE_POLICY` is `mixed_float16`
+  on cluster CUDA, `float32` locally. `src/data_setup/dapt_data.py`
+  renamed to `src/data_setup/data.py` (the file's contents weren't
+  DAPT-specific — they handle parquet I/O, classification splits,
+  and tf.data pipelines used across DAPT and classification).
+  All callers updated: `dapt.py`, `run_cca_classification.py`,
+  `eval_cca_classifier.py`, `run_prior_estimate.py`,
+  `prior_estimation/lu_classifier.py`, scratch files
+  (`test_module.py`, `test_script.py`), and `tests/test_data_splits.py`
+  import. Test suite: 65 passing (no test changes — rename is
+  mechanical, paths logic is environment-dependent and not
+  test-mockable without sacrificing the test's value).
 
-The new abstractions exist **alongside** the existing
+The Pieces-1–3 abstractions still exist **alongside** the existing
 `classifier_from_dapt_checkpoint` function; they are not yet wired
-into any training script. The wiring is Piece 4's job.
+into any training script. Wiring is the job of Pieces 4b/4c.
 
 **Tier 2 pieces remaining:**
 
-- **Piece 4: Paths / config + data pipeline rename, and integration.**
-  Consolidate scattered `path_prefix` blocks into a `paths.py` with
-  platform detection; rename `data_setup/dapt_data.py` (already flagged
-  in-code as mis-scoped); wire the refactored preprocessor + head +
-  `LayerLRModel` into the training scripts; retire
-  `classifier_from_dapt_checkpoint`. With Pieces 1–3 in place, this
-  is now pure integration work — no new abstractions required.
+- **Piece 4b: Backbone + assembly abstractions.** Add
+  `src/model_setup/backbone.py` (DAPT-checkpoint loading split out
+  of `classifier_from_dapt_checkpoint`) and
+  `src/model_setup/assembly.py` (wires backbone + heads into a full
+  `LayerLRModel` for forward-compatibility with discriminative LR /
+  unfreezing). Adds an integration test that exercises the assembled
+  stack end-to-end on dummy data. Doesn't yet touch training/eval
+  scripts. Open design questions: train-vs-inference model split
+  (shared head instances vs. weight-load by name); `assemble_classifier`
+  signature shape; whether `freeze_encoder` and `layer_multipliers`
+  should be exclusive. To resolve in 4b's design discussion.
+- **Piece 4c: Wiring + retirement.** Rewrite `run_cca_classification.py`
+  and `eval_cca_classifier.py` to use the new abstractions; delete
+  `classifier_from_dapt_checkpoint` and `src/model_setup/classification_setup.py`
+  outright. The current scripts have stale calls to the old
+  `ClassifierPreprocessor` signature (`label_key=` instead of
+  `label_keys={...}`) — broken on disk since `e3dda6a`; 4c is where
+  they get fixed.
 - **Integration pass.** End-to-end smoke test of the composed stack
-  on dummy data. Follows Piece 4.
+  on dummy data. Follows 4c.
 - **Adversarial review at Tier 2 end.** Likely the `code-reviewer`
   subagent this time (plan-alignment / architecture framing fits
   Tier 2 better than the opus general-purpose one used for Tier 1).
 
-Test suite after Piece 3: **65 tests passing** (32 from Tier 1 + 11
+Test suite after Piece 4a: **65 tests passing** (32 from Tier 1 + 11
 for `ClassificationHead` + 10 for `LayerLRModel` + 12 for
-`ClassifierPreprocessor`).
+`ClassifierPreprocessor`). 4a added no tests — the rename and path
+consolidation are mechanical, and the platform detection is brittle
+to mock without sacrificing the test's value.
 
 **Deferred empirical checks** (to be batched when environment handling
 is settled — touched in Piece 4):
@@ -164,12 +194,18 @@ a signal we designed the shape wrong.
    at preprocess time (loss still casts at its boundary —
    layered-dtype framing). Positional-input fallback dropped.
    Design and reasoning in `docs/notes/tier2-design.md` Piece 3.
-4. **[PENDING] Paths / config + data pipeline rename, and
-   integration.** Piece 4. Consolidate scattered `path_prefix`
-   blocks into a `paths.py` with platform detection; rename
-   `data_setup/dapt_data.py`; wire the refactored preprocessor +
-   head + `LayerLRModel` into the training scripts; retire
-   `classifier_from_dapt_checkpoint`.
+4. **[IN PROGRESS] Paths / config + data pipeline rename, and
+   integration.** Piece 4. Subdivided into 4a/4b/4c.
+   - **4a [DONE — this commit]**: `src/config.py` introduced
+     (platform detection + paths + dtype policy);
+     `data_setup/dapt_data.py` renamed to `data_setup/data.py`;
+     all callers updated. Mechanical; design and reasoning in
+     `docs/notes/tier2-design.md` Piece 4a.
+   - **4b [PENDING]**: `model_setup/backbone.py` +
+     `model_setup/assembly.py`; integration test on dummy data.
+   - **4c [PENDING]**: rewire `run_cca_classification.py` and
+     `eval_cca_classifier.py`; delete `classifier_from_dapt_checkpoint`
+     and `model_setup/classification_setup.py`.
 5. **[PENDING] Integration pass.** End-to-end smoke test of the
    composed stack on dummy data.
 6. **[PENDING] Adversarial review of Tier 2.** Likely the

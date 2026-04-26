@@ -20,7 +20,7 @@ downstream model training:
 import polars as pl
 import pytest
 
-from src.data_setup.dapt_data import create_classifier_data
+from src.data_setup.data import create_classifier_data
 
 
 # -----------------------------------------------------------------------------

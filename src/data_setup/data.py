@@ -2,9 +2,9 @@ import polars as pl
 import tensorflow as tf
 
 
-def data_from_parquet(path_prefix, db_folder="ldc_corpus", addl_columns=None):
+def data_from_parquet(project_root, db_folder="ldc_corpus", addl_columns=None):
     ldc_pq = pl.scan_parquet(
-        f"{path_prefix}/{db_folder}/**/*.parquet", hive_partitioning=True
+        f"{project_root}/{db_folder}/**/*.parquet", hive_partitioning=True
     )
     cols_to_select = ["id", "headline", "lead_paragraph"]
     if addl_columns is not None:

@@ -4,43 +4,35 @@ that so that it actually runs the whole workflow.
 """
 
 import keras
-import tensorflow as tf
 import polars as pl
 import numpy as np
-import src.data_setup.dapt_data
+
+import src.config as config
+import src.data_setup.data
 import src.preproc.preprocessor
 import src.prior_estimation.dedpul_em
 import src.prior_estimation.dedpul_utils
 
-import os
-
-# setting for automatic mixed precision
-keras.config.set_dtype_policy(
-    "mixed_float16"
-)  # want to make sure this works on Explorer
-
-# path_prefix = os.path.expanduser(
-#     "~/immigration_project/00_ML_data_expansion/00_explorer"
-# )
-path_prefix = os.path.abspath("/projects/ahd")
+# Platform-conditional dtype policy.
+keras.config.set_dtype_policy(config.DTYPE_POLICY)
 
 # Load the fitted LU Classifier
-lu_classifier = keras.models.load_model(f"{path_prefix}/lu_classifier.keras")
+lu_classifier = keras.models.load_model(str(config.LU_CLASSIFIER_MODEL))
 
 BATCH_SIZE = 256
 SEQ_LENGTH = 128
 
-if not os.path.isdir(f"{path_prefix}/cca_set/lu"):
+if not config.LU_PREDS_DIR.is_dir():
     # Get predictions for all the training data
     preprocess = src.preproc.preprocessor.ClassifierPreprocessor(
         SEQ_LENGTH, text_key="headline_with_lead", label_key="cca_label"
     )
-    ldc_data = src.data_setup.dapt_data.data_from_parquet(
-        path_prefix,
+    ldc_data = src.data_setup.data.data_from_parquet(
+        config.PROJECT_ROOT,
         "ldc_corpus",
         addl_columns=["cca", "cca_descriptor", "immig", "immig_descriptor"],
     )  # the function includes "ldc_corpus" as a default arg
-    ldc_data = src.data_setup.dapt_data.create_classifier_data(
+    ldc_data = src.data_setup.data.create_classifier_data(
         ldc_data, separate_labels=False
     )
     prediction_set = pl.concat([ldc_data["train"], ldc_data["val"]])
@@ -51,13 +43,13 @@ if not os.path.isdir(f"{path_prefix}/cca_set/lu"):
         prediction_set[0], batch_size=BATCH_SIZE
     )  # doing this for just the validation set on my local machine takes ~18 minutes
     lu_targets = prediction_set[1]
-    os.mkdir(f"{path_prefix}/cca_set/lu")
-    np.save(f"{path_prefix}/cca_set/lu/lu_preds.npy", lu_preds)
+    config.LU_PREDS_DIR.mkdir()
+    np.save(str(config.LU_PREDS_DIR / "lu_preds.npy"), lu_preds)
     lu_targets = lu_targets.to_numpy()
-    np.save(f"{path_prefix}/cca_set/lu/lu_targets.npy", lu_targets)
+    np.save(str(config.LU_PREDS_DIR / "lu_targets.npy"), lu_targets)
 else:
-    lu_preds = np.load(f"{path_prefix}/cca_set/lu/lu_preds.npy")
-    lu_targets = np.load(f"{path_prefix}/cca_set/lu/lu_targets.npy")
+    lu_preds = np.load(str(config.LU_PREDS_DIR / "lu_preds.npy"))
+    lu_targets = np.load(str(config.LU_PREDS_DIR / "lu_targets.npy"))
 
 lu_preds = np.reshape(lu_preds, lu_preds.shape[0])
 # DEDPUL wants the *probability of being unlabeled* (its convention is

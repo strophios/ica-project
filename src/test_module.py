@@ -5,25 +5,24 @@ import keras_hub
 import tensorflow as tf
 import warnings
 
+import src.config as config
 import src.model_setup.dapt_setup
 from keras import ops
-import os
-
-path_prefix = "~/immigration_project/00_ML_data_expansion/00_explorer"  # Probably will need to change this and move stuff around to fit the new project structure
-path_prefix = os.path.expanduser(path_prefix)
 
 PREDICTIONS_PER_SEQ = (
     32  # in standard BERT / RoBERTa (with seq length of 512) this is 96
 )
 
 dapt_model = src.model_setup.dapt_setup.get_DAPT_model(
-    PREDICTIONS_PER_SEQ, path=f"{path_prefix}/lm_head_weights.npy"
+    PREDICTIONS_PER_SEQ, path=str(config.DAPT_LM_HEAD_WEIGHTS)
 )
 
-dapt_model.load_weights(f"{path_prefix}/20251101_223754_dapt_checkpoint.keras")
+dapt_model.load_weights(
+    str(config.PROJECT_ROOT / "20251101_223754_dapt_checkpoint.keras")
+)
 
 dapt_model.layers[2].save_weights(
-    f"{path_prefix}/dapt_backbone.weights.h5"
+    str(config.DAPT_BACKBONE_WEIGHTS)
 )  # double check that I'm saving the correct layer
 # Not sure saving weights is enough? Also, I could alternatively make it enough by loading a Keras Hub backbone model and
 # replacing its weights.
@@ -31,7 +30,7 @@ dapt_model.layers[2].save_weights(
 backbone = keras_hub.models.Backbone.from_preset(
     "roberta_base_en", preprocessor=None, load_weights=False
 )
-backbone.load_weights(f"{path_prefix}/dapt_backbone.weights.h5")
+backbone.load_weights(str(config.DAPT_BACKBONE_WEIGHTS))
 
 
 def classifier_from_dapt_checkpoint(backbone_path, full_model_path=None):
@@ -88,7 +87,7 @@ def classifier_from_dapt_checkpoint(backbone_path, full_model_path=None):
 # there are a number of specific PU-learning algorithms (e.g. ...). would it make sense to try and implement one of them rather than nnPU / something with a class prior / etc.
 
 test_classifier = classifier_from_dapt_checkpoint(
-    f"{path_prefix}dapt_backbone.weights.h5"
+    str(config.DAPT_BACKBONE_WEIGHTS)
 )  # at the very least has identical shape to RobertaTextClassifier
 
 

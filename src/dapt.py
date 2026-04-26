@@ -1,4 +1,3 @@
-import os
 import polars as pl
 import numpy as np
 
@@ -13,16 +12,17 @@ import tensorflow as tf
 import datetime
 import math
 
-import src.data_setup.dapt_data
+import src.config as config
+import src.data_setup.data
 from src.preproc.preprocessor import CustomPreprocessor
 import src.model_setup.dapt_setup
 
 # tf.config.list_physical_devices('GPU')
 
-# setting for automatic mixed precision
-keras.config.set_dtype_policy(
-    "mixed_float16"
-)  # want to make sure this works on Explorer
+# Platform-conditional dtype policy. mixed_float16 on cluster CUDA;
+# float32 locally (MPS mixed-precision support is patchy and the
+# Tensor-Core motivation evaporates without CUDA).
+keras.config.set_dtype_policy(config.DTYPE_POLICY)
 
 # Seed Python, NumPy, and the Keras backend RNG. Matches the seed=200 used by
 # polars `.sample()` calls elsewhere in the pipeline so the whole pipeline is
@@ -43,13 +43,8 @@ MASK_RATE = 0.15  # This is the RoBERTa default, I'm pretty sure.
 # Training params
 EPOCHS = 5
 
-# test separate scripts for dataload + preproc
-
-# Data Loading
-path_prefix = os.path.abspath("/projects/ahd")
-
-ldc_data = src.data_setup.dapt_data.data_from_parquet(
-    path_prefix, "ldc_corpus"
+ldc_data = src.data_setup.data.data_from_parquet(
+    config.PROJECT_ROOT, "ldc_corpus"
 )  # the function includes "ldc_corpus" as a default arg
 
 # Now we create our datasets, a 90/10 split for training/validation
@@ -77,28 +72,28 @@ preprocess = CustomPreprocessor(SEQ_LENGTH, MASK_RATE, PREDICTIONS_PER_SEQ)
 # validation_set = tf.data.Dataset.from_tensor_slices(ldc_val["headline_with_lead"])
 
 # save dataset
-# training_set.save(f"{path_prefix}/dapt_training_set.tf")
-# validation_set.save(f"{path_prefix}/dapt_validation_set.tf")
+# training_set.save(str(config.DAPT_TRAINING_SET))
+# validation_set.save(str(config.DAPT_VALIDATION_SET))
 
-training_set = tf.data.Dataset.load(f"{path_prefix}/dapt_training_set.tf")
-validation_set = tf.data.Dataset.load(f"{path_prefix}/dapt_validation_set.tf")
+training_set = tf.data.Dataset.load(str(config.DAPT_TRAINING_SET))
+validation_set = tf.data.Dataset.load(str(config.DAPT_VALIDATION_SET))
 
 # **can now just load datasets**
 
 # Now do the preprocessing, shuffling, and batching
 shuffle_buffer = 100000  # keep in mind that I ideally want to increase this, but may actually need to decrease it
 
-training_set = src.data_setup.dapt_data.dataset_create(
+training_set = src.data_setup.data.dataset_create(
     shuffle_buffer,
     BATCH_SIZE,
     preprocess,
-    path=f"{path_prefix}/dapt_training_set.tf",
+    path=str(config.DAPT_TRAINING_SET),
 )
-validation_set = src.data_setup.dapt_data.dataset_create(
+validation_set = src.data_setup.data.dataset_create(
     shuffle_buffer,
     BATCH_SIZE,
     preprocess,
-    path=f"{path_prefix}/dapt_validation_set.tf",
+    path=str(config.DAPT_VALIDATION_SET),
 )
 
 # training_set = training_set.shuffle(buffer_size = shuffle_buffer).batch(batch_size = BATCH_SIZE)
@@ -110,7 +105,7 @@ validation_set = src.data_setup.dapt_data.dataset_create(
 
 # ---- CREATE THE MODEL ----
 dapt_model = src.model_setup.dapt_setup.get_DAPT_model(
-    PREDICTIONS_PER_SEQ, path=f"{path_prefix}/lm_head_weights.npy"
+    PREDICTIONS_PER_SEQ, path=str(config.DAPT_LM_HEAD_WEIGHTS)
 )
 
 # ---- SETUP PRETRAINING ----
@@ -146,11 +141,12 @@ dapt_model.compile(
 # Callbacks are passed to the model via the callbacks argument in
 # fit(), which takes a list of callbacks. You can pass any number of
 # callbacks.
+_run_stamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
 callbacks_list = [
     # Saves the current weights after every epoch
     keras.callbacks.ModelCheckpoint(
         # Path to the destination model file
-        filepath=f"{path_prefix}/{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}_dapt_checkpoint.keras",
+        filepath=str(config.PROJECT_ROOT / f"{_run_stamp}_dapt_checkpoint.keras"),
         # These two arguments mean you won't overwrite the model file
         # unless val_loss has improved, which allows you to keep the
         # best model seen during training.
@@ -159,7 +155,7 @@ callbacks_list = [
     ),
     # TensorBoard
     keras.callbacks.TensorBoard(
-        log_dir=f"{path_prefix}/dapt_logs/{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}",
+        log_dir=str(config.DAPT_LOGS_DIR / _run_stamp),
         histogram_freq=1,
         write_steps_per_second=False,
         update_freq="epoch",
@@ -183,7 +179,7 @@ dapt_model.fit(
 
 # There may be an issue with the profiler; leads to a warning during training, may or may not impact the usefulness of profiler
 
-dapt_model.save(f"{path_prefix}/dapt_current_model.keras")
+dapt_model.save(str(config.DAPT_CURRENT_MODEL))
 
 # This appears to be working locally, running at 50s/step, but not using the GPU at all with CPU maxed.
 # Rerunning w/o AMP and with the torch backend drops this to 12s/step, with spiky GPU usage.
