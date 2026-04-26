@@ -1,22 +1,58 @@
+import keras
 import keras_hub
 
 
 class ClassifierPreprocessor:
+    """
+    Multi-head-aware classifier preprocessor.
+
+    Maps a dict-valued batch (yielded by `tf.data.Dataset.map`) to the
+    shape expected by either a standard-mode model (loss handled by
+    `compile(loss=...)`) or an endpoint-layer model (loss handled by
+    head-internal `add_loss`, our primary path for FLPU and eventual
+    ALUM).
+
+    Note on the endpoint-mode shape: in endpoint mode, *targets are
+    model inputs*. The head's `call(features, targets=...)` consumes
+    them inside the model graph via `add_loss`. The preprocessor's
+    output dict therefore folds both features and targets into a
+    single dict; Keras's `.fit()` routes the entries to named
+    `keras.Input`s on the model side. This is the inherent shape of
+    the endpoint-layer pattern — see `model_setup/heads.py` and the
+    Piece 1 / Piece 3 sections of `docs/notes/tier2-design.md`.
+
+    Dtype: targets are cast to `target_dtype` (default `"float32"`)
+    here, so the cached preprocessed dataset has predictable dtype.
+    Losses still cast `y_true` to `y_pred.dtype` at the loss boundary
+    for mixed-precision robustness — these casts handle different
+    invariants. See Piece 3 design doc for the layered framing.
+    """
+
     def __init__(
         self,
         SEQ_LENGTH,
-        text_key=None,
-        label_key=None,
+        text_key,
+        label_keys,
         tokenizer=None,
         endpoint_model=False,
+        target_dtype="float32",
     ):
+        # --- Stash configuration ---------------------------------
+        # `label_keys` is a dict[str, str]: output_dict_key -> source_column_name.
+        # The output_dict_key must match either the corresponding `keras.Input`
+        # name (endpoint mode) or the model output name (standard mode); the
+        # preprocessor doesn't enforce that — the model-builder side has to
+        # agree on the convention.
         self.SEQ_LENGTH = SEQ_LENGTH
         self.text_key = text_key
-        self.label_key = label_key
+        self.label_keys = label_keys
         self.endpoint_model = endpoint_model
+        self.target_dtype = target_dtype
+
+        # --- Tokenizer + packer (unchanged from prior version) ---
         if tokenizer is None:
             self.tokenizer = keras_hub.tokenizers.RobertaTokenizer.from_preset(
-                "roberta_base_en",  # also, they pass SEQ_LENGTH to their tokenizer, but I don't think it matters, since I'm packing next
+                "roberta_base_en",
             )
         else:
             self.tokenizer = tokenizer
@@ -25,44 +61,37 @@ class ClassifierPreprocessor:
             start_value=self.tokenizer.start_token_id,
             end_value=self.tokenizer.end_token_id,
             pad_value=self.tokenizer.pad_token_id,
-            return_padding_mask=True,  # TESTING
-            # return_padding_mask = False,
+            return_padding_mask=True,
         )
 
     def __call__(self, inputs):
-        if self.text_key is not None and self.label_key is not None:
-            labels = inputs[self.label_key]
-            outputs = self.tokenizer(inputs[self.text_key])
-        elif self.text_key is None and self.label_key is None:
-            labels = inputs[1]
-            outputs = self.tokenizer(
-                inputs[0]
-            )  # taking just the text, not the labels, which we're assuming are at index 1
-        else:
-            raise ValueError(
-                "Either both or neither text_key and label_key must be provided (the input can only be indexed by keys *or* position)."
-            )
+        """
+        inputs: dict yielded by tf.data.Dataset (e.g.,
+            {"text": <tensor>, "cca_label": <tensor>, "immig_label": <tensor>, ...}).
+
+        Returns:
+            - endpoint mode (`endpoint_model=True`): single dict
+                {"token_ids": ..., "padding_mask": ..., <out_key>: <cast target>, ...}
+                where <out_key>/<cast target> entries come from `label_keys`.
+            - standard mode (`endpoint_model=False`): tuple
+                ({"token_ids": ..., "padding_mask": ...},
+                 {<out_key>: <cast target>, ...})
+        """
+        outputs = self.tokenizer(inputs[self.text_key])
         outputs = self.packer(outputs)
-        # If we're piping into a standard model with losses handled outside the model's
-        # layers, then we create a (features, labels) tuple so .fit() will use the features
-        # for fitting the model and then have access to labels for calculating the loss
+        outputs = {"token_ids": outputs[0], "padding_mask": outputs[1]}
+
+        targets = dict()
+
+        for out_key, source_col in self.label_keys.items():
+            targets[out_key] = keras.ops.cast(
+                inputs[source_col], dtype=self.target_dtype
+            )
+
         if not self.endpoint_model:
-            features = {
-                "token_ids": outputs[0],
-                "padding_mask": outputs[1],
-            }
-            labels = labels
-            return features, labels
+            return (outputs, targets)
         else:
-            # But if we're feeding into a model where the losses are handled within the
-            # model itself (i.e., with endpoint layers), then we need to give the targets
-            # to the model, so we output just a single dict with everything we need.
-            features = {
-                "token_ids": outputs[0],
-                "padding_mask": outputs[1],
-                "targets": labels,
-            }
-            return features
+            return {**outputs, **targets}
 
 
 class CustomPreprocessor:

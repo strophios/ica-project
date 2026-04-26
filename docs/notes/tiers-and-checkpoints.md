@@ -1,6 +1,6 @@
 # Audit and Refactor: Tiers, Checkpoints, and Process
 
-*Last updated: 2026-04-23 (mid-Tier-2 pause; Pieces 1 and 2 landed).*
+*Last updated: 2026-04-26 (Piece 3 landed; Pieces 1, 2, 3 done).*
 
 This doc exists so that a new session — whether picked up by you after
 weeks away, by a fresh LLM collaborator, or by someone else entirely —
@@ -65,7 +65,7 @@ agent after the first three commits. Found several real issues
 (see `8685c47` commit message). Review transcript lives in session
 history; the substantive findings are addressed in `8685c47`.
 
-**Tier 2 in progress.** Two of four pieces landed; paused mid-tier.
+**Tier 2 in progress.** Three of four pieces landed.
 
 - `789d88c` — Piece 1: `ClassificationHead` for multi-head refactor.
   Head-as-Layer abstraction, supports both standard mode (loss via
@@ -80,36 +80,43 @@ history; the substantive findings are addressed in `8685c47`.
   including full numerical verification against a numpy reference
   for uniform-multiplier, multiplier=0, and multiplier=0.5 cases.
   Lives in `src/model_setup/layer_lr_model.py`.
+- *(this commit)* — Piece 3: `ClassifierPreprocessor` refactored for
+  multi-head targets. Takes `label_keys: dict[str, str]` mapping
+  output-dict-key → source-column-name; emits a model-inputs-shaped
+  dict (endpoint mode) or `(features, targets_dict)` tuple (standard
+  mode). Targets cast to a stable `target_dtype` (default `float32`)
+  at preprocess time so cached datasets carry predictable dtype;
+  losses still cast `y_true` to `y_pred.dtype` at the loss boundary
+  for mixed-precision robustness — see Piece 3 design doc for the
+  layered-dtype framing. Positional-input fallback dropped (datasets
+  are now required to be dict-valued, which `run_cca_classification.py`
+  already produces). 12 tests covering construction, single- and
+  multi-head shape contracts in both modes, source→output routing,
+  and dtype casting. Lives in `src/preproc/preprocessor.py`; tests at
+  `tests/test_preprocessor.py`.
 
 The new abstractions exist **alongside** the existing
 `classifier_from_dapt_checkpoint` function; they are not yet wired
-into any training script. The wiring is Piece 4's job, after Piece 3
-(preprocessor refactor) delivers multi-head-shaped input batches.
+into any training script. The wiring is Piece 4's job.
 
 **Tier 2 pieces remaining:**
 
-- **Piece 3: Preprocessor refactor for multi-label targets.** The
-  `ClassifierPreprocessor` currently takes a single `label_key` and
-  emits one label per sample. For multi-head + endpoint-layer losses,
-  we need multiple head targets shaped into the model-inputs dict
-  (e.g., `{"token_ids", "padding_mask", "cca_targets", "immig_targets"}`).
-  This is the piece that actually unlocks multi-head *training* —
-  Pieces 1 and 2 built the model machinery; Piece 3 produces the
-  batches to feed it.
 - **Piece 4: Paths / config + data pipeline rename, and integration.**
   Consolidate scattered `path_prefix` blocks into a `paths.py` with
   platform detection; rename `data_setup/dapt_data.py` (already flagged
   in-code as mis-scoped); wire the refactored preprocessor + head +
   `LayerLRModel` into the training scripts; retire
-  `classifier_from_dapt_checkpoint`.
+  `classifier_from_dapt_checkpoint`. With Pieces 1–3 in place, this
+  is now pure integration work — no new abstractions required.
 - **Integration pass.** End-to-end smoke test of the composed stack
   on dummy data. Follows Piece 4.
 - **Adversarial review at Tier 2 end.** Likely the `code-reviewer`
   subagent this time (plan-alignment / architecture framing fits
   Tier 2 better than the opus general-purpose one used for Tier 1).
 
-Test suite at pause: **53 tests passing** (32 from Tier 1 + 11 for
-`ClassificationHead` + 10 for `LayerLRModel`).
+Test suite after Piece 3: **65 tests passing** (32 from Tier 1 + 11
+for `ClassificationHead` + 10 for `LayerLRModel` + 12 for
+`ClassifierPreprocessor`).
 
 **Deferred empirical checks** (to be batched when environment handling
 is settled — touched in Piece 4):
@@ -149,14 +156,14 @@ a signal we designed the shape wrong.
    `src/model_setup/layer_lr_model.py`. Custom `train_step` override
    applies per-variable multipliers before optimizer apply. Design
    and reasoning in `docs/notes/tier2-design.md` Piece 2.
-3. **[PENDING] Preprocessor refactor for multi-label targets.**
-   Piece 3. `ClassifierPreprocessor` takes a list or dict of label
-   keys rather than a single `label_key`. Output shape becomes the
-   model-input dict required by endpoint-layer heads (e.g.,
-   `{"token_ids", "padding_mask", "cca_targets", "immig_targets"}`).
-   Has real design meat — how to parameterize the label-key set,
-   dict vs tuple output, and how target routing composes with the
-   endpoint-layer contract.
+3. **[DONE — this commit] Preprocessor refactor for multi-label
+   targets.** Piece 3. `ClassifierPreprocessor` takes
+   `label_keys: dict[str, str]` mapping output-dict-key →
+   source-column-name; emits multi-head-shaped output in both
+   endpoint and standard modes. Targets cast to `target_dtype`
+   at preprocess time (loss still casts at its boundary —
+   layered-dtype framing). Positional-input fallback dropped.
+   Design and reasoning in `docs/notes/tier2-design.md` Piece 3.
 4. **[PENDING] Paths / config + data pipeline rename, and
    integration.** Piece 4. Consolidate scattered `path_prefix`
    blocks into a `paths.py` with platform detection; rename

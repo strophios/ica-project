@@ -2,7 +2,7 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
-*Last updated: 2026-04-23 (mid-Tier-2 pause).*
+*Last updated: 2026-04-26 (Tier 2 Piece 3 landed).*
 
 ## Project Overview
 
@@ -33,7 +33,7 @@ This decomposition lets us leverage the larger labeled datasets for CCA and immi
 - No `__init__.py` files exist (implicit namespace packages)
 - All scripts must be run from the **project root** (imports use `src.*` paths, e.g., `import src.model_setup.dapt_setup`)
 - **Path handling**: scripts switch between local (`~/immigration_project/...`) and cluster (`/projects/ahd`) paths; look for `path_prefix` at the top of each script
-- **Tests**: pytest is configured (`pyproject.toml [tool.pytest.ini_options]`, `pythonpath = ["."]`). Run with `pytest` from the project root. Current coverage is narrow: 53 tests passing — invariant tests for `FLPULoss` (`tests/test_flpu_loss.py`) and the train/val/test split logic in `create_classifier_data` (`tests/test_data_splits.py`), plus construction/shape/contract tests for the Tier 2 `ClassificationHead` (`tests/test_heads.py`, 11 tests) and `LayerLRModel` (`tests/test_layer_lr_model.py`, 10 tests).
+- **Tests**: pytest is configured (`pyproject.toml [tool.pytest.ini_options]`, `pythonpath = ["."]`). Run with `pytest` from the project root. Current coverage is narrow: 65 tests passing — invariant tests for `FLPULoss` (`tests/test_flpu_loss.py`) and the train/val/test split logic in `create_classifier_data` (`tests/test_data_splits.py`), plus construction/shape/contract tests for the Tier 2 `ClassificationHead` (`tests/test_heads.py`, 11 tests), `LayerLRModel` (`tests/test_layer_lr_model.py`, 10 tests), and `ClassifierPreprocessor` (`tests/test_preprocessor.py`, 12 tests).
 - **Reproducibility**: training scripts call `keras.utils.set_random_seed(200)` to match the `seed=200` used by the polars `.sample()` splits in `src/data_setup/dapt_data.py`.
 
 ## Architecture: Three-Phase ML Pipeline
@@ -66,7 +66,8 @@ The project implements a three-phase pipeline, each with dedicated training scri
 **Tier 2 abstractions that exist but are not yet on the training path:**
 - `src/model_setup/heads.py` — `ClassificationHead`, a `keras.layers.Layer` subclass supporting both standard mode (loss handled by outer `compile()`) and endpoint mode (loss registered via `add_loss`, needed for FLPU and eventual ALUM). Added in Tier 2 Piece 1 (commit `789d88c`).
 - `src/model_setup/layer_lr_model.py` — `LayerLRModel`, a `keras.Model` subclass overriding `train_step` to scale gradients by per-variable multipliers before optimizer apply. Supports discriminative fine-tuning (fixed geometric multipliers) and gradual unfreezing (callback-updated multipliers). Added in Tier 2 Piece 2 (commit `ad0f94b`).
-- **Not yet integrated.** Training/eval scripts (`run_cca_classification.py`, `eval_cca_classifier.py`) still build the model via `classifier_from_dapt_checkpoint` in `src/model_setup/classification_setup.py`. Wiring the new abstractions in is Tier 2 Piece 4's job, after Piece 3 (preprocessor refactor) delivers multi-head-shaped batches.
+- `src/preproc/preprocessor.py` — `ClassifierPreprocessor` refactored to multi-head shape: `label_keys: dict[str, str]` mapping output-dict-key → source-column-name; emits multi-head-shaped output in both endpoint and standard modes; casts targets to `target_dtype` (default `float32`) at preprocess time. Tier 2 Piece 3.
+- **Not yet integrated.** Training/eval scripts (`run_cca_classification.py`, `eval_cca_classifier.py`) still build the model via `classifier_from_dapt_checkpoint` in `src/model_setup/classification_setup.py` and use the old single-`label_key` preprocessor call. Wiring the three new abstractions into the training path is Tier 2 Piece 4's job — pure integration work, no new abstractions required.
 
 ## Key Design Decisions
 
@@ -75,7 +76,7 @@ The project implements a three-phase pipeline, each with dedicated training scri
 - **Data pipeline** uses `tf.data.Dataset` with `sample_from_datasets()` to handle PU class imbalance via weighted sampling (e.g., 1:9 pos:unl for CCA training, 1:5 for L/U classifier)
 - **Re-balanced batches** are central to the PU + class imbalance strategy: every batch is guaranteed to contain labeled positive signal
 - Preprocessed datasets are cached to disk (`cca_set/` directory) because `from_tensor_slices()` takes minutes on the full corpus
-- Two preprocessor classes in `src/preproc/preprocessor.py`: `CustomPreprocessor` (for DAPT/MLM tasks with masking) and `ClassifierPreprocessor` (for classification tasks, supports both standard and endpoint-layer patterns)
+- Two preprocessor classes in `src/preproc/preprocessor.py`: `CustomPreprocessor` (for DAPT/MLM tasks with masking) and `ClassifierPreprocessor` (for classification tasks, multi-head-aware as of Tier 2 Piece 3 — takes a `label_keys: dict[str, str]` mapping output-key → source-column, supports both standard and endpoint-layer patterns, casts targets to `target_dtype` at preprocess time)
 
 ## Data
 
@@ -96,9 +97,8 @@ The project implements a three-phase pipeline, each with dedicated training scri
 - Class prior estimation via DEDPUL
 
 **Priority open items:**
-- **Tier 2 refactor, in progress (paused mid-tier, 2 of 4 pieces landed).** See `docs/notes/tiers-and-checkpoints.md` for full status and `docs/notes/tier2-design.md` for design decisions. Pieces 1 (`ClassificationHead`) and 2 (`LayerLRModel`) are implemented and tested but not yet wired into training. Remaining:
-  - **Piece 3: `ClassifierPreprocessor` refactor for multi-head targets.** Take a list/dict of label keys rather than a single `label_key`; emit a model-inputs dict (e.g., `{"token_ids", "padding_mask", "cca_targets", "immig_targets"}`) suitable for endpoint-layer heads. This is what unlocks multi-head *training* — Pieces 1 and 2 built the model machinery; Piece 3 produces the batches to feed it.
-  - **Piece 4: Paths/config + integration.** Consolidate scattered `path_prefix` blocks into a `paths.py` with platform detection; rename `data_setup/dapt_data.py` (mis-scoped); wire the refactored preprocessor + `ClassificationHead` + `LayerLRModel` into the training scripts; retire `classifier_from_dapt_checkpoint`.
+- **Tier 2 refactor, in progress (3 of 4 pieces landed).** See `docs/notes/tiers-and-checkpoints.md` for full status and `docs/notes/tier2-design.md` for design decisions. Pieces 1 (`ClassificationHead`), 2 (`LayerLRModel`), and 3 (`ClassifierPreprocessor`) are implemented and tested but not yet wired into training. Remaining:
+  - **Piece 4: Paths/config + integration.** Consolidate scattered `path_prefix` blocks into a `paths.py` with platform detection; rename `data_setup/dapt_data.py` (mis-scoped); wire the refactored preprocessor + `ClassificationHead` + `LayerLRModel` into the training scripts; retire `classifier_from_dapt_checkpoint`. Pure integration — no new abstractions required.
   - **Integration pass.** End-to-end smoke test on dummy data.
   - **Adversarial review of Tier 2.** Likely the `code-reviewer` subagent (plan/architecture framing).
 - **Deferred empirical checks** (batched until Piece 4 when environment handling is settled): smoke training run with updated FLPU + corrected prior (≈ 0.02); confirm training dynamics under `mixed_float16` + removed-α FLPU; sensitivity sweep on Ratio Batch (currently 1:10, more aggressive than Ji 2023).

@@ -278,3 +278,183 @@ The Layers (heads, FLPU) remain backend-agnostic via `keras.ops`; only
 the training-step machinery is TF-specific.
 
 ---
+
+## Piece 3: Preprocessor refactor for multi-head targets
+
+**Status:** Implemented 2026-04-26 (commit hash filled in by next
+bookkeeping pass). `ClassifierPreprocessor` at
+`src/preproc/preprocessor.py`; tests at `tests/test_preprocessor.py`
+(12 tests covering construction, single- and multi-head shape
+contracts in both modes, source→output routing, and dtype casting).
+
+### Decision
+
+`ClassifierPreprocessor` takes a **dict** of label keys mapping
+output-dict-key → source-column-name, rather than a single
+`label_key`. It supports both endpoint and standard modes (preserving
+parity with `ClassificationHead`), and drops the positional-input
+branch (datasets are required to be dict-valued, which is already the
+case in practice). Dtype handling for targets stays at the loss layer
+(FLPU casts to `float32` internally); the preprocessor is dtype-agnostic
+on the target side.
+
+A single-head preprocessor is the degenerate case of a one-entry dict,
+not a separate code path.
+
+### Reasoning
+
+**Dict over list for `label_keys`.** The output-dict key has to match
+the corresponding `keras.Input` name on the model side (in endpoint
+mode) or the model output name (in standard mode). It is *semantically
+distinct* from the source column name — e.g., source column `cca_label`
+maps to model input `cca_targets`. Encoding this mapping as a dict
+makes the contract explicit at the call site. A list-with-naming-
+convention would hide the coupling behind a derivation rule; that's
+exactly the kind of implicit contract that bites later when the
+naming convention starts to feel arbitrary.
+
+**Keep both modes.** Piece 1's `ClassificationHead` supports both
+endpoint and standard modes, and the symmetry is cheap. FLPU and
+eventual ALUM require endpoint mode, so endpoint is the primary path,
+but standard mode lets us run a simple-loss baseline (e.g.,
+`BinaryCrossentropy`) without a separate preprocessor. The two modes
+differ in *which side* the targets-dict serves: in endpoint mode it's
+folded into the inputs (consumed by `keras.Input`s wired to head
+`targets` arguments); in standard mode it's the second tuple element
+(consumed by Keras's `compile(loss={output_name: ...})` routing).
+
+**Drop the positional branch.** The current `text_key=None,
+label_key=None` path handled `(text, label)` tuple-valued datasets.
+For multi-head this generalizes to `(text, l1, l2, ...)` where
+positional order becomes load-bearing — exactly the hidden contract
+we just argued against on the label-key side. `run_cca_classification.py`
+already produces dict-valued datasets, so there are no live callers to
+migrate; any future positional caller can `.map()` to dict form on
+construction.
+
+**Targets are model inputs in endpoint mode.** This is the inherent
+weirdness of the endpoint-layer pattern, not something the preprocessor
+introduces. The preprocessor just produces the dict-shape that Keras's
+`.fit()` will route to named `keras.Input`s. Worth a comment in the
+class docstring so a reader doesn't have to reverse-engineer the
+contract from the head implementation.
+
+**Dtype handling is layered: preprocessor and loss each own a
+distinct invariant.** The preprocessor casts targets to a stable,
+predictable training dtype (`float32` by default). FLPU still casts
+`y_true` to match `y_pred.dtype` at the loss boundary. These look
+like the same decision but address different sources of dtype variance:
+
+- The *preprocessor cast* handles **task variance**. Tokenized text
+  could in principle feed many tasks with different label dtypes
+  (binary classification, regression, generative). Keras-framework
+  preprocessors (e.g., `keras_hub.models.RobertaPreprocessor`) leave
+  labels untyped because they're general-purpose and don't know the
+  task. Our preprocessor *does* know — we're committing to binary
+  classification heads — so we can usefully commit to a label dtype
+  here.
+- The *loss cast* handles **runtime variance** in `y_pred.dtype`
+  under `mixed_float16`. `y_pred` may arrive at the loss as `float16`
+  or `float32` depending on Keras's loss-scaling machinery; the loss
+  has to align `y_true` to whatever `y_pred` actually is. This
+  invariant exists regardless of how specific the preprocessor is.
+
+Concretely, the preprocessor cast secures three benefits: (a) the
+cached dataset (`cca_set/`, ~minutes to recompute) carries known dtype
+rather than re-casting per batch; (b) inference data has the same
+shape/dtype contract as training data, with one place to look; (c)
+"what does the model see?" has a single clean answer at the
+preprocessor.
+
+The loss cast secures mixed-precision robustness — it's a no-op when
+dtypes already align, but load-bearing when they don't.
+
+This is not duplication. It is two layers handling two structurally
+different problems that happen to share the `ops.cast` primitive.
+Removing either cast leaves a real invariant unprotected.
+
+### Layout
+
+- `src/preproc/preprocessor.py` — `ClassifierPreprocessor` rewritten
+  in place. `CustomPreprocessor` (the MLM/DAPT preprocessor) is
+  unrelated and unchanged.
+- `tests/test_preprocessor.py` — new test module covering output-shape
+  contracts (single-head, multi-head; standard mode, endpoint mode),
+  dict-vs-position rejection, and key-routing correctness. Added
+  alongside the implementation.
+
+### Contracts
+
+**`ClassifierPreprocessor.__init__(SEQ_LENGTH, text_key, label_keys, tokenizer=None, endpoint_model=False, target_dtype="float32")`**
+
+- `SEQ_LENGTH`: int, sequence length used for padding/truncation.
+- `text_key`: str, dict key of the text column in the input batch.
+  Required (no positional fallback).
+- `label_keys`: `dict[str, str]` mapping output-dict key → source-column
+  name. Order is preserved (Python ≥ 3.7 dict semantics) but not
+  load-bearing — Keras routes by name.
+- `tokenizer`: optional preconstructed `RobertaTokenizer`. Defaults to
+  the `roberta_base_en` preset.
+- `endpoint_model`: bool, selects output mode. Default `False`.
+- `target_dtype`: dtype string for all targets, default `"float32"`.
+  All targets in the output dict are cast to this dtype. Per-output
+  dtype overrides are not supported in this version — see Open /
+  deferred for the multi-class extension path.
+
+**`ClassifierPreprocessor.__call__(inputs)`** — `inputs` is a dict
+yielded by a `tf.data.Dataset`. Tokenizes `inputs[text_key]`, packs
+to `SEQ_LENGTH`, casts each target to `target_dtype`, then assembles
+output:
+
+- **Endpoint mode** (`endpoint_model=True`): returns a single dict
+  `{"token_ids": ..., "padding_mask": ..., **{out_key: inputs[src_col] for out_key, src_col in label_keys.items()}}`.
+  All targets folded into the inputs side.
+- **Standard mode** (`endpoint_model=False`): returns
+  `(features_dict, targets_dict)` where
+  `features_dict = {"token_ids": ..., "padding_mask": ...}` and
+  `targets_dict = {out_key: inputs[src_col] for out_key, src_col in label_keys.items()}`.
+  Targets-dict keys must match the *model output* names so
+  `compile(loss={...})` routes correctly.
+
+### Open / deferred
+
+**Asymmetric label availability across heads.** If we ever pull in
+data sources where some articles have a CCA label but no immigration
+label (or vice versa), the preprocessor will need a masking scheme:
+either per-head sample weights (zero out the missing-label samples'
+contribution to that head's loss) or a sentinel value combined with
+masked-loss handling. Not a live concern — current data has both
+columns defined for all rows (null → 0 from Tier 1's data-handling
+fixes). Flag here so it isn't lost; promote to a pinned question if it
+becomes pressing before Tier 3.
+
+**Per-output target dtypes.** The current spec uses a single
+`target_dtype` for all outputs because every head we currently plan is
+binary (float32 targets). If a future head needs a different target
+dtype — most likely a multi-class head wanting integer class indices
+(`int32` or `int64`) for `SparseCategoricalCrossentropy`, or one-hot
+floats for `CategoricalCrossentropy` — the natural extension is to
+broaden `label_keys` from `dict[str, str]` to
+`dict[str, tuple[str, str]]` (where the tuple is `(source_column,
+target_dtype)`), or to add a parallel `label_dtypes: dict[str, str]`.
+Either keeps the single-dtype shorthand as the default. No need to
+build for this now; the extension is local to the preprocessor and
+won't disturb callers that don't need it.
+
+### Patterns introduced
+
+- **Explicit output-key → source-column mapping**: when a transformer
+  has to produce output names that downstream code routes by name,
+  the mapping should be data, not convention. Saves "what was the
+  rule again?" lookups every time you add a head.
+- **Endpoint-mode targets-as-inputs**: the dict-output shape encodes
+  the endpoint-layer contract — targets are inputs because the head's
+  `add_loss` consumes them inside the model. This is the
+  preprocessor-side counterpart to Piece 1's endpoint-layer pattern.
+- **Mode-aware output shape**: a single class produces tuple-shaped
+  output for `compile(loss=...)` routing or dict-shaped output for
+  `add_loss`-routing. The choice belongs to the caller (because it
+  belongs to the model architecture); the preprocessor just honors
+  it.
+
+---
