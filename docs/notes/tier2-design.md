@@ -281,11 +281,11 @@ the training-step machinery is TF-specific.
 
 ## Piece 3: Preprocessor refactor for multi-head targets
 
-**Status:** Implemented 2026-04-26 (commit hash filled in by next
-bookkeeping pass). `ClassifierPreprocessor` at
-`src/preproc/preprocessor.py`; tests at `tests/test_preprocessor.py`
-(12 tests covering construction, single- and multi-head shape
-contracts in both modes, source→output routing, and dtype casting).
+**Status:** Implemented in commit `e3dda6a`.
+`ClassifierPreprocessor` at `src/preproc/preprocessor.py`; tests at
+`tests/test_preprocessor.py` (12 tests covering construction, single-
+and multi-head shape contracts in both modes, source→output routing,
+and dtype casting).
 
 ### Decision
 

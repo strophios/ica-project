@@ -80,7 +80,7 @@ history; the substantive findings are addressed in `8685c47`.
   including full numerical verification against a numpy reference
   for uniform-multiplier, multiplier=0, and multiplier=0.5 cases.
   Lives in `src/model_setup/layer_lr_model.py`.
-- *(this commit)* — Piece 3: `ClassifierPreprocessor` refactored for
+- `e3dda6a` — Piece 3: `ClassifierPreprocessor` refactored for
   multi-head targets. Takes `label_keys: dict[str, str]` mapping
   output-dict-key → source-column-name; emits a model-inputs-shaped
   dict (endpoint mode) or `(features, targets_dict)` tuple (standard
@@ -156,7 +156,7 @@ a signal we designed the shape wrong.
    `src/model_setup/layer_lr_model.py`. Custom `train_step` override
    applies per-variable multipliers before optimizer apply. Design
    and reasoning in `docs/notes/tier2-design.md` Piece 2.
-3. **[DONE — this commit] Preprocessor refactor for multi-label
+3. **[DONE — commit `e3dda6a`] Preprocessor refactor for multi-label
    targets.** Piece 3. `ClassifierPreprocessor` takes
    `label_keys: dict[str, str]` mapping output-dict-key →
    source-column-name; emits multi-head-shaped output in both
