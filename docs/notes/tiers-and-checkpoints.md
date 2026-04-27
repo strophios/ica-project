@@ -1,6 +1,6 @@
 # Audit and Refactor: Tiers, Checkpoints, and Process
 
-*Last updated: 2026-04-27 (Piece 4b landed; Pieces 1–3 + 4a + 4b done, 4c remaining).*
+*Last updated: 2026-04-27 (Piece 4c landed; Pieces 1–3 + 4a–c done, integration smoke test + adversarial review remaining).*
 
 This doc exists so that a new session — whether picked up by you after
 weeks away, by a fresh LLM collaborator, or by someone else entirely —
@@ -65,7 +65,7 @@ agent after the first three commits. Found several real issues
 (see `8685c47` commit message). Review transcript lives in session
 history; the substantive findings are addressed in `8685c47`.
 
-**Tier 2 in progress.** Piece 4 underway; sub-pieces 4a and 4b landed. Pieces 1, 2, 3, 4a, and 4b complete; 4c remaining.
+**Tier 2 nearly complete.** Piece 4c landed; all four pieces and their sub-pieces (4a/4b/4c) done. Integration smoke test on dummy or real data + adversarial review of Tier 2 are the remaining items before closing the tier.
 
 - `789d88c` — Piece 1: `ClassificationHead` for multi-head refactor.
   Head-as-Layer abstraction, supports both standard mode (loss via
@@ -137,33 +137,49 @@ history; the substantive findings are addressed in `8685c47`.
   them; `tf.math.scalar_mul` handles both dense and sparse cases.
   This was a latent bug from Piece 2 surfaced by 4b's integration
   tests; one regression test added to `tests/test_layer_lr_model.py`.
+- *(this commit)* — Piece 4c: training and eval scripts rewritten
+  end-to-end to use the Tier 2 abstractions; `classifier_from_dapt_checkpoint`
+  and `src/model_setup/classification_setup.py` retired. Substantive
+  changes: `ClassificationHead` extended with a `metrics` parameter
+  (symmetric with `loss_fn` — both fire only when targets supplied;
+  metric instances are renamed to be prefixed with the head's name to
+  avoid multi-head collisions); `run_cca_classification.py` builds
+  train + inference models sharing the head and backbone (Pattern A);
+  `eval_cca_classifier.py` builds a fresh inference model and loads
+  weights by name (Pattern 2); two preprocessor instances split fit/eval
+  (with `cca_targets`) from predict (no targets) explicitly;
+  `LossScaleOptimizer` wraps AdamW conditional on `IS_CLUSTER`; FLPU
+  prior 0.03 → 0.02; the pre-existing test-predict bug
+  (`steps=validation_steps` + `.repeat()` producing duplicate predictions)
+  is fixed by building finite predict datasets manually. 6 new tests
+  added to `tests/test_heads.py` for the metrics extension.
 
-The Pieces-1–3 abstractions still exist **alongside** the existing
-`classifier_from_dapt_checkpoint` function; they are not yet wired
-into any training script. Wiring is the job of Piece 4c.
+**Tier 2 pieces complete.** All four pieces (and their sub-pieces
+4a/4b/4c) are landed. The Tier 2 abstractions are wired into the
+training and eval paths; the legacy `classifier_from_dapt_checkpoint`
++ `classification_setup.py` are gone.
 
-**Tier 2 pieces remaining:**
+**Tier 2 closeout items remaining:**
 
-- **Piece 4c: Wiring + retirement.** Rewrite `run_cca_classification.py`
-  and `eval_cca_classifier.py` to use the new abstractions
-  (`load_dapt_backbone` + `build_endpoint_model` +
-  `build_inference_model`; preprocessor with `label_keys={"cca_targets": "cca_label"}`,
-  `endpoint_model=True`); update FLPU prior 0.03 → 0.02; delete
-  `classifier_from_dapt_checkpoint` and
-  `src/model_setup/classification_setup.py` outright. The current
-  scripts have stale calls to the old `ClassifierPreprocessor`
-  signature (`label_key=` instead of `label_keys={...}`) — broken
-  on disk since `e3dda6a`; 4c is where they get fixed.
 - **Integration pass.** End-to-end smoke test of the composed stack
-  on dummy data. Follows 4c.
+  on dummy data (or a small slice of real data on local). Verifies
+  the wiring at runtime — unit tests cover individual abstractions
+  but not the actual fit → save → load → predict cycle as it'll run
+  on the cluster. The 85-test suite gives us confidence the pieces
+  work; the smoke test verifies they work *together*.
 - **Adversarial review at Tier 2 end.** Likely the `code-reviewer`
-  subagent this time (plan-alignment / architecture framing fits
-  Tier 2 better than the opus general-purpose one used for Tier 1).
+  subagent (plan-alignment / architecture framing fits Tier 2 better
+  than the opus general-purpose one used for Tier 1). Should review
+  the cumulative shape of Pieces 1–4 against the design doc, with
+  particular attention to: the endpoint-pattern decisions, the
+  Pattern A vs. Pattern 2 split, the naming-convention subtleties,
+  the metrics-in-head extension, and the deletion of
+  `classification_setup.py`.
 
-Test suite after Piece 4b: **79 tests passing** (32 from Tier 1 + 11
-for `ClassificationHead` + 11 for `LayerLRModel` (10 original + 1
-sparse-gradient regression) + 12 for `ClassifierPreprocessor` + 13
-for `assembly`).
+Test suite after Piece 4c: **85 tests passing** (32 from Tier 1 + 17
+for `ClassificationHead` (11 original + 6 metrics) + 11 for `LayerLRModel`
+(10 original + 1 sparse-gradient regression) + 12 for
+`ClassifierPreprocessor` + 13 for `assembly`).
 
 **Deferred empirical checks** (to be batched when environment handling
 is settled — touched in Piece 4):
@@ -227,10 +243,17 @@ a signal we designed the shape wrong.
      integration tests in `tests/test_assembly.py` + 1 regression
      test in `tests/test_layer_lr_model.py`. Design and reasoning
      in `docs/notes/tier2-design.md` Piece 4b.
-   - **4c [PENDING]**: rewire `run_cca_classification.py` and
-     `eval_cca_classifier.py` to use the new abstractions; update
-     FLPU prior 0.03 → 0.02; delete `classifier_from_dapt_checkpoint`
-     and `model_setup/classification_setup.py` outright.
+   - **4c [DONE — this commit]**: training and eval scripts rewritten
+     end-to-end on the new abstractions; `ClassificationHead`
+     extended with `metrics` parameter (head-internal, name-prefixed);
+     `classifier_from_dapt_checkpoint` and
+     `model_setup/classification_setup.py` deleted. Pattern A in the
+     training script (in-process Layer-instance sharing); Pattern 2
+     in the eval script (cross-process weight loading by name).
+     Conditional `LossScaleOptimizer` wrap on `IS_CLUSTER`. FLPU
+     prior 0.03 → 0.02. Test-predict bug fixed via finite predict
+     datasets. Design and reasoning in `docs/notes/tier2-design.md`
+     Piece 4c.
 5. **[PENDING] Integration pass.** End-to-end smoke test of the
    composed stack on dummy data.
 6. **[PENDING] Adversarial review of Tier 2.** Likely the

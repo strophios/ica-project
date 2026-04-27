@@ -165,3 +165,99 @@ class TestTrainableWeights:
                 "likely cause: sub-layers were constructed at class level "
                 "rather than in __init__."
             )
+
+
+# -----------------------------------------------------------------------------
+# Per-head metrics
+# -----------------------------------------------------------------------------
+
+class TestMetrics:
+    """The `metrics` parameter on `ClassificationHead` carries per-head
+    metric objects. Symmetric with `loss_fn`: both fire only when targets
+    are provided, both are part of the endpoint-layer pattern. The head
+    renames each metric to be prefixed with its name so multi-head models
+    don't collide on metric names (e.g., `"binary_accuracy"` becomes
+    `"cca_binary_accuracy"`)."""
+
+    def test_metrics_renamed_with_head_name_prefix(self):
+        head = ClassificationHead(
+            hidden_dim=HIDDEN_DIM,
+            metrics=[
+                keras.metrics.BinaryAccuracy(),
+                keras.metrics.Precision(name="precision"),
+            ],
+            name="cca",
+        )
+        names = [m.name for m in head.metric_objs]
+        assert "cca_binary_accuracy" in names
+        assert "cca_precision" in names
+
+    def test_metric_originals_not_mutated(self):
+        """The head should clone metrics rather than mutating in place
+        — protects callers who reuse a metric instance elsewhere."""
+        original = keras.metrics.BinaryAccuracy(name="binary_accuracy")
+        head = ClassificationHead(
+            hidden_dim=HIDDEN_DIM, metrics=[original], name="cca"
+        )
+        # Original keeps its name; head holds a renamed clone.
+        assert original.name == "binary_accuracy"
+        assert head.metric_objs[0] is not original
+        assert head.metric_objs[0].name == "cca_binary_accuracy"
+
+    def test_metric_state_updates_when_targets_provided(self):
+        """`call(features, targets=...)` should call `update_state` on
+        each metric. With known features + targets, the metric's
+        `result()` should reflect the prediction."""
+        head = ClassificationHead(
+            hidden_dim=HIDDEN_DIM,
+            metrics=[keras.metrics.BinaryAccuracy(threshold=0.0)],
+            name="cca",
+        )
+        features = _dummy_features()
+        targets = _dummy_targets()
+        head.metric_objs[0].reset_state()
+        _ = head(features, targets=targets)
+        # BinaryAccuracy result is a scalar in [0, 1].
+        result = float(head.metric_objs[0].result())
+        assert 0.0 <= result <= 1.0
+
+    def test_metric_state_unchanged_when_targets_none(self):
+        """Without targets, no update_state call should fire — mirrors
+        the loss path's guard. Result should remain at the post-reset
+        default."""
+        head = ClassificationHead(
+            hidden_dim=HIDDEN_DIM,
+            metrics=[keras.metrics.BinaryAccuracy(threshold=0.0)],
+            name="cca",
+        )
+        head.metric_objs[0].reset_state()
+        result_before = float(head.metric_objs[0].result())
+        _ = head(_dummy_features(), targets=None)
+        result_after = float(head.metric_objs[0].result())
+        assert result_before == result_after
+
+    def test_metrics_appear_in_layer_metrics(self):
+        """Keras 3's tracker should expose the head's metrics via
+        `Layer.metrics`, so they propagate to `Model.metrics` for
+        fit/evaluate logging."""
+        head = ClassificationHead(
+            hidden_dim=HIDDEN_DIM,
+            metrics=[
+                keras.metrics.BinaryAccuracy(),
+                keras.metrics.Precision(name="precision"),
+            ],
+            name="cca",
+        )
+        layer_metric_names = {m.name for m in head.metrics}
+        assert "cca_binary_accuracy" in layer_metric_names
+        assert "cca_precision" in layer_metric_names
+
+    def test_default_no_metrics_is_empty_list(self):
+        """Backward compatibility: heads without explicit `metrics=`
+        should have an empty `metric_objs` list and behave as before."""
+        head = ClassificationHead(hidden_dim=HIDDEN_DIM, name="cca")
+        assert head.metric_objs == []
+        # Calling without targets shouldn't error.
+        _ = head(_dummy_features(), targets=None)
+        # Calling with targets shouldn't error either.
+        _ = head(_dummy_features(), targets=_dummy_targets())

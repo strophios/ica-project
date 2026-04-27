@@ -12,7 +12,7 @@ import src.config as config
 import src.model_setup.dapt_setup
 import src.data_setup.data
 import src.preproc.preprocessor
-import src.model_setup.classification_setup
+# import src.model_setup.classification_setup  # retired in Tier 2 Piece 4c
 import src.loss_functions.loss
 
 # Preprocessing params
@@ -192,9 +192,15 @@ preprocess = src.preproc.preprocessor.ClassifierPreprocessor(
     endpoint_model=False,
 )
 
-cca_classifier = src.model_setup.classification_setup.classifier_from_dapt_checkpoint(
-    str(config.DAPT_BACKBONE_WEIGHTS)
-)  # at the very least has identical shape to RobertaTextClassifier
+# cca_classifier = src.model_setup.classification_setup.classifier_from_dapt_checkpoint(
+#     str(config.DAPT_BACKBONE_WEIGHTS)
+# )  # retired in Tier 2 Piece 4c — use load_dapt_backbone + ClassificationHead +
+#    # build_endpoint_model from src.model_setup instead. This scratch script is
+#    # slated for Tier 4 hygiene cleanup.
+raise RuntimeError(
+    "test_script.py is partially broken pending Tier 4 cleanup; the "
+    "classifier-construction path was retired in Piece 4c."
+)
 cca_classifier.compile(
     optimizer=optimizer,
     loss=keras.losses.BinaryCrossentropy(from_logits=True),

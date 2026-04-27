@@ -1,109 +1,173 @@
-import keras
-import tensorflow as tf
-import polars as pl
-import numpy as np
+"""
+Evaluate a trained CCA classifier on the held-out test set, attaching
+per-sample logit scores to the underlying polars dataframe for
+qualitative review.
 
-import math
+This is the cross-process companion to `run_cca_classification.py`:
+the training script saves weights to disk; this script reconstructs
+the model architecture from scratch (with a fresh `ClassificationHead`
+instance), loads the weights by name, and runs predictions. Pattern 2
+of the train-vs-inference split (see Tier 2 Piece 4b design doc) —
+in-process Pattern A weight-sharing isn't available across script
+boundaries, so this script doesn't share Layer instances with the
+training script; it gets parity by matching head configuration so
+weight names line up at load time.
+"""
+
+import keras
+import numpy as np
+import polars as pl
+import tensorflow as tf
 
 import src.config as config
-import src.model_setup.dapt_setup
 import src.data_setup.data
-import src.preproc.preprocessor
-import src.model_setup.classification_setup
-import src.loss_functions.loss
+from src.preproc.preprocessor import ClassifierPreprocessor
+from src.model_setup.backbone import load_dapt_backbone
+from src.model_setup.heads import ClassificationHead
+from src.model_setup.assembly import build_inference_model
+from src.loss_functions.loss import FLPULoss
 
 # Apply platform-conditional dtype policy (no-op equivalent at eval
 # time, but kept symmetric with run_cca_classification.py).
 keras.config.set_dtype_policy(config.DTYPE_POLICY)
 
-# Seed for reproducibility (shouldn't matter much at eval time but keeps
-# any incidental shuffling / sampling deterministic).
+# Seed for reproducibility (shouldn't matter much at eval time but
+# keeps any incidental shuffling / sampling deterministic).
 keras.utils.set_random_seed(200)
 
 BATCH_SIZE = 256
 SEQ_LENGTH = 128
-# TODO: this is the val_steps number (from 1017 val positives). Using it as
-# the `steps=` argument to predict() below makes predictions loop over the
-# (repeated) test data; downstream code slices back to the real dataframe
-# length. A cleaner fix is to size steps from the actual test split.
-validation_steps = math.floor(1017 / (BATCH_SIZE / 2))
 
-preprocess = src.preproc.preprocessor.ClassifierPreprocessor(
+# Class prior — must match the value used at training time so the
+# head's reconstructed loss has the same configuration as the trained
+# model (weights load by name; loss config doesn't strictly affect
+# inference, but matching is good hygiene). Updated 4c: 0.03 → 0.02.
+FLPU_PRIOR = 0.02
+
+
+# -----------------------------------------------------------------------------
+# Build inference model (Pattern 2: fresh head, weights loaded by name)
+# -----------------------------------------------------------------------------
+backbone = load_dapt_backbone(config.DAPT_BACKBONE_WEIGHTS)
+
+# Fresh head instance with the same configuration the training script
+# used. Variable names within the head are derived from the head's
+# `name="cca"` plus sublayer names, so they line up with the saved
+# weights from training. The metrics list is reproduced for
+# parity, although it's not actually used at inference (inf model
+# calls the head with targets=None, so update_state never fires).
+cca_head = ClassificationHead(
+    hidden_dim=backbone.hidden_dim,
+    loss_fn=FLPULoss(prior=FLPU_PRIOR, kiryo_clawback=False),
+    metrics=[
+        keras.metrics.BinaryAccuracy(threshold=0.0),
+        keras.metrics.Precision(thresholds=0.0, name="precision"),
+        keras.metrics.Recall(thresholds=0.0, name="recall"),
+        keras.metrics.AUC(curve="PR", from_logits=True, name="pr_auc"),
+    ],
+    name="cca",
+)
+
+cca_inference = build_inference_model(
+    backbone=backbone,
+    heads={"cca": cca_head},
+    seq_length=SEQ_LENGTH,
+)
+
+# Load weights saved by the training script. Weights are matched by
+# variable name across the train and inference graphs — both have a
+# backbone and a head named "cca" with the same architecture, so the
+# variable hierarchy aligns.
+cca_inference.load_weights(str(config.CCA_CLASSIFIER_WEIGHTS))
+
+
+# -----------------------------------------------------------------------------
+# Build finite predict datasets
+# -----------------------------------------------------------------------------
+# Predict-only preprocessor: no targets emitted, just the model inputs
+# the inference graph declares (`token_ids`, `padding_mask`).
+predict_preprocess = ClassifierPreprocessor(
     SEQ_LENGTH=SEQ_LENGTH,
     text_key="headline_with_lead",
-    label_key="cca_label",
-    endpoint_model=False,
+    label_keys={},
+    endpoint_model=True,
 )
 
-# load the data
-test_pos = tf.data.Dataset.load(str(config.CCA_SET_DIR / "test_pos.tf"))
-# set shuffle_buffer to 0, which now results in no shuffling
-test_pos = src.data_setup.data.dataset_create(
-    shuffle_buffer=0, batch_size=BATCH_SIZE, preprocessor=preprocess, data=test_pos
-)
-test_unl = tf.data.Dataset.load(str(config.CCA_SET_DIR / "test_unl.tf"))
-test_unl = src.data_setup.data.dataset_create(
-    shuffle_buffer=0, batch_size=BATCH_SIZE, preprocessor=preprocess, data=test_unl
-)
 
-# the following currently throws an error, not sure why?
-# test_set = src.data_setup.data.dataset_create(
-#     0,
-#     BATCH_SIZE,
-#     preprocess,
-#     data=[test_pos, test_unl],
-#     weights=[0.5, 0.5],
-# )
+def _finite_predict_dataset(saved_dataset_path):
+    """Build a finite (non-repeated) tf.data pipeline for predict.
+    Avoids the `steps=validation_steps` + `.repeat()` pitfall that
+    produced duplicate predictions in the pre-Tier-2 code."""
+    return (
+        tf.data.Dataset.load(str(saved_dataset_path))
+        .batch(BATCH_SIZE, drop_remainder=False)
+        .map(predict_preprocess, num_parallel_calls=tf.data.AUTOTUNE)
+        .prefetch(tf.data.AUTOTUNE)
+    )
 
-# load the classifier
-# cca_classifier = keras.models.load_model(str(config.CCA_CLASSIFIER_MODEL))
 
-cca_classifier = src.model_setup.classification_setup.classifier_from_dapt_checkpoint(
-    str(config.DAPT_BACKBONE_WEIGHTS),
-    freeze_encoder=True,  # dropout = .2?,
-)  # at the very least has identical shape to RobertaTextClassifier
+test_pos_set = _finite_predict_dataset(config.CCA_SET_DIR / "test_pos.tf")
+test_unl_set = _finite_predict_dataset(config.CCA_SET_DIR / "test_unl.tf")
 
-cca_classifier.load_weights(str(config.CCA_CLASSIFIER_WEIGHTS))
 
-# overall eval on test set. probably want to add more metrics?
-# test_results = cca_classifier.evaluate(
-#     test_set, steps=validation_steps, return_dict=True
-# )
+# -----------------------------------------------------------------------------
+# Predict
+# -----------------------------------------------------------------------------
+# Multi-head models return predict() output as a dict keyed by output
+# name. Single-head models can return either a dict or a bare tensor
+# depending on Keras version / output structure; handle both.
+pos_scores = cca_inference.predict(test_pos_set, batch_size=BATCH_SIZE)
+unl_scores = cca_inference.predict(test_unl_set, batch_size=BATCH_SIZE)
 
-# positive and unlabeled scores separately, to be added to their respective polars subsets
-pos_scores = cca_classifier.predict(
-    test_pos, batch_size=BATCH_SIZE, steps=validation_steps
-)
+if isinstance(pos_scores, dict):
+    pos_scores = pos_scores["cca"]
+    unl_scores = unl_scores["cca"]
 
-unl_scores = cca_classifier.predict(
-    test_unl, batch_size=BATCH_SIZE, steps=validation_steps
-)
 
-# Now add the predictions to the data to facilitate easy qualitative evaluation
+# -----------------------------------------------------------------------------
+# Attach scores to dataframe for qualitative review
+# -----------------------------------------------------------------------------
 ldc_data = src.data_setup.data.data_from_parquet(
     config.PROJECT_ROOT,
     "ldc_corpus",
     addl_columns=["cca", "cca_descriptor", "immig", "immig_descriptor"],
-)  # the function includes "ldc_corpus" as a default arg
-
+)
 ldc_data = src.data_setup.data.create_classifier_data(ldc_data, separate_labels=True)
 
-# for convenience
 pos_df = ldc_data["test"]["pos"]
 unl_df = ldc_data["test"]["unl"]
 
-# add the scores, taking just up to the number of df rows, since
-# the overrun their end and have repetitions
-pos_df = pos_df.with_columns(cca_logit=pos_scores[0 : pos_df.shape[0]].squeeze())
-# we only scored as many unlabeled as we have positives, so we subset by pos_df shape here
-unl_df = unl_df[0 : pos_df.shape[0]].with_columns(
-    cca_logit=unl_scores[0 : pos_df.shape[0]].squeeze()
+# Predictions are now finite-dataset-sized (no `.repeat()` overrun),
+# so the slicing-to-dataframe-length workaround the old script needed
+# isn't required. Sanity-check the lengths align before we attach.
+assert pos_scores.shape[0] == pos_df.shape[0], (
+    f"pos_scores length ({pos_scores.shape[0]}) != pos_df length "
+    f"({pos_df.shape[0]}). Likely cause: dataset construction or "
+    f"predict pipeline produced a different number of samples than "
+    f"the source dataframe — check batch / drop_remainder settings."
 )
-# sort(self, by, descending)
-# bottom_k
-# top_k
-np.percentile(pos_scores, [1, 2, 3, 4, 5, 10, 20])
-np.percentile(unl_scores, [50, 75, 80, 85, 90, 95, 98])
+assert unl_scores.shape[0] == unl_df.shape[0], (
+    f"unl_scores length ({unl_scores.shape[0]}) != unl_df length "
+    f"({unl_df.shape[0]})."
+)
+
+pos_df = pos_df.with_columns(cca_logit=pos_scores.squeeze())
+# Subset unl_df to match pos_df length for the qualitative review
+# CSV (matches the prior script's "balanced top-K" behavior).
+unl_df = unl_df[: pos_df.shape[0]].with_columns(
+    cca_logit=unl_scores[: pos_df.shape[0]].squeeze()
+)
+
+
+# -----------------------------------------------------------------------------
+# Output: bottom-200 positives by logit (most-confidently-negative
+# positives — useful for hand-checking the indexer's CCA tags)
+# -----------------------------------------------------------------------------
+# Distributions of logit scores for sanity inspection.
+print("pos_scores percentiles [1, 2, 3, 4, 5, 10, 20]:",
+      np.percentile(pos_scores, [1, 2, 3, 4, 5, 10, 20]))  # LOG
+print("unl_scores percentiles [50, 75, 80, 85, 90, 95, 98]:",
+      np.percentile(unl_scores, [50, 75, 80, 85, 90, 95, 98]))  # LOG
 
 pos_df.select("id", "headline", "lead_paragraph", "cca_logit").bottom_k(
     by="cca_logit", k=200

@@ -923,3 +923,160 @@ what it'd be with the real RoBERTa backbone, just without the
 50M-parameter overhead per test.
 
 ---
+
+## Piece 4c: Wiring + retirement
+
+**Status:** In progress (design 2026-04-27).
+
+### Decision
+
+`run_cca_classification.py` and `eval_cca_classifier.py` are rewritten
+to use the Tier 2 abstractions end-to-end. `classifier_from_dapt_checkpoint`
+and `src/model_setup/classification_setup.py` are deleted outright.
+`ClassificationHead` gains a `metrics` parameter — symmetric with
+`loss_fn`, both fire only when targets are provided. The training
+script uses Pattern A (in-process: training and inference models
+share head + backbone Layer instances); the eval script uses Pattern 2
+(cross-process: fresh head, weights loaded by name).
+
+### Reasoning
+
+**`metrics` lives in the head, not at compile time.** This was the
+substantive design call for 4c. Two alternatives were considered:
+
+- *Option 1 (dataset wrapper)*: have the dataset emit `(input_dict,
+  label_dict)` so compile-time metrics receive `y_true`. Endpoint
+  loss still fires inside the head; metrics use the duplicate label
+  routing.
+- *Option 2 (chosen)*: extend `ClassificationHead` to accept a
+  `metrics` parameter, calling `update_state(targets, logits)`
+  inside `call()`. Symmetric with `loss_fn`. Keras 3 surfaces
+  layer-attribute metric instances via `Layer.metrics` →
+  `Model.metrics`, so fit/evaluate logging works unchanged.
+
+Option 2 is the more idiomatic match for the endpoint-layer pattern
+— the head already owns its loss; making it own its metrics keeps
+loss and metrics on the same conceptual footing, avoids data
+duplication, and avoids an explicit dataset-shape transformation
+that exists *only* to bridge endpoint mode and compile-time metrics.
+The cost is a small extension to Piece 1's contract; the benefit is
+a cleaner architectural foundation that scales to multi-head
+naturally.
+
+**Metric name prefixing.** With multiple heads sharing a metric type
+(e.g., `BinaryAccuracy()` on both `cca` and `immig`), default metric
+names collide in `model.metrics`. The head renames each metric to
+prefix the head's name: `BinaryAccuracy()` → `cca_binary_accuracy`
+on a head named `cca`. Renaming uses `m.__class__.from_config(...)`
+to clone — caller-passed metric instances are never mutated. This
+is implemented now even though only one head exists, so the
+multi-head extension doesn't have to revisit it later.
+
+**Two-preprocessor split (training vs. predict).** The training
+preprocessor uses `label_keys={"cca_targets": "cca_label"},
+endpoint_model=True` — emits the full input dict including
+`cca_targets`. The predict preprocessor uses `label_keys={},
+endpoint_model=True` — same shape minus the target column, matching
+the inference model's input signature exactly. Two preprocessor
+instances rather than relying on Keras to silently ignore extra
+dict keys: explicit > implicit, and future Keras versions may
+tighten this behavior.
+
+**Pattern A in the training script, Pattern 2 in the eval script.**
+The training script is single-process (fit → predict on test set in
+the same Python process), so sharing head + backbone Layer instances
+between `build_endpoint_model` and `build_inference_model` is the
+clean shape — weights are shared by Python identity. The eval script
+is cross-process (loads weights from disk); fresh head instance with
+matching configuration → variable names align → `load_weights` works.
+Both scripts use the same `build_inference_model` primitive, just
+constructed differently.
+
+**Test-set predict bug fix.** The pre-Tier-2 script passed
+`steps=validation_steps` to `predict()` on a `.repeat()`-based
+dataset, which produced duplicate predictions sized to val-positives
+count rather than test count. Replaced with finite (non-repeated)
+predict datasets sized to the actual data — built manually with
+`Dataset.load(...).batch(...).map(predict_preprocess).prefetch(...)`
+rather than going through `dataset_create` (which always calls
+`.repeat()`). Removes the downstream `pos_scores[0:pos_df.shape[0]]`
+slicing workaround the eval script needed.
+
+**`LossScaleOptimizer` conditional on `IS_CLUSTER`.** Under
+`mixed_float16` (cluster CUDA), wrapping AdamW in
+`LossScaleOptimizer` is the conventionally correct setup —
+protects against fp16 gradient underflow on small gradients.
+Locally (`float32`) it's unnecessary machinery, so we skip the
+wrap. Same pattern as `DTYPE_POLICY` itself: one platform-conditional
+branch in the setup, identical user-facing API afterwards.
+
+**FLPU prior 0.03 → 0.02.** The corrected estimate from
+`run_prior_estimate.py` (after the DEDPUL bandwidth-scale fix). The
+0.03 value in pre-Tier-2 code was kept "for continuity" while
+training a model under the old prior; 4c is the natural point to
+update for the next training run.
+
+**Save weights only, not full model.** `LayerLRModel` requires
+`@keras.saving.register_keras_serializable()` plus serialization of
+the `group_fn` callable for full `.keras` save/load to work, which
+is finicky. Save weights (variable-name-keyed `.h5` file) only —
+the eval script reconstructs the architecture from code, loads
+weights by name. Cross-process Pattern 2 is what we wanted anyway.
+
+### Layout
+
+- `src/run_cca_classification.py`: rewritten end-to-end.
+- `src/eval_cca_classifier.py`: rewritten end-to-end.
+- `src/model_setup/heads.py`: extended with `metrics` parameter.
+- `tests/test_heads.py`: extended with `TestMetrics` class
+  (6 tests covering renaming, mutation safety, state updates,
+  no-target guard, layer-metrics propagation, default empty list).
+- `src/model_setup/classification_setup.py`: **deleted**.
+- `src/test_script.py` (scratch): minimal patch — comments out the
+  retired `classification_setup` import, raises `RuntimeError` at
+  the now-broken classifier construction. Tier 4 hygiene will move
+  the file to `scratch/` and either rewrite or retire it.
+- `src/model_setup/heads.py` and the rest: stale documentation
+  references to `classification_setup.py` updated to note its
+  retirement in 4c.
+
+### Patterns introduced
+
+- **Layer-internal metrics via `metric_objs`.** Symmetric with
+  `add_loss`. Keras 3's tracker picks up metric instances inside a
+  layer's attribute list and surfaces them through `Layer.metrics`
+  → `Model.metrics`. The head clones each metric with a head-name-
+  prefixed name to avoid multi-head collisions.
+- **Dual preprocessor instances for endpoint mode**: explicit
+  separation between "preprocessor for fit/eval" (full input dict
+  with targets) and "preprocessor for predict" (no targets).
+  Avoids relying on Keras's permissive dict-input matching.
+- **Pattern A vs. Pattern 2 by script context**: in-process
+  training/eval flow shares Layer instances; cross-process eval
+  rebuilds and loads. Both flow through the same assembly
+  primitives — `build_inference_model` works for both.
+- **Conditional `LossScaleOptimizer` wrap**: another platform-
+  conditional configuration that follows from `IS_CLUSTER`.
+  Same pattern as `DTYPE_POLICY`.
+
+### Test impact
+
+No new integration tests are added in 4c. The rewrite leans on the
+unit tests from prior pieces:
+
+- Preprocessor: `tests/test_preprocessor.py` (12 tests).
+- Head + metrics: `tests/test_heads.py` (17 tests; 6 added in 4c).
+- Assembly: `tests/test_assembly.py` (13 tests).
+- LayerLRModel: `tests/test_layer_lr_model.py` (11 tests).
+- FLPU loss: `tests/test_flpu_loss.py`.
+- Data splits: `tests/test_data_splits.py`.
+
+Test suite: 79 → 85 passing.
+
+The end-to-end integration smoke test on real or dummy data is a
+separate item in the Tier 2 plan, scheduled to follow 4c. That run
+verifies the wiring at runtime, in the environment that will
+actually be used (cluster + mixed_float16 + real DAPT weights +
+cached cca_set/), in a way that unit tests can't substitute for.
+
+---

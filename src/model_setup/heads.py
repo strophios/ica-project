@@ -4,7 +4,8 @@ Classification head Layers for the multi-head ICA classifier.
 This module defines the head Layers that sit on top of the shared DAPT
 backbone. Each head is a `keras.layers.Layer` subclass, which is a more
 structured abstraction than the inline-head construction the original
-`classification_setup.py` used. The upside is that heads are:
+`classification_setup.py` used (retired in Tier 2 Piece 4c). The upside
+is that heads are:
 
 - **Self-contained.** Each head owns its sub-layers, weights, and
   optionally its own loss. Adding a new head is an additive change
@@ -39,8 +40,10 @@ class ClassificationHead(keras.layers.Layer):
     """
     Binary classification head that sits on top of shared backbone features.
 
-    Architecture (matches the original `classification_setup.py` single-head
-    shape, so the weights learned under the old code are compatible):
+    Architecture (matches the pre-Tier-2 `classification_setup.py` single-
+    head shape — that file has been retired in Piece 4c, but weights
+    saved under the old single-head code are compatible because the
+    layer ordering and Dense widths haven't changed):
 
         features (batch, hidden_dim)
           → Dropout(rate=dropout)
@@ -78,6 +81,18 @@ class ClassificationHead(keras.layers.Layer):
         If provided, activates endpoint mode; the head will call
         `add_loss(loss_fn(targets, logits))` when targets are passed
         to `call`. If None, operates in standard mode.
+    metrics : list of keras.metrics.Metric or None, default None
+        Per-head metric instances. When `targets` is supplied at call
+        time (training/eval), each metric's `update_state(targets,
+        logits)` is invoked, and Keras's automatic Layer-attribute
+        tracking surfaces them via `model.metrics`. The metric
+        objects are *renamed* to be prefixed with this head's `name`
+        (e.g., `BinaryAccuracy()` becomes `cca_binary_accuracy` for a
+        head named `"cca"`) so multi-head models don't collide on
+        metric names. Renaming uses `m.from_config(...)` so the
+        original metric instances passed in are not mutated.
+        Symmetric with `loss_fn`: both fire only when targets are
+        provided, both are part of the endpoint-layer pattern.
     name : str or None
         Passed to `keras.layers.Layer.__init__`. Appears in
         `model.summary()` output and is used for serialization.
@@ -91,11 +106,39 @@ class ClassificationHead(keras.layers.Layer):
     responsible for the CLS-token slice.
     """
 
-    def __init__(self, hidden_dim, dropout=0.1, loss_fn=None, name=None):
+    def __init__(
+        self,
+        hidden_dim,
+        dropout=0.1,
+        loss_fn=None,
+        metrics=None,
+        name=None,
+    ):
         super().__init__(name=name)
         self.hidden_dim = hidden_dim
         self.dropout_rate = dropout
         self.loss_fn = loss_fn
+
+        # Per-head metrics. Each metric is renamed to be prefixed with
+        # this head's name to avoid collisions when a multi-head model
+        # uses the same metric type on multiple heads (e.g.,
+        # `BinaryAccuracy()` on both cca and immig heads would otherwise
+        # produce two metrics both named "binary_accuracy" in
+        # `model.metrics`). The renaming uses `from_config` to clone
+        # rather than mutating the originals — callers' Metric instances
+        # are unchanged.
+        #
+        # The renamed metrics are stored as a list attribute; Keras 3's
+        # tracker picks up Metric instances inside attribute lists and
+        # exposes them via `Layer.metrics`, which propagates to
+        # `Model.metrics` for fit/evaluate logging.
+        self.metric_objs = []
+        if metrics is not None:
+            for m in metrics:
+                config = m.get_config()
+                if not config["name"].startswith(f"{self.name}_"):
+                    config["name"] = f"{self.name}_{config['name']}"
+                self.metric_objs.append(m.__class__.from_config(config))
 
         # Sub-layers are constructed here and stored as attributes. Keras
         # tracks sub-layers automatically via attribute assignment on a
@@ -137,11 +180,17 @@ class ClassificationHead(keras.layers.Layer):
         logits = self.logits(out)
 
         # Endpoint-layer pattern: if this head was configured with a
-        # loss_fn and is receiving targets (i.e., training/eval time,
-        # not inference), register the loss with Keras's internal
-        # aggregator via `add_loss`. The outer Model picks these up
-        # automatically; the caller should NOT pass a compile-time
-        # loss for this output when operating in endpoint mode.
-        if targets is not None and self.loss_fn is not None:
-            self.add_loss(self.loss_fn(targets, logits))
+        # loss_fn and/or metrics, and is receiving targets (i.e.,
+        # training/eval time, not inference), register the loss and
+        # update each metric's state. Keras aggregates losses via
+        # `model.losses` and metrics via `model.metrics`. The caller
+        # should NOT pass a compile-time loss for this output when
+        # operating in endpoint mode (Keras would double-count); for
+        # the same reason, callers don't need to pass `compile(metrics=...)`
+        # for head-internal metrics.
+        if targets is not None:
+            if self.loss_fn is not None:
+                self.add_loss(self.loss_fn(targets, logits))
+            for metric in self.metric_objs:
+                metric.update_state(targets, logits)
         return logits
