@@ -335,3 +335,67 @@ class TestWithEndpointLoss:
             "Likely failure mode: compute_loss did not include self.losses "
             "contributions, or add_loss was not called from the head."
         )
+
+
+# -----------------------------------------------------------------------------
+# Sparse-gradient regression
+# -----------------------------------------------------------------------------
+
+class TestSparseGradients:
+    """
+    Regression test for an `IndexedSlices` handling bug discovered during
+    Piece 4b. `Embedding` layers produce sparse gradients (only the
+    looked-up rows are non-zero), represented as `tf.IndexedSlices`
+    rather than dense tensors. The original `train_step` did
+    `multiplier * grad`, which fails for `IndexedSlices` because
+    Python's `float * IndexedSlices` has no defined operator. The fix
+    uses `tf.math.scalar_mul`, which handles both dense tensors and
+    `IndexedSlices`.
+
+    This test exercises that path: a model with a trainable
+    `Embedding`, wrapped in `LayerLRModel`, runs one fit step. Before
+    the fix this would raise:
+
+        TypeError: unsupported operand type(s) for *: 'float' and
+                   'IndexedSlices'
+
+    After the fix, the step succeeds and the embedding weights update.
+    """
+
+    def test_embedding_layer_trains_under_layer_lr_model(self):
+        VOCAB = 50
+        EMBED_DIM = 4
+        SEQ_LEN = 3
+
+        # Functional model: Embedding → mean-pool → Dense head.
+        # The Embedding's gradient comes back as IndexedSlices on TF.
+        token_ids = keras.Input(shape=(SEQ_LEN,), dtype="int32", name="token_ids")
+        embedded = keras.layers.Embedding(VOCAB, EMBED_DIM, name="embed")(token_ids)
+        pooled = keras.ops.mean(embedded, axis=1)
+        logits = keras.layers.Dense(1, activation=None, name="head")(pooled)
+
+        model = LayerLRModel(
+            inputs=token_ids,
+            outputs=logits,
+            group_fn=lambda v: "default",
+            multipliers={"default": 0.5},  # non-1.0 to actually exercise scaling
+        )
+        model.compile(optimizer=keras.optimizers.SGD(learning_rate=1e-2),
+                      loss=keras.losses.BinaryCrossentropy(from_logits=True))
+
+        rng = np.random.RandomState(0)
+        x = rng.randint(0, VOCAB, size=(BATCH, SEQ_LEN)).astype("int32")
+        y = rng.randint(0, 2, size=(BATCH, 1)).astype("float32")
+
+        # Snapshot embedding weights, run one step, check they updated.
+        # If the IndexedSlices bug is back, fit() will raise TypeError.
+        embed_layer = model.get_layer("embed")
+        before = embed_layer.embeddings.numpy().copy()
+        model.fit(x, y, epochs=1, batch_size=BATCH, verbose=0)
+        after = embed_layer.embeddings.numpy()
+
+        assert not np.allclose(before, after), (
+            "Embedding weights unchanged after one training step — "
+            "fit() may have silently no-op'd despite reaching the "
+            "scaled-gradient path."
+        )

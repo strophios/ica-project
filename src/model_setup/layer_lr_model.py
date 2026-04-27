@@ -163,14 +163,26 @@ class LayerLRModel(keras.Model):
             )
 
         gradients = tape.gradient(loss, self.trainable_variables)
-        # Scale each gradient by its variable's multiplier. Preserve
-        # `None` gradients (variables that don't affect the loss this
-        # step — can happen with multi-head models when a head isn't
-        # active on every batch). `apply_gradients` skips `None`
-        # entries automatically; filtering them out here would
-        # misalign the gradient list with `self.trainable_variables`.
+        # Scale each gradient by its variable's multiplier. Two
+        # subtleties handled here:
+        #
+        # (1) Preserve `None` gradients — variables that don't
+        #     affect the loss this step (e.g., multi-head models
+        #     where a head isn't active on every batch).
+        #     `apply_gradients` skips `None` entries automatically,
+        #     but filtering them out here would misalign the list
+        #     with `self.trainable_variables`.
+        #
+        # (2) Sparse gradients (`tf.IndexedSlices`) require
+        #     `tf.math.scalar_mul` — Python's `float * tensor`
+        #     dispatches to the tensor's `__rmul__`, which is
+        #     undefined for `IndexedSlices`. `Embedding` layers
+        #     produce sparse gradients (only the looked-up rows are
+        #     non-zero), so any model with a trainable embedding
+        #     hits this path. `tf.math.scalar_mul` handles both
+        #     dense tensors and `IndexedSlices` correctly.
         scaled = [
-            self.get_multiplier(w) * g if g is not None else None
+            tf.math.scalar_mul(self.get_multiplier(w), g) if g is not None else None
             for w, g in zip(self.trainable_variables, gradients)
         ]
         self.optimizer.apply_gradients(zip(scaled, self.trainable_variables))

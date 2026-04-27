@@ -1,6 +1,6 @@
 # Audit and Refactor: Tiers, Checkpoints, and Process
 
-*Last updated: 2026-04-26 (Piece 4a landed; Pieces 1–3 + 4a done, 4b/4c remaining).*
+*Last updated: 2026-04-27 (Piece 4b landed; Pieces 1–3 + 4a + 4b done, 4c remaining).*
 
 This doc exists so that a new session — whether picked up by you after
 weeks away, by a fresh LLM collaborator, or by someone else entirely —
@@ -65,7 +65,7 @@ agent after the first three commits. Found several real issues
 (see `8685c47` commit message). Review transcript lives in session
 history; the substantive findings are addressed in `8685c47`.
 
-**Tier 2 in progress.** Piece 4 underway; sub-piece 4a landed. Pieces 1, 2, 3, and 4a complete; 4b and 4c remaining.
+**Tier 2 in progress.** Piece 4 underway; sub-pieces 4a and 4b landed. Pieces 1, 2, 3, 4a, and 4b complete; 4c remaining.
 
 - `789d88c` — Piece 1: `ClassificationHead` for multi-head refactor.
   Head-as-Layer abstraction, supports both standard mode (loss via
@@ -112,41 +112,58 @@ history; the substantive findings are addressed in `8685c47`.
   mechanical, paths logic is environment-dependent and not
   test-mockable without sacrificing the test's value).
 
+- *(this commit)* — Piece 4b: `src/model_setup/backbone.py` and
+  `src/model_setup/assembly.py` introduced. `load_dapt_backbone`
+  is the weights-only DAPT-checkpoint loader (legacy
+  full-saved-model path dropped — was scratch-only).
+  `build_endpoint_model` returns a `LayerLRModel` with `token_ids`,
+  `padding_mask`, and one `"<head>_targets"` `keras.Input` per head
+  (the suffix avoids op-name collision with the head Layer itself,
+  which was the wrinkle that surfaced during implementation —
+  Keras requires unique op names within a Functional graph).
+  `build_inference_model` returns a `keras.Model` without target
+  inputs; sharing head Layer instances between the two models gives
+  Pattern A in-process weight sharing. The Pattern A safety question
+  was settled empirically: `scripts/experiment_endpoint_inference_evaluate.py`
+  (kept as a permanent fixture) demonstrates that Keras 3 filters
+  losses by graph reachability, so the head's training-graph
+  add_loss tensor doesn't contaminate inference-model `evaluate()`
+  even when head instances are shared. 13 integration tests in
+  `tests/test_assembly.py` cover construction, forward pass,
+  training step, `freeze_encoder`, and Pattern A weight sharing.
+  Plus a sparse-gradient (`tf.IndexedSlices`) handling fix in
+  `LayerLRModel.train_step`: `Embedding` layers produce sparse
+  gradients, and the prior `multiplier * grad` form failed for
+  them; `tf.math.scalar_mul` handles both dense and sparse cases.
+  This was a latent bug from Piece 2 surfaced by 4b's integration
+  tests; one regression test added to `tests/test_layer_lr_model.py`.
+
 The Pieces-1–3 abstractions still exist **alongside** the existing
 `classifier_from_dapt_checkpoint` function; they are not yet wired
-into any training script. Wiring is the job of Pieces 4b/4c.
+into any training script. Wiring is the job of Piece 4c.
 
 **Tier 2 pieces remaining:**
 
-- **Piece 4b: Backbone + assembly abstractions.** Add
-  `src/model_setup/backbone.py` (DAPT-checkpoint loading split out
-  of `classifier_from_dapt_checkpoint`) and
-  `src/model_setup/assembly.py` (wires backbone + heads into a full
-  `LayerLRModel` for forward-compatibility with discriminative LR /
-  unfreezing). Adds an integration test that exercises the assembled
-  stack end-to-end on dummy data. Doesn't yet touch training/eval
-  scripts. Open design questions: train-vs-inference model split
-  (shared head instances vs. weight-load by name); `assemble_classifier`
-  signature shape; whether `freeze_encoder` and `layer_multipliers`
-  should be exclusive. To resolve in 4b's design discussion.
 - **Piece 4c: Wiring + retirement.** Rewrite `run_cca_classification.py`
-  and `eval_cca_classifier.py` to use the new abstractions; delete
-  `classifier_from_dapt_checkpoint` and `src/model_setup/classification_setup.py`
-  outright. The current scripts have stale calls to the old
-  `ClassifierPreprocessor` signature (`label_key=` instead of
-  `label_keys={...}`) — broken on disk since `e3dda6a`; 4c is where
-  they get fixed.
+  and `eval_cca_classifier.py` to use the new abstractions
+  (`load_dapt_backbone` + `build_endpoint_model` +
+  `build_inference_model`; preprocessor with `label_keys={"cca_targets": "cca_label"}`,
+  `endpoint_model=True`); update FLPU prior 0.03 → 0.02; delete
+  `classifier_from_dapt_checkpoint` and
+  `src/model_setup/classification_setup.py` outright. The current
+  scripts have stale calls to the old `ClassifierPreprocessor`
+  signature (`label_key=` instead of `label_keys={...}`) — broken
+  on disk since `e3dda6a`; 4c is where they get fixed.
 - **Integration pass.** End-to-end smoke test of the composed stack
   on dummy data. Follows 4c.
 - **Adversarial review at Tier 2 end.** Likely the `code-reviewer`
   subagent this time (plan-alignment / architecture framing fits
   Tier 2 better than the opus general-purpose one used for Tier 1).
 
-Test suite after Piece 4a: **65 tests passing** (32 from Tier 1 + 11
-for `ClassificationHead` + 10 for `LayerLRModel` + 12 for
-`ClassifierPreprocessor`). 4a added no tests — the rename and path
-consolidation are mechanical, and the platform detection is brittle
-to mock without sacrificing the test's value.
+Test suite after Piece 4b: **79 tests passing** (32 from Tier 1 + 11
+for `ClassificationHead` + 11 for `LayerLRModel` (10 original + 1
+sparse-gradient regression) + 12 for `ClassifierPreprocessor` + 13
+for `assembly`).
 
 **Deferred empirical checks** (to be batched when environment handling
 is settled — touched in Piece 4):
@@ -201,11 +218,19 @@ a signal we designed the shape wrong.
      `data_setup/dapt_data.py` renamed to `data_setup/data.py`;
      all callers updated. Mechanical; design and reasoning in
      `docs/notes/tier2-design.md` Piece 4a.
-   - **4b [PENDING]**: `model_setup/backbone.py` +
-     `model_setup/assembly.py`; integration test on dummy data.
+   - **4b [DONE — this commit]**: `src/model_setup/backbone.py`
+     (`load_dapt_backbone`) and `src/model_setup/assembly.py`
+     (`build_endpoint_model`, `build_inference_model`,
+     `_default_group_fn`). Pattern A safety verified empirically
+     via `scripts/experiment_endpoint_inference_evaluate.py`.
+     Sparse-gradient fix in `LayerLRModel.train_step`. 13
+     integration tests in `tests/test_assembly.py` + 1 regression
+     test in `tests/test_layer_lr_model.py`. Design and reasoning
+     in `docs/notes/tier2-design.md` Piece 4b.
    - **4c [PENDING]**: rewire `run_cca_classification.py` and
-     `eval_cca_classifier.py`; delete `classifier_from_dapt_checkpoint`
-     and `model_setup/classification_setup.py`.
+     `eval_cca_classifier.py` to use the new abstractions; update
+     FLPU prior 0.03 → 0.02; delete `classifier_from_dapt_checkpoint`
+     and `model_setup/classification_setup.py` outright.
 5. **[PENDING] Integration pass.** End-to-end smoke test of the
    composed stack on dummy data.
 6. **[PENDING] Adversarial review of Tier 2.** Likely the

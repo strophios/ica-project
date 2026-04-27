@@ -2,7 +2,7 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
-*Last updated: 2026-04-26 (Tier 2 Piece 4a landed).*
+*Last updated: 2026-04-27 (Tier 2 Piece 4b landed).*
 
 ## Project Overview
 
@@ -33,7 +33,7 @@ This decomposition lets us leverage the larger labeled datasets for CCA and immi
 - No `__init__.py` files exist (implicit namespace packages)
 - All scripts must be run from the **project root** (imports use `src.*` paths, e.g., `import src.model_setup.dapt_setup`)
 - **Configuration**: `src/config.py` is the single source of truth for platform-conditional values. Detects cluster vs. local via `Path("/projects/ahd").exists()` (override with `ICA_ENV=cluster|local`); exports `IS_CLUSTER`, `PROJECT_ROOT`, granular paths (`CCA_SET_DIR`, `DAPT_BACKBONE_WEIGHTS`, `LDC_CORPUS`, etc.), and `DTYPE_POLICY` (`mixed_float16` on cluster, `float32` locally — MPS mixed-precision support is patchy). Scripts apply the dtype policy explicitly: `keras.config.set_dtype_policy(config.DTYPE_POLICY)`.
-- **Tests**: pytest is configured (`pyproject.toml [tool.pytest.ini_options]`, `pythonpath = ["."]`). Run with `pytest` from the project root. Current coverage is narrow: 65 tests passing — invariant tests for `FLPULoss` (`tests/test_flpu_loss.py`) and the train/val/test split logic in `create_classifier_data` (`tests/test_data_splits.py`), plus construction/shape/contract tests for the Tier 2 `ClassificationHead` (`tests/test_heads.py`, 11 tests), `LayerLRModel` (`tests/test_layer_lr_model.py`, 10 tests), and `ClassifierPreprocessor` (`tests/test_preprocessor.py`, 12 tests).
+- **Tests**: pytest is configured (`pyproject.toml [tool.pytest.ini_options]`, `pythonpath = ["."]`). Run with `pytest` from the project root. Current coverage is narrow: 79 tests passing — invariant tests for `FLPULoss` (`tests/test_flpu_loss.py`) and the train/val/test split logic in `create_classifier_data` (`tests/test_data_splits.py`), plus construction/shape/contract tests for the Tier 2 `ClassificationHead` (`tests/test_heads.py`, 11 tests), `LayerLRModel` (`tests/test_layer_lr_model.py`, 11 tests including a sparse-gradient regression test), `ClassifierPreprocessor` (`tests/test_preprocessor.py`, 12 tests), and integration tests for the assembled stack (`tests/test_assembly.py`, 13 tests covering `build_endpoint_model`, `build_inference_model`, training-step behavior, and Pattern A weight sharing).
 - **Reproducibility**: training scripts call `keras.utils.set_random_seed(200)` to match the `seed=200` used by the polars `.sample()` splits in `src/data_setup/data.py`.
 
 ## Architecture: Three-Phase ML Pipeline
@@ -65,9 +65,11 @@ The project implements a three-phase pipeline, each with dedicated training scri
 
 **Tier 2 abstractions that exist but are not yet on the training path:**
 - `src/model_setup/heads.py` — `ClassificationHead`, a `keras.layers.Layer` subclass supporting both standard mode (loss handled by outer `compile()`) and endpoint mode (loss registered via `add_loss`, needed for FLPU and eventual ALUM). Added in Tier 2 Piece 1 (commit `789d88c`).
-- `src/model_setup/layer_lr_model.py` — `LayerLRModel`, a `keras.Model` subclass overriding `train_step` to scale gradients by per-variable multipliers before optimizer apply. Supports discriminative fine-tuning (fixed geometric multipliers) and gradual unfreezing (callback-updated multipliers). Added in Tier 2 Piece 2 (commit `ad0f94b`).
+- `src/model_setup/layer_lr_model.py` — `LayerLRModel`, a `keras.Model` subclass overriding `train_step` to scale gradients by per-variable multipliers before optimizer apply. Supports discriminative fine-tuning (fixed geometric multipliers) and gradual unfreezing (callback-updated multipliers). Added in Tier 2 Piece 2 (commit `ad0f94b`); a sparse-gradient (`tf.IndexedSlices`) handling fix landed in 4b (gradient scaling now uses `tf.math.scalar_mul`).
 - `src/preproc/preprocessor.py` — `ClassifierPreprocessor` refactored to multi-head shape: `label_keys: dict[str, str]` mapping output-dict-key → source-column-name; emits multi-head-shaped output in both endpoint and standard modes; casts targets to `target_dtype` (default `float32`) at preprocess time. Tier 2 Piece 3.
-- **Not yet integrated.** Training/eval scripts (`run_cca_classification.py`, `eval_cca_classifier.py`) still build the model via `classifier_from_dapt_checkpoint` in `src/model_setup/classification_setup.py` and use the old single-`label_key` preprocessor call. Wiring the three new abstractions into the training path is Tier 2 Piece 4's job — pure integration work, no new abstractions required.
+- `src/model_setup/backbone.py` — `load_dapt_backbone(weights_path)`, the DAPT-checkpoint loading split out of `classifier_from_dapt_checkpoint`. Tier 2 Piece 4b.
+- `src/model_setup/assembly.py` — `build_endpoint_model` and `build_inference_model`, the wiring functions that combine backbone + heads into full Keras models. The training model is a `LayerLRModel` with target Inputs named `"<head>_targets"` (suffixed to avoid op-name collision with the head Layer itself); the inference model is a plain `keras.Model` with no target inputs. Sharing head Layer instances between the two models gives Pattern A in-process weight sharing (verified safe in Keras 3 — see `scripts/experiment_endpoint_inference_evaluate.py`). Tier 2 Piece 4b.
+- **Not yet integrated.** Training/eval scripts (`run_cca_classification.py`, `eval_cca_classifier.py`) still build the model via `classifier_from_dapt_checkpoint` in `src/model_setup/classification_setup.py` and use the old single-`label_key` preprocessor call. Wiring the new abstractions into the training path is Tier 2 Piece 4c's job — pure integration work, no new abstractions required.
 
 ## Key Design Decisions
 
@@ -97,9 +99,8 @@ The project implements a three-phase pipeline, each with dedicated training scri
 - Class prior estimation via DEDPUL
 
 **Priority open items:**
-- **Tier 2 refactor, in progress (Piece 4 underway, 4a landed).** See `docs/notes/tiers-and-checkpoints.md` for full status and `docs/notes/tier2-design.md` for design decisions. Pieces 1 (`ClassificationHead`), 2 (`LayerLRModel`), 3 (`ClassifierPreprocessor`), and 4a (`config.py` + `data_setup/dapt_data.py` rename to `data_setup/data.py`) are landed. Pieces 1–3's abstractions exist but are not yet on the training path; Piece 4b/4c will wire them in. Remaining:
-  - **Piece 4b: backbone + assembly abstractions.** Add `src/model_setup/backbone.py` (DAPT-checkpoint loading split out of `classifier_from_dapt_checkpoint`) and `src/model_setup/assembly.py` (wires backbone + heads into a full `LayerLRModel`). Adds an integration test exercising the assembled stack on dummy data.
-  - **Piece 4c: wiring + retirement.** Rewrite `run_cca_classification.py` and `eval_cca_classifier.py` to use the new abstractions; delete `classifier_from_dapt_checkpoint` and `src/model_setup/classification_setup.py`.
+- **Tier 2 refactor, in progress (Piece 4 underway, 4a + 4b landed).** See `docs/notes/tiers-and-checkpoints.md` for full status and `docs/notes/tier2-design.md` for design decisions. Pieces 1 (`ClassificationHead`), 2 (`LayerLRModel`), 3 (`ClassifierPreprocessor`), 4a (`config.py` + `data_setup/data.py` rename), and 4b (`backbone.py` + `assembly.py`) are landed. The new abstractions exist but the training and eval scripts still use `classifier_from_dapt_checkpoint`; Piece 4c is the wiring step. Remaining:
+  - **Piece 4c: wiring + retirement.** Rewrite `run_cca_classification.py` and `eval_cca_classifier.py` to use `load_dapt_backbone` + `build_endpoint_model` + `build_inference_model`; the preprocessor with `label_keys={"cca_targets": "cca_label"}` and `endpoint_model=True`; the FLPU prior updated from 0.03 → 0.02. Delete `classifier_from_dapt_checkpoint` and `src/model_setup/classification_setup.py` outright. Apply `keras.config.set_dtype_policy(config.DTYPE_POLICY)` (already done in 4a but worth confirming on the integrated path).
   - **Integration pass.** End-to-end smoke test on dummy data.
   - **Adversarial review of Tier 2.** Likely the `code-reviewer` subagent (plan/architecture framing).
 - **Deferred empirical checks** (batched until Piece 4 when environment handling is settled): smoke training run with updated FLPU + corrected prior (≈ 0.02); confirm training dynamics under `mixed_float16` + removed-α FLPU; sensitivity sweep on Ratio Batch (currently 1:10, more aggressive than Ji 2023).

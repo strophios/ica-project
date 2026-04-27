@@ -702,3 +702,217 @@ and old name removed) or fail loudly. Existing 65 tests should
 continue to pass.
 
 ---
+
+## Piece 4b: Backbone + assembly abstractions
+
+**Status:** In progress (design 2026-04-26).
+
+### Decision
+
+Two new modules:
+
+- `src/model_setup/backbone.py` — `load_dapt_backbone(weights_path)`,
+  a single function for loading a DAPT-finetuned RoBERTa backbone
+  from a saved `.weights.h5` file. The legacy "load from full saved
+  `.keras` model and pluck `model.layers[2]`" path is **dropped**
+  — it's fragile (positional layer-index access) and only used in
+  scratch (`test_module.py`).
+- `src/model_setup/assembly.py` — two functions, both returning
+  fully-wired Keras models:
+  - `build_endpoint_model(...)` — multi-input training model with
+    `cca_targets` etc. as `keras.Input`s; head's `add_loss`
+    handles loss internally. Returns a `LayerLRModel` so per-layer
+    LR / unfreezing is forward-compatible.
+  - `build_inference_model(...)` — single-input model (no targets,
+    no add_loss path); for `predict()`. Returns a regular
+    `keras.Model`.
+
+The caller constructs `ClassificationHead` instances, names them
+(e.g., `name="cca"`), and passes them in as `heads: dict[str, Head]`.
+The dict keys match the head names *and* the model output names; the
+target `keras.Input`s for the training model use the suffixed name
+`f"{head_name}_targets"` to avoid an op-name collision with the head
+Layer itself (Keras requires unique op names within a Functional
+graph). The preprocessor's output-dict keys for targets follow the
+same `_targets` suffix convention so `.fit()`'s name-based input
+routing matches.
+
+### Reasoning
+
+**Pattern A for the train-vs-inference split**, with a docstring
+caveat. The two functions are independent primitives; the caller
+decides whether to share head instances (in-process: training
+script's fit + predict flow; weights shared by Python identity) or
+build fresh head instances and load weights by name (cross-process:
+eval script loading from disk; weights shared by serialization).
+Pattern B (always rebuild) was considered for safety against the
+add_loss-across-graphs concern (see "Empirical finding" below) and
+rejected because the experimental result shows Pattern A is safe in
+Keras 3.
+
+**Empirical finding (2026-04-26).** Documented in
+`scripts/experiment_endpoint_inference_evaluate.py`. The original
+worry was: when a head Layer is called in two functional graphs, the
+head's `_losses` list accumulates from both calls; would
+`inf_model.losses` then pick up the stale training-graph add_loss
+tensor and contaminate `evaluate()` on the inference model? Result:
+
+- `predict()` on the shared-instance inference model: works correctly.
+- `evaluate()` without compile-time loss: clean `ValueError` ("No
+  loss to compute. Provide a `loss` argument in `compile()`.").
+- `evaluate()` *with* compile-time loss + labels: returns the
+  correct fresh loss value (BCE-only computation matched evaluate's
+  reported loss to 6 decimals). No contamination from the head's
+  stale add_loss tensor.
+- `inf_model.losses` ultimately returns 0 tensors — Keras 3 filters
+  losses by graph reachability, so the stale tensor (which depends
+  on training-graph inputs not in the inference graph) is excluded.
+
+So Pattern A is empirically safe. The docstring on
+`build_inference_model` still notes that the model is intended for
+`predict()` when sharing Layer instances with a training model — not
+because of a known failure mode, but because the operational rule
+"predict only on the shared-instance inference model" is simpler
+than reasoning about the Keras-version-dependent dependency-filtering
+logic.
+
+**Caller constructs heads, assembly only wires.** Keeps each module
+focused on one thing. Heads carry their own configuration (loss,
+dropout, name); assembly carries the wiring. If we later want
+"convenience" assembly that constructs heads from a config dict, it
+can be a thin layer over the primitives.
+
+**Default `group_fn` extracts first path component of `variable.path`.**
+Gives groups like `"roberta_backbone"`, `"cca"`, `"immig"` — natural
+per-component groups, sufficient for the discriminative-LR case
+(different LRs for backbone vs. heads). Not sufficient for
+per-encoder-layer discriminative LR (layer 11 vs. layer 0); that
+needs a custom `group_fn`, which is the caller's job.
+
+The default is a no-op for the current frozen-encoder training
+(`freeze_encoder=True` removes backbone variables from
+`trainable_variables` entirely; remaining head variables get
+multiplier 1.0 by default = no-op). It becomes meaningful when the
+encoder unfreezes.
+
+**Drop the legacy backbone-loading path.** `classifier_from_dapt_checkpoint`
+supported both `.weights.h5` and full-`.keras`-model loading via a
+`backbone_path is None` branch and `model.layers[2]` index access.
+The full-model path was used only in `test_module.py` (scratch). The
+weights path is more robust (no positional indexing). If someone
+needs full-model loading later, it's a 4-line addition.
+
+### Layout
+
+- `src/model_setup/backbone.py` — `load_dapt_backbone(weights_path)`.
+- `src/model_setup/assembly.py` — `build_endpoint_model`,
+  `build_inference_model`, `_default_group_fn`.
+- `tests/test_assembly.py` — integration tests for the assembled
+  stack on a fake backbone (Embedding + dense, sized small for
+  speed). Covers construction, forward-pass shape, training step,
+  weight sharing under Pattern A, and `freeze_encoder` behavior.
+- `scripts/experiment_endpoint_inference_evaluate.py` — kept as a
+  permanent fixture documenting the empirical finding. Self-contained;
+  can be re-run if Keras versions change behavior. Slated for
+  potential removal in Tier 4 hygiene if no longer useful.
+
+### Contracts
+
+**`load_dapt_backbone(weights_path) -> keras_hub.models.Backbone`**
+
+- `weights_path`: path to a `.weights.h5` file produced by
+  `extract_backbone_weights` (or `model.layers[2].save_weights(...)`).
+  Accepts `pathlib.Path` or `str`.
+- Returns: a `roberta_base_en` backbone with the DAPT weights
+  loaded. Caller is responsible for setting `.trainable` (assembly
+  does this when `freeze_encoder=True`).
+
+**`build_endpoint_model(backbone, heads, seq_length, target_dtype="float32", freeze_encoder=False, layer_multipliers=None, group_fn=None) -> LayerLRModel`**
+
+- `backbone`: already-loaded backbone (typically from
+  `load_dapt_backbone`). Must accept a dict of `{"token_ids", "padding_mask"}`
+  and return a `(batch, seq, hidden)` tensor.
+- `heads`: `dict[str, ClassificationHead]` mapping head_name →
+  head Layer. Head names are used as the model output names; the
+  target `keras.Input`s use the suffixed name
+  `f"{head_name}_targets"` (Keras requires unique op names within a
+  Functional graph, and the head Layer itself already produces an
+  op with name `head_name`, so a same-named target Input would
+  collide). Preprocessor output-dict keys for targets follow the
+  same `_targets` convention so `.fit()`'s dict-key matching routes
+  them to the right Input.
+- `seq_length`: int, sequence length for `keras.Input` shapes.
+- `target_dtype`: dtype for target inputs; must match the
+  preprocessor's `target_dtype`. Default `"float32"`.
+- `freeze_encoder`: if True, set `backbone.trainable = False` (real
+  freeze — backbone vars excluded from `trainable_variables`).
+- `layer_multipliers`: optional `dict[str, float]` for `LayerLRModel`.
+  Default `None` → empty dict → all multipliers 1.0 (behaviorally
+  identical to a regular `keras.Model`).
+- `group_fn`: optional `Callable[[Variable], str]` for `LayerLRModel`.
+  Default extracts first path component of `variable.path`.
+
+**`build_inference_model(backbone, heads, seq_length) -> keras.Model`**
+
+- Same `backbone`, `heads`, `seq_length` semantics as
+  `build_endpoint_model`.
+- Returns a `keras.Model` (not `LayerLRModel` — the inference model
+  has no training step to customize).
+- Inputs: `{"token_ids", "padding_mask"}`. No target inputs. Heads
+  called with `targets=None` (no `add_loss`).
+- **Caveat**: when called with the same `heads` dict that was passed
+  to `build_endpoint_model` in the same process (Pattern A), weights
+  are shared by Python identity — fitting the training model also
+  trains the inference model's weights. The inference model is
+  intended for `predict()` in this scenario; `evaluate()` on it is
+  empirically safe in Keras 3 but the simpler operational rule is
+  "predict only on shared-instance inference models." Cross-process
+  callers (eval script) build fresh heads and load weights by name;
+  in that case all model methods work as expected.
+
+### Patterns introduced
+
+- **Caller-supplies-heads, assembly-wires**: heads are first-class
+  configurable objects; assembly is just plumbing. Separation lets
+  per-head decisions (which loss, dropout, etc.) live where they
+  semantically belong.
+- **Two-function split for endpoint-mode train/inference**: the
+  natural way to express the input-signature mismatch from
+  endpoint-pattern. Each function has a single, clear shape; no
+  mode flags or conditional inputs.
+- **Per-graph dependency filtering by Keras**: documented behavior
+  we now rely on for Pattern A safety. The experiment script makes
+  this verifiable rather than just trusted.
+- **Default `group_fn` from `variable.path` parsing**: trivial for
+  the no-op case, immediately useful for backbone-vs-head
+  discriminative LR. Custom `group_fn` is the escape hatch for
+  per-encoder-layer schemes.
+
+### Test coverage anticipated
+
+`tests/test_assembly.py`, ~6–8 tests:
+
+- **TestBuildEndpointModel**: returns `LayerLRModel`; inputs include
+  `token_ids`, `padding_mask`, and one target Input per head;
+  outputs are a dict keyed by head name.
+- **TestBuildInferenceModel**: returns `keras.Model`; inputs are
+  only `token_ids` and `padding_mask` (no targets); outputs are a
+  dict keyed by head name.
+- **TestForwardPass**: both models produce expected output shapes
+  on dummy input.
+- **TestTrainingStep**: one `fit()` step on dummy data succeeds and
+  updates head weights; backbone weights also update when
+  `freeze_encoder=False`.
+- **TestFreezeEncoder**: with `freeze_encoder=True`, backbone weights
+  are unchanged after a training step.
+- **TestPatternAWeightSharing**: when heads are shared across train
+  and inference models, training the train model changes the
+  inference model's predictions (i.e., weights are physically
+  shared).
+
+Tests use a fake backbone (Embedding + multiply-by-padding-mask)
+to keep them fast — the head/assembly behavior is identical to
+what it'd be with the real RoBERTa backbone, just without the
+50M-parameter overhead per test.
+
+---

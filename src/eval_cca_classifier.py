@@ -86,9 +86,7 @@ ldc_data = src.data_setup.data.data_from_parquet(
     addl_columns=["cca", "cca_descriptor", "immig", "immig_descriptor"],
 )  # the function includes "ldc_corpus" as a default arg
 
-ldc_data = src.data_setup.data.create_classifier_data(
-    ldc_data, separate_labels=True
-)
+ldc_data = src.data_setup.data.create_classifier_data(ldc_data, separate_labels=True)
 
 # for convenience
 pos_df = ldc_data["test"]["pos"]
