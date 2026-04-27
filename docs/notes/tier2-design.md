@@ -705,7 +705,14 @@ continue to pass.
 
 ## Piece 4b: Backbone + assembly abstractions
 
-**Status:** In progress (design 2026-04-26).
+**Status:** Implemented in commit `2f069c4`. `src/model_setup/backbone.py`
+and `src/model_setup/assembly.py` are new; `src/model_setup/layer_lr_model.py`
+gained a sparse-gradient (`tf.IndexedSlices`) handling fix in
+`train_step`. 13 integration tests at `tests/test_assembly.py` and 1
+sparse-gradient regression test added to `tests/test_layer_lr_model.py`.
+Test suite: 65 → 79 passing. Pattern A safety verified empirically
+in `scripts/experiment_endpoint_inference_evaluate.py` (kept as a
+permanent fixture).
 
 ### Decision
 

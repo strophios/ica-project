@@ -112,7 +112,7 @@ history; the substantive findings are addressed in `8685c47`.
   mechanical, paths logic is environment-dependent and not
   test-mockable without sacrificing the test's value).
 
-- *(this commit)* — Piece 4b: `src/model_setup/backbone.py` and
+- `2f069c4` — Piece 4b: `src/model_setup/backbone.py` and
   `src/model_setup/assembly.py` introduced. `load_dapt_backbone`
   is the weights-only DAPT-checkpoint loader (legacy
   full-saved-model path dropped — was scratch-only).
@@ -218,7 +218,7 @@ a signal we designed the shape wrong.
      `data_setup/dapt_data.py` renamed to `data_setup/data.py`;
      all callers updated. Mechanical; design and reasoning in
      `docs/notes/tier2-design.md` Piece 4a.
-   - **4b [DONE — this commit]**: `src/model_setup/backbone.py`
+   - **4b [DONE — commit `2f069c4`]**: `src/model_setup/backbone.py`
      (`load_dapt_backbone`) and `src/model_setup/assembly.py`
      (`build_endpoint_model`, `build_inference_model`,
      `_default_group_fn`). Pattern A safety verified empirically
