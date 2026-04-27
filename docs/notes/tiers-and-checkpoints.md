@@ -137,7 +137,7 @@ history; the substantive findings are addressed in `8685c47`.
   them; `tf.math.scalar_mul` handles both dense and sparse cases.
   This was a latent bug from Piece 2 surfaced by 4b's integration
   tests; one regression test added to `tests/test_layer_lr_model.py`.
-- *(this commit)* — Piece 4c: training and eval scripts rewritten
+- `06e161c` — Piece 4c: training and eval scripts rewritten
   end-to-end to use the Tier 2 abstractions; `classifier_from_dapt_checkpoint`
   and `src/model_setup/classification_setup.py` retired. Substantive
   changes: `ClassificationHead` extended with a `metrics` parameter
@@ -243,7 +243,7 @@ a signal we designed the shape wrong.
      integration tests in `tests/test_assembly.py` + 1 regression
      test in `tests/test_layer_lr_model.py`. Design and reasoning
      in `docs/notes/tier2-design.md` Piece 4b.
-   - **4c [DONE — this commit]**: training and eval scripts rewritten
+   - **4c [DONE — commit `06e161c`]**: training and eval scripts rewritten
      end-to-end on the new abstractions; `ClassificationHead`
      extended with `metrics` parameter (head-internal, name-prefixed);
      `classifier_from_dapt_checkpoint` and

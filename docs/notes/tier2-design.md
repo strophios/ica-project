@@ -926,7 +926,11 @@ what it'd be with the real RoBERTa backbone, just without the
 
 ## Piece 4c: Wiring + retirement
 
-**Status:** In progress (design 2026-04-27).
+**Status:** Implemented in commit `06e161c`. `run_cca_classification.py`
+and `eval_cca_classifier.py` rewritten end-to-end on the Tier 2
+abstractions; `src/model_setup/classification_setup.py` deleted;
+`ClassificationHead` extended with a `metrics` parameter (6 new
+tests in `tests/test_heads.py`). Test suite: 79 → 85 passing.
 
 ### Decision
 
