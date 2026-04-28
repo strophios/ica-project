@@ -294,9 +294,15 @@ output-dict-key → source-column-name, rather than a single
 `label_key`. It supports both endpoint and standard modes (preserving
 parity with `ClassificationHead`), and drops the positional-input
 branch (datasets are required to be dict-valued, which is already the
-case in practice). Dtype handling for targets stays at the loss layer
-(FLPU casts to `float32` internally); the preprocessor is dtype-agnostic
-on the target side.
+case in practice). Dtype handling for targets is layered: the
+preprocessor casts to a stable `target_dtype` (default `float32`) so
+the cached preprocessed dataset has predictable dtype, and the loss
+*also* casts `y_true` to `y_pred.dtype` at the loss boundary for
+mixed-precision robustness. See the "Reasoning" section below for the
+full layered framing — both casts handle structurally different
+sources of dtype variance and neither is redundant. (An earlier
+version of this paragraph said dtype stayed at the loss layer; that
+was a stale early draft and contradicts the implementation.)
 
 A single-head preprocessor is the degenerate case of a one-entry dict,
 not a separate code path.
@@ -1082,5 +1088,154 @@ separate item in the Tier 2 plan, scheduled to follow 4c. That run
 verifies the wiring at runtime, in the environment that will
 actually be used (cluster + mixed_float16 + real DAPT weights +
 cached cca_set/), in a way that unit tests can't substitute for.
+
+---
+
+## Post-review corrections (2026-04-27)
+
+The Tier 2 adversarial review (dispatched after Piece 4c + integration
+smoke test landed) surfaced two Critical findings, four Important, and
+five Minor. The Critical and a subset of Important issues are addressed
+here; the rest are deferred to Tier 3 / Tier 4 scope.
+
+### C1 + I1 + I2: `LayerLRModel.train_step` — full stock-Keras parity
+
+**What the review found.** The original `LayerLRModel.train_step`
+(landed in Piece 2) computed the loss correctly but omitted three
+things that stock Keras `train_step` (TF backend) does:
+
+  1. `self._loss_tracker.update_state(loss, sample_weight=batch_size)`
+     — what populates `history.history["loss"]`, the `fit()` progress
+     bar, TensorBoard's training-loss curve, and any callback reading
+     the training-side `loss` log. Without it, the loss reported to
+     all those surfaces is silently 0 even when training is happening.
+     The smoke test from Piece 4 closeout showed
+     `loss: 0.0000e+00` in fit output; we initially read it as a
+     display artifact, the review correctly diagnosed it as a real
+     bug.
+
+  2. `loss = self.optimizer.scale_loss(loss)` (inside the
+     `GradientTape` context, before `tape.gradient`) — required for
+     `LossScaleOptimizer` (which Piece 4c wraps `AdamW` in,
+     conditional on `IS_CLUSTER`) to actually scale the fp16 loss
+     before backprop. Without it, the loss-scaling wrap is a no-op
+     and the underflow protection that motivates it doesn't run.
+     Cluster training would silently degrade vs. the float32 local
+     path.
+
+  3. `self._compute_loss(x, y, y_pred, sample_weight, training=True)`
+     in place of `self.compute_loss(...)`. `_compute_loss` is the
+     internal wrapper that handles `compute_loss` overrides predating
+     the `training=` kwarg added in Keras 3.3 (it's a *backward*-
+     compatibility shim, not forward as the review's framing
+     suggested — but the recommended fix is correct either way).
+     Stock `train_step` uses it so subclassers with old-signature
+     `compute_loss` overrides keep working.
+
+**Why it shipped.** All three omissions are absent from the Keras
+"Customizing fit() with TensorFlow" guide
+(<https://keras.io/guides/custom_train_step_in_tensorflow/>). The
+guide's example shows manual metric-loop iteration as an alternative
+to the private `_loss_tracker` (so loss tracking IS shown via the
+public-API path, just not via the private attribute), but it omits
+`scale_loss` entirely and uses `compute_loss` rather than
+`_compute_loss`. The `LayerLRModel` design followed the guide's
+shape and inherited the gaps. The lesson: the guide is a *minimal*
+customization template, not a *production-correct* one for use cases
+involving mixed precision, callback-driven monitoring, or subclassing.
+
+**Fix.** `LayerLRModel.train_step` rewritten to mirror stock
+`keras.Model.train_step` line-for-line, with the per-variable
+multiplier scaling inserted between `tape.gradient` and
+`apply_gradients`. The five additions: `_compute_loss(... training=True)`,
+`_loss_tracker.update_state(loss, sample_weight=batch_size)`,
+`optimizer.scale_loss(loss)` inside the tape context. Detailed
+inline comments document each one and its motivation.
+
+**Test coverage (I1 paired with C1).** `tests/test_layer_lr_model.py`
+gained a `TestLossTracking` class with two regression tests:
+
+  - `test_fit_history_records_nonzero_loss`: trains one epoch with a
+    compile-time loss and asserts `history.history["loss"][0]` is
+    finite and non-zero. Fails against the broken pre-fix code.
+  - `test_fit_history_loss_close_to_evaluate_loss`: stronger check —
+    asserts fit's reported loss is within 50% relative of evaluate's
+    reported loss on the same data. Catches the case where the loss
+    tracker is updated with a wrong value (e.g., scale_loss-scaled
+    loss instead of raw loss).
+
+Both tests went red→green on the fix. Test suite: 85 → 87.
+
+### C2: `run_prior_estimate.py` and `prior_estimation/lu_classifier.py`
+broken since Piece 3
+
+**What the review found.** Both scripts still passed
+`label_key="cca_label"` (singular, the retired Piece-3 parameter)
+to `ClassifierPreprocessor`, which raises `TypeError` at construction.
+Both scripts had been broken on disk since `e3dda6a` (Piece 3) and
+were not fixed during 4a's caller-update sweep (4a updated imports
+but not call sites) or 4c's training/eval rewrite (4c was scoped to
+`run_cca_classification.py` and `eval_cca_classifier.py` only). The
+4c commit message acknowledged "broken since e3dda6a" but the
+scripts were not on the Piece-4c remediation list — an honest miss
+that the review correctly surfaced.
+
+**Why this matters.** Phase 2 (class prior estimation) is part of
+the project's documented functioning pipeline. Shipping known-broken
+code under "Tier 2 done" was the wrong shape. The fix should have
+landed either in 4c or in an explicitly-flagged follow-on commit.
+
+**Fix.**
+
+  - `run_prior_estimate.py`: standard-mode preprocessor with
+    `label_keys={"label": "cca_label"}`. The script extracts
+    `targets_dict["label"]` manually for DEDPUL rather than routing
+    through compile-time loss, so the output-dict key is internal-
+    only — `"label"` is the descriptive choice. Tuple destructuring
+    (`features_dict, targets_dict = preprocess(...)`) is clearer
+    than the previous `prediction_set[0]` / `prediction_set[1]`
+    indexing.
+
+  - `prior_estimation/lu_classifier.py`: standard-mode preprocessor
+    with `label_keys={"logits": "cca_label"}`. The output key
+    matches the L/U classifier model's output Dense layer name
+    (`name="logits"`) so Keras's `fit()` routes the labels by name
+    to the matching output for compile-time `BinaryCrossentropy`.
+    Single-output-model + dict-y routing is supported by Keras;
+    matching the output name keeps the routing unambiguous.
+
+Both scripts now parse and import cleanly. End-to-end runtime
+verification will happen at the next prior-estimation run on the
+cluster (the scripts require real LDC data).
+
+### Important issues deferred to Tier 3 (robustness)
+
+  - **I3**: `ClassifierPreprocessor` doesn't validate that source
+    columns in `label_keys` are present in the input batch.
+    Defense-in-depth gap; failure mode is a `KeyError` deep inside
+    `tf.data.map`. Tier 3 robustness scope.
+  - **I4**: `run_cca_classification.py`'s evaluate path uses the
+    training preprocessor, coupling test/val shape to training shape.
+    Tier 3 / multi-head-time concern.
+  - **I5**: Pattern-2 cross-process weight loading isn't pinned to a
+    serialization-format invariant. Worth hardening when the
+    multi-head migration lands.
+
+### Minor issues deferred to Tier 4 (hygiene)
+
+M1 (`test_script.py` raise placement), M2 (`target_dtype`
+validation), M3 (`_default_group_fn` separator), M4 (default
+ClassificationHead name collision risk), M5 (stale paragraph in
+Piece 3 design doc — fixed below).
+
+### Process note
+
+The review caught what the smoke test couldn't. The smoke test's
+verification was structural (predictions have the right shape,
+Pattern A and Pattern 2 agree) but didn't assert against
+`history.history` content — which is exactly where C1 manifests.
+The `TestLossTracking` regression tests close that loop. Lesson for
+future smoke tests: assert against the *observable artifacts* a user
+would consume (history, callbacks, logs), not just structural shape.
 
 ---

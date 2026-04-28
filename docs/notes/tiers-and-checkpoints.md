@@ -1,6 +1,6 @@
 # Audit and Refactor: Tiers, Checkpoints, and Process
 
-*Last updated: 2026-04-27 (Tier 2 pieces + integration smoke test done; only adversarial review remaining).*
+*Last updated: 2026-04-27 (Tier 2 closeout: pieces + integration smoke test + adversarial review + post-review fixes done; tier complete).*
 
 This doc exists so that a new session — whether picked up by you after
 weeks away, by a fresh LLM collaborator, or by someone else entirely —
@@ -65,7 +65,7 @@ agent after the first three commits. Found several real issues
 (see `8685c47` commit message). Review transcript lives in session
 history; the substantive findings are addressed in `8685c47`.
 
-**Tier 2 nearly complete.** Piece 4c landed; all four pieces and their sub-pieces (4a/4b/4c) done. Integration smoke test on dummy or real data + adversarial review of Tier 2 are the remaining items before closing the tier.
+**Tier 2 complete.** All four pieces, integration smoke test, adversarial review, and post-review fixes done. Tier closes here; next session can move to Tier 3 (robustness) — which inherits a small backlog of Important issues from the Tier 2 review (I3, I4, I5) — or Tier 4 (hygiene) — which inherits the Minor issues (M1–M4).
 
 - `789d88c` — Piece 1: `ClassificationHead` for multi-head refactor.
   Head-as-Layer abstraction, supports both standard mode (loss via
@@ -179,16 +179,63 @@ training and eval paths; the legacy `classifier_from_dapt_checkpoint`
   the loss; substantive at-runtime loss-monitoring should be
   verified during the actual cluster run before relying on the
   loss curve for monitoring / early stopping.
-- **Adversarial review at Tier 2 end.** Likely the `code-reviewer`
-  subagent (plan-alignment / architecture framing fits Tier 2 better
-  than the opus general-purpose one used for Tier 1). Should review
-  the cumulative shape of Pieces 1–4 against the design doc, with
-  particular attention to: the endpoint-pattern decisions, the
-  Pattern A vs. Pattern 2 split, the naming-convention subtleties,
-  the metrics-in-head extension, and the deletion of
-  `classification_setup.py`. The smoke test gives the reviewer a
-  "this works at runtime" anchor; the review is about whether the
-  *shape* of the changes is sound.
+- *(this commit)* — Adversarial review of Tier 2: dispatched
+  `code-reviewer` subagent against the cumulative diff
+  (`5ddc330..079deff`, 12 commits). Returned **2 Critical, 4
+  Important, 5 Minor**. The architectural shape — endpoint-layer
+  pattern, Pattern A/2 split, naming conventions, metrics-in-head
+  extension, deletion of `classification_setup.py` — got a clean
+  bill. The blockers were localized regressions in
+  `LayerLRModel.train_step` (C1) and an incomplete migration of two
+  Phase-2 caller scripts (C2). Both Critical issues + Important
+  issues I1 and I2 fixed in this commit; review notes and remaining
+  deferrals in `docs/notes/tier2-design.md` "Post-review corrections"
+  section.
+
+  - **C1 fix**: `LayerLRModel.train_step` rewritten to mirror stock
+    Keras `train_step` (TF backend) line-for-line plus the existing
+    multiplier-scaling step. Adds `_compute_loss(... training=True)`
+    in place of `compute_loss`, `_loss_tracker.update_state(loss,
+    sample_weight=batch_size)`, and `optimizer.scale_loss(loss)`
+    inside the `GradientTape` context. The smoke-test `loss=0`
+    symptom flagged in the integration-pass commit was, as the
+    review correctly diagnosed, a real bug rather than a display
+    artifact: `_loss_tracker` was never being updated. Re-running
+    the smoke test after the fix shows real loss values
+    (`loss: 0.1865 → 0.1799` across batches). Bonus: the
+    `optimizer.scale_loss` omission means `LossScaleOptimizer`
+    (which Piece 4c wraps `AdamW` in conditional on `IS_CLUSTER`)
+    was a no-op pre-fix; cluster mixed-precision training would
+    have silently degraded vs. local. Now fixed.
+
+  - **I1 fix**: `tests/test_layer_lr_model.py` gained a
+    `TestLossTracking` class with two regression tests
+    (`test_fit_history_records_nonzero_loss` and
+    `test_fit_history_loss_close_to_evaluate_loss`). Both went
+    red→green on the C1 fix. They explicitly assert against
+    `history.history["loss"]` content rather than just structural
+    weight changes — the missing assertion shape that allowed C1 to
+    ship. Test suite: 85 → 87.
+
+  - **I2 fix**: rolled into the C1 fix (`_compute_loss` substitution).
+
+  - **C2 fix**: `run_prior_estimate.py` and
+    `prior_estimation/lu_classifier.py` updated to the new
+    `label_keys: dict[str, str]` preprocessor signature (broken on
+    disk since `e3dda6a` / Piece 3, missed in 4a's caller-update
+    sweep and 4c's training/eval rewrite). Both scripts now parse
+    and import cleanly; runtime verification will happen at the
+    next prior-estimation run on the cluster.
+
+- **Deferred from review to Tier 3 (robustness)**: I3 (preprocessor
+  source-column validation), I4 (test-eval coupling to training
+  preprocessor), I5 (Pattern-2 serialization-format invariant
+  pinning).
+- **Deferred from review to Tier 4 (hygiene)**: M1–M4 (scratch-file
+  raise placement, `target_dtype` validation, `_default_group_fn`
+  separator, default head-name collision risk). M5 (stale Piece 3
+  design-doc paragraph) fixed in this commit alongside the post-
+  review section since it was a one-line edit.
 
 Test suite after Piece 4c: **85 tests passing** (32 from Tier 1 + 17
 for `ClassificationHead` (11 original + 6 metrics) + 11 for `LayerLRModel`

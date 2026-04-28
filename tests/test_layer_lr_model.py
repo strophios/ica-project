@@ -399,3 +399,102 @@ class TestSparseGradients:
             "fit() may have silently no-op'd despite reaching the "
             "scaled-gradient path."
         )
+
+
+# -----------------------------------------------------------------------------
+# Loss tracking (regression for Tier 2 review C1)
+# -----------------------------------------------------------------------------
+
+
+class TestLossTracking:
+    """Regression for a Tier 2 review finding (C1): the original
+    `LayerLRModel.train_step` did not update `self._loss_tracker`, so
+    `history.history["loss"]` was always 0 even when training was
+    actively happening. Stock `keras.Model.train_step` (TF backend)
+    calls `self._loss_tracker.update_state(loss, sample_weight=batch_size)`
+    immediately after computing the loss; the original LayerLRModel
+    train_step omitted this entirely.
+
+    Symptom in production: fit's progress bar shows
+    `loss: 0.0000e+00`, `history.history["loss"]` is all zeros,
+    TensorBoard's train/loss curve is flat, callbacks reading the
+    training-side loss see only zeros. Validation-side `val_loss`
+    still works (stock `test_step` is unaffected); training still
+    happens (gradients are computed correctly); only the training-
+    side loss tracking is silently broken.
+
+    The fix in `train_step` adds an explicit
+    `_loss_tracker.update_state(loss, ...)` call. See
+    `docs/notes/tier2-design.md` Piece 2 (post-review update) for
+    the full reasoning, including the related `optimizer.scale_loss`
+    omission that breaks `LossScaleOptimizer` under `mixed_float16`."""
+
+    def test_fit_history_records_nonzero_loss(self):
+        """The simplest expression of the bug: train one epoch with a
+        compile-time loss and confirm history.history['loss'] is a
+        finite non-zero value, not 0.0."""
+        model = _tiny_model()
+        model.compile(
+            optimizer=keras.optimizers.SGD(learning_rate=0.01),
+            loss=keras.losses.BinaryCrossentropy(from_logits=True),
+        )
+        # Use binary labels so BCE produces a meaningful (>0) loss.
+        rng = np.random.RandomState(42)
+        x = rng.randn(BATCH, INPUT_DIM).astype(np.float32)
+        y = rng.randint(0, 2, size=(BATCH, 1)).astype(np.float32)
+
+        history = model.fit(x, y, epochs=1, batch_size=BATCH, verbose=0)
+
+        assert "loss" in history.history, (
+            "history.history is missing 'loss' key — Keras's automatic "
+            "loss-metric registration may have been disrupted."
+        )
+        loss_values = history.history["loss"]
+        assert len(loss_values) == 1, (
+            f"Expected one loss value (one epoch), got {len(loss_values)}: "
+            f"{loss_values}"
+        )
+        assert np.isfinite(loss_values[0]), (
+            f"Loss is non-finite: {loss_values[0]}"
+        )
+        assert loss_values[0] > 0, (
+            f"Expected non-zero loss in history but got {loss_values[0]}. "
+            "Likely cause: LayerLRModel.train_step does not call "
+            "self._loss_tracker.update_state(loss). See Tier 2 review C1."
+        )
+
+    def test_fit_history_loss_close_to_evaluate_loss(self):
+        """Stronger check: after one epoch of fit, history's reported
+        loss should be in the same ballpark as evaluate()'s reported
+        loss on the same data. They won't be exactly equal — fit's
+        is averaged over training batches while weights change, while
+        evaluate() uses the final post-fit weights — but they should
+        agree to within ~50% relative difference. (BCE on a randomly-
+        initialized linear model on random labels lands around
+        ln(2) ≈ 0.69; one epoch of SGD doesn't move it much.)
+
+        This catches the case where _loss_tracker is updated with
+        a wrong value (e.g., scale_loss-scaled loss instead of raw
+        loss, or an unrelated tensor)."""
+        model = _tiny_model()
+        model.compile(
+            optimizer=keras.optimizers.SGD(learning_rate=0.01),
+            loss=keras.losses.BinaryCrossentropy(from_logits=True),
+        )
+        rng = np.random.RandomState(42)
+        x = rng.randn(BATCH, INPUT_DIM).astype(np.float32)
+        y = rng.randint(0, 2, size=(BATCH, 1)).astype(np.float32)
+
+        history = model.fit(x, y, epochs=1, batch_size=BATCH, verbose=0)
+        eval_results = model.evaluate(x, y, batch_size=BATCH, verbose=0,
+                                      return_dict=True)
+
+        fit_loss = history.history["loss"][0]
+        eval_loss = eval_results["loss"]
+        rel_diff = abs(fit_loss - eval_loss) / max(abs(eval_loss), 1e-9)
+        assert rel_diff < 0.5, (
+            f"fit loss ({fit_loss:.4f}) and evaluate loss ({eval_loss:.4f}) "
+            f"differ by {rel_diff:.1%} — expected < 50%. The loss tracker "
+            "may be receiving a transformed/wrong value rather than the "
+            "raw compute_loss result."
+        )

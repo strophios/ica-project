@@ -23,9 +23,16 @@ BATCH_SIZE = 256
 SEQ_LENGTH = 128
 
 if not config.LU_PREDS_DIR.is_dir():
-    # Get predictions for all the training data
+    # Get predictions for all the training data. Standard-mode
+    # preprocessor — returns (features_dict, targets_dict). The
+    # targets_dict key is arbitrary here because we extract it
+    # manually for DEDPUL rather than routing it through compile-
+    # time loss; "label" is descriptive.
     preprocess = src.preproc.preprocessor.ClassifierPreprocessor(
-        SEQ_LENGTH, text_key="headline_with_lead", label_key="cca_label"
+        SEQ_LENGTH=SEQ_LENGTH,
+        text_key="headline_with_lead",
+        label_keys={"label": "cca_label"},
+        endpoint_model=False,
     )
     ldc_data = src.data_setup.data.data_from_parquet(
         config.PROJECT_ROOT,
@@ -38,14 +45,14 @@ if not config.LU_PREDS_DIR.is_dir():
     prediction_set = pl.concat([ldc_data["train"], ldc_data["val"]])
     # prediction_set = ldc_data["val"]  # using just validation data for testing
     prediction_set = prediction_set.select("headline_with_lead", "cca_label").to_dict()
-    prediction_set = preprocess(prediction_set)
+    features_dict, targets_dict = preprocess(prediction_set)
     lu_preds = lu_classifier.predict(
-        prediction_set[0], batch_size=BATCH_SIZE
+        features_dict, batch_size=BATCH_SIZE
     )  # doing this for just the validation set on my local machine takes ~18 minutes
-    lu_targets = prediction_set[1]
+    lu_targets = targets_dict["label"]
     config.LU_PREDS_DIR.mkdir()
     np.save(str(config.LU_PREDS_DIR / "lu_preds.npy"), lu_preds)
-    lu_targets = lu_targets.to_numpy()
+    lu_targets = np.asarray(lu_targets)
     np.save(str(config.LU_PREDS_DIR / "lu_targets.npy"), lu_targets)
 else:
     lu_preds = np.load(str(config.LU_PREDS_DIR / "lu_preds.npy"))

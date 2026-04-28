@@ -127,40 +127,104 @@ class LayerLRModel(keras.Model):
     def train_step(self, data):
         """One training step with per-variable LR multipliers applied.
 
-        Mirrors Keras's default `train_step` structure with one change:
-        between computing gradients and applying them, we scale each
-        gradient by the multiplier for its variable's group.
+        Mirrors stock `keras.Model.train_step` (Keras 3, TensorFlow
+        backend) faithfully and inserts one extra step: between
+        gradient computation and optimizer apply, scale each gradient
+        by the multiplier for its variable's group.
 
-        `compute_loss` already aggregates the compile-time loss with
-        any `add_loss` contributions from endpoint layers, so both
-        paths (dict-of-losses via `compile`, `add_loss` inside heads)
-        are covered.
+        Implementation notes (worth being explicit because the Keras
+        "Customizing fit() with TensorFlow" guide elides several of
+        these and an earlier version of this method did too — the Tier
+        2 review surfaced the gap):
 
-        `sample_weight` is plumbed through even though we don't
-        currently use it; `None` is a no-op for both `compute_loss`
-        and `compute_metrics`, and having the hook in place means
-        adding hard-negative mining or per-sample weighting later is
-        a data-pipeline change, not a train_step change.
+        - **`_compute_loss` over `compute_loss`.** `_compute_loss` is
+          the internal wrapper that handles `compute_loss` overrides
+          missing the `training=` kwarg (added in Keras 3.3). Stock
+          `train_step` uses it for backward compatibility with older
+          subclass overrides; using it here means `LayerLRModel`
+          subclasses that override `compute_loss` with the pre-3.3
+          signature continue to work.
+
+        - **`_loss_tracker.update_state`.** The loss tracker is the
+          metric named `"loss"` that Keras automatically registers
+          when you `compile()`. Stock train_step calls
+          `_loss_tracker.update_state(loss, sample_weight=batch_size)`
+          so that `history.history["loss"]`, the `fit()` progress
+          bar, TensorBoard's training-loss curve, and any callback
+          reading the training-side `loss` log all reflect actual
+          values. Without this call, *training still happens* (we
+          still backprop), but the loss reported to all of those
+          surfaces is silently 0. Note: passing `batch_size` as
+          `sample_weight` is what makes the per-epoch mean correct
+          when batch sizes vary (e.g., a partial last batch).
+
+        - **`optimizer.scale_loss`.** When the optimizer is a
+          `LossScaleOptimizer` (used here under `mixed_float16` on
+          the cluster — see `run_cca_classification.py`), `scale_loss`
+          multiplies the loss by the dynamic loss-scale factor before
+          backprop, protecting fp16 gradients from underflow. For a
+          plain optimizer, `scale_loss` is a no-op identity. Calling
+          it unconditionally matches stock train_step and ensures the
+          mixed-precision wrap is real rather than silently skipped.
+
+        - **Compile-time loss + `add_loss` contributions.** Both flow
+          through `_compute_loss` automatically (it aggregates the
+          configured compile-time loss with `self.losses` from
+          endpoint-layer `add_loss` calls). Both training paths the
+          codebase uses — `compile(loss=...)` for the L/U classifier,
+          `add_loss` inside `ClassificationHead` for the FLPU CCA
+          classifier — are therefore covered without conditional
+          logic here.
+
+        `sample_weight` is plumbed through to `_compute_loss` and
+        `compute_metrics` even though we don't currently use it (no
+        per-sample weighting in any current training pipeline);
+        `None` is a no-op for both, and having the hook in place
+        means adding hard-negative mining or per-sample weighting
+        later is a data-pipeline change, not a train_step change.
 
         Parameters
         ----------
         data : tuple
             A batch produced by the Dataset. Typically `(x, y)` or
             `(x, y, sample_weight)`; unpacked via Keras's helper.
+            Endpoint-mode batches (single dict, no labels) also
+            work — `keras.utils.unpack_x_y_sample_weight` returns
+            `(x, None, None)` for those, and the head's `add_loss`
+            provides the loss internally.
 
         Returns
         -------
         dict
             Metric name → scalar value, forwarded to `fit()`'s
-            progress bar, callbacks, and TensorBoard logging.
+            progress bar, callbacks, and TensorBoard logging. Both
+            the loss tracker and any compile-time / layer-tracked
+            metrics are surfaced here.
         """
         x, y, sample_weight = keras.utils.unpack_x_y_sample_weight(data)
 
         with tf.GradientTape() as tape:
             y_pred = self(x, training=True)
-            loss = self.compute_loss(
-                x=x, y=y, y_pred=y_pred, sample_weight=sample_weight
+            loss = self._compute_loss(
+                x=x,
+                y=y,
+                y_pred=y_pred,
+                sample_weight=sample_weight,
+                training=True,
             )
+            # Update the loss tracker so history.history["loss"], the
+            # fit progress bar, and TensorBoard reflect actual loss
+            # rather than zero. Stock train_step weights by batch size
+            # so a partial last batch contributes proportionally to the
+            # epoch mean.
+            self._loss_tracker.update_state(
+                loss, sample_weight=tf.shape(tf.nest.flatten(x)[0])[0]
+            )
+            # Loss scaling for LossScaleOptimizer (no-op for plain
+            # optimizers). MUST happen inside the GradientTape context
+            # so the scaled loss is what tape.gradient sees.
+            if self.optimizer is not None:
+                loss = self.optimizer.scale_loss(loss)
 
         gradients = tape.gradient(loss, self.trainable_variables)
         # Scale each gradient by its variable's multiplier. Two

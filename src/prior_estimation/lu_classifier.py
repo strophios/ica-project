@@ -69,8 +69,15 @@ ldc_data = src.data_setup.data.create_classifier_data(
 
 
 # ---- PREPROCESSING ----
+# Standard-mode preprocessor: yields (features, targets_dict) tuples.
+# `label_keys`'s output key matches the L/U classifier model's output
+# layer name ("logits") so Keras's fit() routes the labels by name to
+# the matching output for compile-time BCE loss.
 preprocess = src.preproc.preprocessor.ClassifierPreprocessor(
-    SEQ_LENGTH=SEQ_LENGTH, text_key="headline_with_lead", label_key="cca_label"
+    SEQ_LENGTH=SEQ_LENGTH,
+    text_key="headline_with_lead",
+    label_keys={"logits": "cca_label"},
+    endpoint_model=False,
 )
 # note: creating the dataset takes multiple minutes with the full dataset on Explorer
 # so I check to see whether I've done it already, only do so if not (then save it)
