@@ -1,6 +1,6 @@
 # Audit and Refactor: Tiers, Checkpoints, and Process
 
-*Last updated: 2026-04-27 (Piece 4c landed; Pieces 1–3 + 4a–c done, integration smoke test + adversarial review remaining).*
+*Last updated: 2026-04-27 (Tier 2 pieces + integration smoke test done; only adversarial review remaining).*
 
 This doc exists so that a new session — whether picked up by you after
 weeks away, by a fresh LLM collaborator, or by someone else entirely —
@@ -159,14 +159,26 @@ history; the substantive findings are addressed in `8685c47`.
 training and eval paths; the legacy `classifier_from_dapt_checkpoint`
 + `classification_setup.py` are gone.
 
-**Tier 2 closeout items remaining:**
+**Tier 2 closeout items:**
 
-- **Integration pass.** End-to-end smoke test of the composed stack
-  on dummy data (or a small slice of real data on local). Verifies
-  the wiring at runtime — unit tests cover individual abstractions
-  but not the actual fit → save → load → predict cycle as it'll run
-  on the cluster. The 85-test suite gives us confidence the pieces
-  work; the smoke test verifies they work *together*.
+- *(this commit)* — Integration smoke test:
+  `scripts/smoke_test_integrated_stack.py`. Exercises the full
+  Tier 2 pipeline end-to-end on synthetic data (preprocessor →
+  dataset_create → build_endpoint_model → build_inference_model
+  (Pattern A) → fit → save_weights → rebuild → load_weights
+  (Pattern 2) → predict). Uses a fake backbone (Embedding +
+  multiply-by-padding-mask) so it runs locally without DAPT
+  weights or cached cca_set/ data; runtime ~30s. Verified all
+  eight pipeline steps succeed; Pattern A and Pattern 2 produce
+  bitwise-identical predictions (max-diff 0.00e+00); backbone
+  weights load correctly across the rebuild boundary. One small
+  observation flagged for follow-on: fit's progress-bar "loss"
+  field showed 0.00e+00 even though training was happening
+  (metrics moved, weights changed) — most likely a Keras display
+  artifact when compile-time loss is None and add_loss provides
+  the loss; substantive at-runtime loss-monitoring should be
+  verified during the actual cluster run before relying on the
+  loss curve for monitoring / early stopping.
 - **Adversarial review at Tier 2 end.** Likely the `code-reviewer`
   subagent (plan-alignment / architecture framing fits Tier 2 better
   than the opus general-purpose one used for Tier 1). Should review
@@ -174,7 +186,9 @@ training and eval paths; the legacy `classifier_from_dapt_checkpoint`
   particular attention to: the endpoint-pattern decisions, the
   Pattern A vs. Pattern 2 split, the naming-convention subtleties,
   the metrics-in-head extension, and the deletion of
-  `classification_setup.py`.
+  `classification_setup.py`. The smoke test gives the reviewer a
+  "this works at runtime" anchor; the review is about whether the
+  *shape* of the changes is sound.
 
 Test suite after Piece 4c: **85 tests passing** (32 from Tier 1 + 17
 for `ClassificationHead` (11 original + 6 metrics) + 11 for `LayerLRModel`
@@ -254,8 +268,11 @@ a signal we designed the shape wrong.
      prior 0.03 → 0.02. Test-predict bug fixed via finite predict
      datasets. Design and reasoning in `docs/notes/tier2-design.md`
      Piece 4c.
-5. **[PENDING] Integration pass.** End-to-end smoke test of the
-   composed stack on dummy data.
+5. **[DONE — this commit] Integration pass.** End-to-end smoke test
+   of the composed stack on synthetic data.
+   `scripts/smoke_test_integrated_stack.py`. All eight pipeline
+   steps verified; Pattern A vs Pattern 2 predictions match
+   bitwise. Loss-display question flagged for follow-on.
 6. **[PENDING] Adversarial review of Tier 2.** Likely the
    `code-reviewer` subagent this time (plan-alignment /
    architecture framing fits Tier 2 better than the opus

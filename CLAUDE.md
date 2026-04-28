@@ -2,7 +2,7 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
-*Last updated: 2026-04-27 (Tier 2 Piece 4c landed; tier closeout pending integration smoke test + adversarial review).*
+*Last updated: 2026-04-27 (Tier 2 integration smoke test passed; only adversarial review remaining before tier closes).*
 
 ## Project Overview
 
@@ -99,8 +99,7 @@ The project implements a three-phase pipeline, each with dedicated training scri
 - Class prior estimation via DEDPUL
 
 **Priority open items:**
-- **Tier 2 refactor, all four pieces landed (4a, 4b, 4c).** See `docs/notes/tiers-and-checkpoints.md` for full status and `docs/notes/tier2-design.md` for design decisions. The Tier 2 abstractions are now wired into the training and eval scripts; `classifier_from_dapt_checkpoint` and `classification_setup.py` are gone. Remaining Tier 2 closeout:
-  - **Integration smoke test** of the composed stack on dummy or real data — verifies fit → save → load → predict at runtime. The 85-test suite covers individual abstractions; the smoke test verifies they cohere.
+- **Tier 2 refactor, all four pieces + integration smoke test landed.** See `docs/notes/tiers-and-checkpoints.md` for full status and `docs/notes/tier2-design.md` for design decisions. The Tier 2 abstractions are wired into the training and eval scripts; `classifier_from_dapt_checkpoint` and `classification_setup.py` are gone. The integration smoke test (`scripts/smoke_test_integrated_stack.py`) verifies the full preprocessor → fit → save → load → predict pipeline composes correctly on synthetic data; Pattern A and Pattern 2 produce bitwise-identical predictions. One observation flagged from the smoke test: fit's progress-bar "loss" field shows 0.00e+00 even though training works (most likely a Keras display artifact when compile-time loss is None and add_loss provides the loss); should be verified during the actual cluster run before relying on the loss curve for monitoring. Remaining Tier 2 closeout:
   - **Adversarial review of Tier 2** (likely the `code-reviewer` subagent) — check the cumulative shape of Pieces 1–4 against the design doc. Particular attention to: the endpoint-pattern decisions, the Pattern A vs. Pattern 2 split, the naming-convention subtleties (`<head>_targets` Input name vs. head Layer name vs. output name), the metrics-in-head extension, and the deletion of `classification_setup.py`.
   - **Integration pass.** End-to-end smoke test on dummy data.
   - **Adversarial review of Tier 2.** Likely the `code-reviewer` subagent (plan/architecture framing).
