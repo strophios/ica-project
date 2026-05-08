@@ -545,9 +545,9 @@ accepted" sanity test). Combined with the existing 12 in
 
 ## Piece 2: I5 — Pattern-2 serialization round-trip test
 
-**Status:** Implemented 2026-05-08 (commit hash filled in by
-follow-up). Tests at `tests/test_assembly.py::TestPatternTwoSerialization`
-(2 tests). Production-path `load_weights` calls tightened in
+**Status:** Implemented in commit `4243c63` (2026-05-08). Tests at
+`tests/test_assembly.py::TestPatternTwoSerialization` (2 tests).
+Production-path `load_weights` calls tightened in
 `src/eval_cca_classifier.py`, `src/model_setup/backbone.py`, and
 `scripts/smoke_test_integrated_stack.py`. Suite: 101 → 103.
 Reframed during implementation after the empirical finding below
