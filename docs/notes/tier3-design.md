@@ -190,11 +190,11 @@ Claude implements with detailed comments.
 
 ## Piece 1: I3 — preprocessor input validation
 
-**Status:** Implemented 2026-05-08. `ClassifierPreprocessor` at
-`src/preproc/preprocessor.py`; tests at `tests/test_preprocessor.py`
-(14 new tests across two new test classes, file at 26 total).
-Suite: 87 → 101 tests passing. Smoke test re-run unchanged (Pattern
-A vs. Pattern 2 max-diff 0.00e+00).
+**Status:** Implemented in commit `79ab31c` (2026-05-08).
+`ClassifierPreprocessor` at `src/preproc/preprocessor.py`; tests at
+`tests/test_preprocessor.py` (14 new tests across two new test
+classes, file at 26 total). Suite: 87 → 101 tests passing. Smoke
+test re-run unchanged (Pattern A vs. Pattern 2 max-diff 0.00e+00).
 
 ### Decision
 
