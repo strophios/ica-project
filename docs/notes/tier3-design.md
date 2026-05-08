@@ -542,3 +542,369 @@ accepted" sanity test). Combined with the existing 12 in
   test change.
 
 ---
+
+## Piece 2: I5 — Pattern-2 serialization round-trip test
+
+**Status:** Implemented 2026-05-08 (commit hash filled in by
+follow-up). Tests at `tests/test_assembly.py::TestPatternTwoSerialization`
+(2 tests). Production-path `load_weights` calls tightened in
+`src/eval_cca_classifier.py`, `src/model_setup/backbone.py`, and
+`scripts/smoke_test_integrated_stack.py`. Suite: 101 → 103.
+Reframed during implementation after the empirical finding below
+(name-mismatch → shape-mismatch).
+
+### Empirical finding (2026-05-08, during Piece 2 implementation)
+
+The original design framed Piece 2 around "Pattern-2 weight-
+loading-**by-name**" — the assumption that variable names in the
+training graph and the inference graph must match for load to
+succeed. Investigation during implementation showed this
+assumption is wrong.
+
+`Model.save_weights(path)` writes a `.weights.h5` file using paths
+like:
+
+  - `layers/classification_head/dense/vars/0`
+  - `layers/classification_head/logits/vars/0`
+  - `layers/functional/layers/embedding/vars/0`
+
+These are *layer-class-name + positional variable index* paths,
+**not** the variables' user-given `.path` attribute. The user-
+given head name (`name="cca"`) appears nowhere in the file
+structure.
+
+`Model.load_weights(path, skip_mismatch=False)` matches variables
+by this structural path. So:
+
+- Renaming a head from `"cca"` to `"ccaa"` (one-letter divergence
+  the original mismatch test used) **does not break load** — both
+  are `ClassificationHead` layers in the same structural position;
+  weights load correctly into the renamed head.
+- The fail-loud mode that `skip_mismatch=False` actually catches
+  is **shape mismatch** (e.g., a head built with `hidden_dim=16`
+  trying to load weights from a `hidden_dim=8` save) and **count
+  mismatch** (different number of weight tensors).
+
+**Implication for the contract being pinned.** Pattern 2 is
+load-by-*structure*, not load-by-*name*. The invariant for
+preserving Pattern 2 across train/eval is: **the
+architectural shape (layer types, layer ordering, weight shapes)
+must match between train and eval scripts**. Head names, being
+purely user-facing labels, are *not* load-bearing for weight
+loading. They remain load-bearing for *call-site* contracts
+(`compile(loss={head_name: ...})` routing, dict-output key
+matching) — which are Python-string equality at call time, a
+separate concern.
+
+**Implication for the test.** The original mismatch test
+(rename head, expect raise) was testing a failure mode that
+doesn't exist. The test reframes as a *shape* mismatch (build
+inference head with different `hidden_dim`, expect raise) — which
+is the failure mode `skip_mismatch=False` is designed to catch
+and a realistic bug to defend against (e.g., someone tweaks
+`hidden_dim` in the eval script and tries to load weights from a
+mismatched-shape trained model).
+
+**Implication for I4 (Piece 3).** The relaxation is useful for
+Piece 3's design: the I4 config object doesn't need to enforce
+head-name agreement between train and eval as a *load-bearing*
+contract. It still should enforce it (drift in head names breaks
+call-site routing — Keras would fail loud on `compile(loss=...)`
+key not matching output key), but that's a different invariant
+than weight loading. Keep both contracts in mind when designing
+the config object.
+
+### Decision
+
+Pin the Pattern-2 weight-loading contract as an **executable
+invariant** in `tests/test_assembly.py`, plus tighten the
+production load sites to explicit `skip_mismatch=False` discipline.
+
+The contract being protected: when a fresh inference model is
+built with matching architectural configuration to a previously-
+saved training model and weights are loaded, the resulting model
+produces **bitwise-identical** predictions to the in-process
+Pattern A inference model that shared head Layer instances with
+the training model. Any breakage of this invariant — silently-
+skipped weights on a shape-changed variable, partial loads —
+surfaces as either a load-time exception (with the discipline
+change) or a test failure (with the round-trip test).
+
+### Decision
+
+Pin the Pattern-2 weight-loading contract as an **executable
+invariant** in `tests/test_assembly.py`, plus tighten the
+production load sites to explicit `skip_mismatch=False` discipline.
+
+The contract being protected: when a fresh inference model is
+built with matching configuration to a previously-saved training
+model and weights are loaded by name, the resulting model produces
+**bitwise-identical** predictions to the in-process Pattern A
+inference model that shared head Layer instances with the training
+model. Any breakage of this invariant — silently-skipped weights
+on a renamed variable, partial loads, dtype mismatches at the load
+boundary — surfaces as either a load-time exception (with the
+discipline change) or a test failure (with the round-trip test).
+
+Two changes:
+
+**1. `tests/test_assembly.py` gains a `TestPatternTwoSerialization`
+class** with two tests:
+
+  - `test_round_trip_predictions_match_bitwise`: build Pattern A
+    train + inference models sharing head + backbone instances;
+    save weights to `tmp_path`; build a *fresh* backbone + head +
+    inference model (Pattern 2); confirm Pattern 2's predictions
+    *differ* from Pattern A's *before* load (sanity-check that the
+    test isn't accidentally passing because both models share the
+    same fresh init); load weights with `skip_mismatch=False`;
+    confirm Pattern 2's predictions now match Pattern A's bitwise
+    (max-diff 0.0). The smoke test does an end-to-end version of
+    this on synthetic data; this test pins the same property as a
+    fast unit test using the existing fake backbone.
+  - `test_load_weights_raises_on_shape_mismatch`: build + save a
+    Pattern A model with `hidden_dim=8`; build a fresh inference
+    model with `hidden_dim=16` (different head shape, same head
+    name and class); attempt `load_weights(..., skip_mismatch=False)`;
+    assert the call raises rather than silently accepting partial-
+    or-empty load. This is the *tightening* — pins the contract
+    that architectural-shape drift between train and eval fails
+    loud at load time. (Originally drafted as a name-mismatch test
+    but reframed after the empirical finding above; rename
+    doesn't actually break load, shape change does.)
+
+**2. Production-path `load_weights` calls explicitly pass
+`skip_mismatch=False`** in:
+
+  - `src/eval_cca_classifier.py:81` — the original I5 site.
+    Loading head + backbone weights for Pattern 2 inference.
+  - `src/model_setup/backbone.py:46` — DAPT backbone weight load
+    inside `load_dapt_backbone`. Same defensive intent, same
+    one-line tightening. Different invariant (keras_hub backbone
+    variable names rather than our head names) but the same shape
+    of bug if it ever drifts.
+
+If `skip_mismatch=False` is already Keras 3's default, the
+explicit pass documents intent (load-bearing contract; future
+readers shouldn't have to know the default to know it's
+load-bearing). If not, this is a behavior change. Either way, the
+production code becomes self-documenting.
+
+### Reasoning
+
+**Why both a round-trip test *and* a shape-mismatch test, not
+just one.** They pin different invariants:
+
+- The round-trip test pins *the happy path works* — predictions
+  match bitwise when architectures align. Without it, a future
+  change that silently breaks load (e.g., a save-format change,
+  a dtype-on-disk shift, an unrelated layer-structure tweak)
+  would surface only when the eval script run gives wrong
+  predictions, possibly long after the change.
+- The shape-mismatch test pins *the unhappy path fails loud* —
+  silent partial loads don't ship. Without it, `skip_mismatch=False`
+  discipline could regress (e.g., someone passes `skip_mismatch=True`
+  when debugging and forgets to revert, or Keras's default flips
+  in a future version) and the system would silently accept
+  partial loads.
+
+Together they cover both directions of the contract.
+
+**Why the round-trip test must verify "predictions differ before
+load."** If both Pattern A and Pattern 2 models are built with the
+same seed (or with no explicit seed under deterministic-init
+conditions), their fresh weights are identical, and predictions
+match bitwise *without* any load happening. A test that just
+asserts post-load equality could pass even if `load_weights` were
+a no-op. The pre-load-difference assertion breaks that ambiguity:
+it asserts the test is exercising the load path, not just
+coincident initialization.
+
+**Why bitwise (max-diff 0.0), not "approximately equal."**
+Pattern 2 weight loading should be *exact*: variable names match,
+dtypes match, shapes match, on-disk bytes round-trip cleanly.
+Any non-bitwise mismatch is a real bug (precision loss in save/
+load, dtype drift, missing weights). Allowing tolerance lets such
+bugs slip through. The smoke test already verifies max-diff
+0.00e+00 on the integrated stack; this test pins the same bar
+as a fast unit test.
+
+**Why include `backbone.py`'s `load_weights` call alongside the
+eval script.** Same pattern, same defensive intent, parallel
+one-line tightening. The DAPT backbone load is a Pattern-2-shaped
+operation: a fresh keras_hub backbone gets weights loaded by
+variable name from disk. If keras_hub renames internal variables
+between versions (or if our DAPT save format ever drifts), silent
+partial-load is the same shape of bug as on the head side.
+Pulling both into the same piece keeps the discipline change
+coherent.
+
+**What I5 *can't* catch on its own.** I5 is about
+*mechanical-load correctness*: the bytes on disk match the
+variables in memory after load. It doesn't catch *semantic*
+configuration drift between train and eval (e.g., training used
+`prior=0.02` but eval reconstructs the head with `prior=0.05`).
+The head's `loss_fn` is reconstructed from script-side config,
+not from saved weights — variables align, predictions don't
+depend on `loss_fn` at inference time, so I5's invariant holds
+even with semantic drift. **Catching semantic drift is I4's
+territory** (Piece 3); I5 explicitly stays in its lane.
+
+### Layout
+
+- `tests/test_assembly.py` — new `TestPatternTwoSerialization`
+  class with two tests, plus a `_build_pattern_a_and_save` helper
+  shared between them. Uses the existing `fresh_backbone` /
+  `fresh_head` fixtures plus pytest's `tmp_path` fixture for
+  weight-file scratch space.
+- `src/eval_cca_classifier.py` — `load_weights` call gains
+  explicit `skip_mismatch=False`, with a comment explaining the
+  contract and noting that Keras's matching is structural.
+- `src/model_setup/backbone.py` — `load_weights` call gains
+  explicit `skip_mismatch=False`, with a comment.
+- `scripts/smoke_test_integrated_stack.py` — Pattern-2
+  `load_weights` call also gains explicit `skip_mismatch=False`
+  to match the production-side discipline.
+
+No new files. No architectural changes.
+
+### Contracts
+
+**Round-trip invariant (pinned by
+`test_round_trip_predictions_match_bitwise`):**
+
+  Given a Pattern A `(train_model, inf_model)` pair sharing head
+  and backbone Layer instances, with weights `W` (post-fit or
+  any non-default state):
+
+    save_weights(inf_model, path)
+    fresh_inf_model = build_inference_model(
+        backbone=fresh_backbone (matching config),
+        heads={head_name: ClassificationHead(matching config, name=head_name)},
+        seq_length=seq_length,
+    )
+    fresh_inf_model.load_weights(path, skip_mismatch=False)
+
+    For any input X:
+        inf_model.predict(X) == fresh_inf_model.predict(X)  exactly (bitwise)
+
+**Fail-loud invariant (pinned by
+`test_load_weights_raises_on_shape_mismatch`):**
+
+  Given a saved weights file from a model with head
+  `hidden_dim=8`, and a fresh inference model with `hidden_dim=16`
+  (or any architectural-shape mismatch — different layer count,
+  different layer types, different weight shapes):
+
+    fresh_inf_model.load_weights(path, skip_mismatch=False)
+    must raise an exception (rather than silently completing with
+    partial or zero loaded weights).
+
+  Note: head *name* mismatches do NOT trigger this — Keras's
+  `.weights.h5` save format keys variables by layer-class-name +
+  positional index, not by user-given name. See "Empirical
+  finding" subsection above.
+
+### Test coverage anticipated
+
+`tests/test_assembly.py`, new `TestPatternTwoSerialization` class,
+2 tests:
+
+- **test_round_trip_predictions_match_bitwise**: described above.
+  Test flow:
+  1. Build Pattern A train + inference models on `fresh_backbone` /
+     `fresh_head`.
+  2. `train_model.compile(optimizer="adam"); train_model.fit(...)`
+     for one step to get non-default weights.
+  3. `inf_model.save_weights(tmp_path / "test.weights.h5")`.
+  4. Build a fresh `fake_backbone_2` and fresh
+     `ClassificationHead(name="cca", ...)`; build
+     `inf_model_2 = build_inference_model(fresh_backbone_2, {"cca": head_2}, ...)`.
+  5. Run `inf_model_2.predict(X)` *before* load; assert it differs
+     from `inf_model.predict(X)` (the test isn't accidentally
+     passing on init coincidence).
+  6. `inf_model_2.load_weights(tmp_path / "test.weights.h5",
+     skip_mismatch=False)`.
+  7. Run `inf_model_2.predict(X)` *after* load; assert
+     `np.array_equal` to `inf_model.predict(X)` (bitwise match).
+- **test_load_weights_raises_on_shape_mismatch**: Test flow:
+  1. Build + fit + save Pattern A model (head with `hidden_dim=8`).
+  2. Build fresh inference model with head `hidden_dim=16`.
+  3. `with pytest.raises(<some exception>):
+        inf_model_wrong.load_weights(path, skip_mismatch=False)`.
+
+  The exact exception class depends on Keras's load_weights
+  implementation; likely `ValueError`. The test uses bare
+  `pytest.raises(Exception)` first to characterize, then tightens
+  to the specific class once the implementation is observed.
+
+Total: 2 new tests in `tests/test_assembly.py`. File goes from 13
+→ 15 tests. Suite: 101 → 103.
+
+### Patterns introduced
+
+- **Round-trip test as serialization invariant.** The general
+  shape: "save state in mode X; rebuild + load in mode Y;
+  assert behavior matches X bitwise." Applies anywhere
+  serialization is a load-bearing contract — extends naturally
+  to other on-disk artifacts later (preprocessor configs,
+  optimizer state if we ever serialize it).
+
+- **Pre-load difference assertion.** When testing a load path,
+  break symmetry between the pre-load and post-load states so
+  the test cannot pass on coincidental initialization. This is
+  the standard discipline for testing any "side-effecting load"
+  (read-then-mutate) function — without it, a no-op
+  implementation could test green.
+
+- **Fail-loud-on-mismatch as a separate test.** Happy-path
+  invariants and unhappy-path invariants need separate tests.
+  A single "predictions match" test doesn't catch silent
+  partial loads; a single "raises on mismatch" test doesn't
+  catch broken load logic when names match. Pair them.
+
+- **Explicit `skip_mismatch=False` as documentation of intent.**
+  Even when it's the framework's default, passing it explicitly
+  marks the call as load-bearing. Future readers don't have to
+  know what the default is to know that the contract matters here.
+
+### Open / deferred
+
+- **Strict-load wrapper for fail-loud-on-name-mismatch.** Keras's
+  `.weights.h5` save format keys by structure (layer class +
+  positional index), not by user-given name. Renaming a head
+  silently loads weights into the renamed head's same-shape
+  slots. If we ever want a *name*-mismatch fail-loud invariant,
+  it would require a custom wrapper that reads the model's
+  variable paths, inspects the h5 file's contents, and verifies
+  agreement before calling `load_weights`. Not warranted now —
+  the head-name contract is enforced at *call sites* by Keras's
+  `compile(loss={head_name: ...})` routing (which fails loud on
+  key mismatch) and dict-output structure. Pinning that contract
+  is I4's territory (Piece 3) via the config object's
+  cross-script invariant.
+- **Save-format choice.** Currently using `.weights.h5` (legacy
+  HDF5 weights-only format). Keras 3 also supports
+  `.keras` (full-model archive) and may add other formats. If we
+  ever migrate, the round-trip test needs to be re-checked
+  against the new format's contract. Not warranted now; the
+  current format works for our needs (weights-only, Pattern 2
+  rebuilds the architecture from code).
+- **Backbone-loader test parity.** The backbone-loader change is
+  a one-line tightening with no test added — the round-trip test
+  exercises the head's load path, not the backbone's. Adding a
+  parallel test would pin the backbone discipline too.
+  Considered; deferred unless a concrete failure mode appears,
+  since the backbone variable structure is owned by keras_hub
+  (not us) and harder to drift in ways our test could catch
+  usefully.
+- **`load_weights` exception class.** Characterized at
+  implementation time: Keras raises `ValueError` on shape
+  mismatch with `skip_mismatch=False`, with a message naming
+  the target variable and the shape mismatch. The test pins
+  `pytest.raises(ValueError)`. If Keras's behavior changes in a
+  future version, the test will fire on either side: a *missing*
+  raise (regression) or a *changed* exception class (a tighten-
+  the-test signal).
+
+---

@@ -74,11 +74,20 @@ cca_inference = build_inference_model(
     seq_length=SEQ_LENGTH,
 )
 
-# Load weights saved by the training script. Weights are matched by
-# variable name across the train and inference graphs — both have a
-# backbone and a head named "cca" with the same architecture, so the
-# variable hierarchy aligns.
-cca_inference.load_weights(str(config.CCA_CLASSIFIER_WEIGHTS))
+# Load weights saved by the training script. Keras 3's `.weights.h5`
+# save format keys variables by layer-class + positional index —
+# matching is structural (layer types, ordering, weight shapes),
+# not by user-given name. The fresh head here uses the same
+# `ClassificationHead(name="cca", hidden_dim=...)` configuration as
+# the training script, so the architecture aligns and weights load
+# cleanly. `skip_mismatch=False` pins the load-strict discipline
+# (Tier 3 Piece 2): a future architectural drift between training
+# and eval (e.g., changing `hidden_dim`, adding a head-internal
+# layer) raises `ValueError` rather than silently producing a model
+# with partial-or-default weights.
+cca_inference.load_weights(
+    str(config.CCA_CLASSIFIER_WEIGHTS), skip_mismatch=False
+)
 
 
 # -----------------------------------------------------------------------------

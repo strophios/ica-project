@@ -214,7 +214,9 @@ inf_model_2 = build_inference_model(
     heads={"cca": cca_head_2},
     seq_length=SEQ_LEN,
 )
-inf_model_2.load_weights(str(weights_path))
+# skip_mismatch=False matches the discipline in eval_cca_classifier.py
+# and src/model_setup/backbone.py — pinned by Tier 3 Piece 2.
+inf_model_2.load_weights(str(weights_path), skip_mismatch=False)
 
 
 # ---------------------------------------------------------------------------

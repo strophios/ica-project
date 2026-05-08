@@ -1,6 +1,6 @@
 # Audit and Refactor: Tiers, Checkpoints, and Process
 
-*Last updated: 2026-05-08 (Tier 3 Piece 1 done: dual-boundary input validation on `ClassifierPreprocessor`; M2 retired from Tier 4 list; suite at 87 → 101 tests).*
+*Last updated: 2026-05-08 (Tier 3 Piece 2 done: Pattern 2 round-trip + shape-mismatch tests; production `load_weights` discipline tightened; suite at 101 → 103 tests; empirical finding on Keras structural-vs-name matching captured in tier3-design.md).*
 
 This doc exists so that a new session — whether picked up by you after
 weeks away, by a fresh LLM collaborator, or by someone else entirely —
@@ -69,7 +69,8 @@ history; the substantive findings are addressed in `8685c47`.
 
 **Tier 3 in progress.** Boundary-enforcement spine for the multi-head future. See `docs/notes/tier3-design.md` for overall framing (boundary-inventory pattern: each finding's data/config boundaries are inventoried, validation is added at each, defense-in-depth principle without forcing the four-layer carving) and per-piece design reasoning. Pieces planned: 1 (I3, preprocessor input validation), 2 (I5, Pattern-2 serialization round-trip test), 3 (I4, train/eval config coupling), 4 (original-scope test coverage for label construction and missing-value handling). Pieces 2–4 are pending design discussion; Piece 1 has landed.
 
-  - **Piece 1 done** (this commit). Dual-boundary input validation on `ClassifierPreprocessor`. `__init__` checks for *internal-config-validity* bugs (raises `ValueError` with informative messages naming the bad value): `text_key` non-empty string, `label_keys` is a dict, `target_dtype` is a Keras-recognized dtype string, and standard-mode (`endpoint_model=False`) requires non-empty `label_keys` (the empty-`label_keys` configuration is only valid in endpoint mode for predict-only flow). `__call__` checks for *config-vs-data-mismatch* bugs (raises `KeyError` with the missing column set, the configured expectation, and the batch's actual keys, enumerating *all* missing columns rather than failing fast). Retires M2 from the Tier 4 deferred list — `target_dtype` validation lives naturally in the construction-validation block. 14 new tests across two new test classes (`TestConstructionValidation`, `TestCallTimeInputValidation`); suite at 87 → 101 passing. Smoke test re-run: still passes (Pattern A vs. Pattern 2 max-diff 0.00e+00).
+  - **Piece 1 done** (commit `79ab31c`). Dual-boundary input validation on `ClassifierPreprocessor`. `__init__` checks for *internal-config-validity* bugs (raises `ValueError` with informative messages naming the bad value): `text_key` non-empty string, `label_keys` is a dict, `target_dtype` is a Keras-recognized dtype string, and standard-mode (`endpoint_model=False`) requires non-empty `label_keys` (the empty-`label_keys` configuration is only valid in endpoint mode for predict-only flow). `__call__` checks for *config-vs-data-mismatch* bugs (raises `KeyError` with the missing column set, the configured expectation, and the batch's actual keys, enumerating *all* missing columns rather than failing fast). Retires M2 from the Tier 4 deferred list — `target_dtype` validation lives naturally in the construction-validation block. 14 new tests across two new test classes (`TestConstructionValidation`, `TestCallTimeInputValidation`); suite at 87 → 101 passing.
+  - **Piece 2 done** (this commit). Pattern 2 serialization invariant pinned in `tests/test_assembly.py` via `TestPatternTwoSerialization` (2 tests): `test_round_trip_predictions_match_bitwise` (Pattern A → save → fresh-build → load → bitwise-identical predictions, with a pre-load-difference assertion to break symmetry) and `test_load_weights_raises_on_shape_mismatch` (different `hidden_dim` → `skip_mismatch=False` raises `ValueError`). Production-path `load_weights` calls in `src/eval_cca_classifier.py`, `src/model_setup/backbone.py`, and `scripts/smoke_test_integrated_stack.py` gain explicit `skip_mismatch=False` to pin the load-strict discipline. **Empirical finding during implementation**: Keras 3's `.weights.h5` save format keys variables by *layer-class + positional index*, NOT by user-given name (see `tier3-design.md` Piece 2 "Empirical finding" subsection). The originally-planned name-mismatch test (rename head `cca` → `ccaa`) was reframed as shape-mismatch, since Keras's structural matching means rename doesn't break load. Implication: Pattern 2 is load-by-*structure*, not load-by-*name*; the head-name contract is enforced at call sites by Keras's `compile(loss={head: ...})` routing (a separate concern from weight loading). Suite: 101 → 103 passing.
 
 - `789d88c` — Piece 1: `ClassificationHead` for multi-head refactor.
   Head-as-Layer abstraction, supports both standard mode (loss via
@@ -376,11 +377,15 @@ defense-in-depth carving) and per-piece design reasoning.
    `__init__` for internal-config-validity, `__call__` for
    config-vs-data-mismatch. Retires M2 from Tier 4 inheritance.
    14 new tests; suite at 87 → 101.
-2. **[PLANNED] I5 — Pattern-2 serialization round-trip test.**
-   Round-trip Pattern A (in-process) → save → fresh-build → load →
-   Pattern 2 produces bitwise-identical predictions. Tightens
-   `eval_cca_classifier.py` to call `load_weights(...,
-   skip_mismatch=False)` so future variable-name drift fails loudly.
+2. **[DONE — Piece 2 (this commit)] I5 — Pattern-2 serialization
+   round-trip test.** Round-trip Pattern A (in-process) → save →
+   fresh-build → load → Pattern 2 produces bitwise-identical
+   predictions; shape-mismatch raises `ValueError`. Tightens
+   `eval_cca_classifier.py`, `backbone.py`, and the smoke test to
+   call `load_weights(..., skip_mismatch=False)`. Empirical
+   finding (captured in tier3-design.md): Keras `.weights.h5`
+   matches by structure not name — head renames don't break load,
+   shape changes do.
 3. **[PLANNED] I4 — train/eval config coupling.** A config object
    shared between training and eval scripts (Option B: serialized
    alongside weights, or Option C: static module + serialized run

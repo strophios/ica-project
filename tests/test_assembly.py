@@ -20,6 +20,10 @@ without the 50M-parameter overhead per test.
   - TestPatternAWeightSharing: shared head Layer instances across
     train and inference models means training the train model
     changes the inference model's predictions.
+  - TestPatternTwoSerialization (Tier 3 Piece 2): Pattern 2 weight-
+    loading-by-name round-trip produces bitwise-identical
+    predictions to Pattern A; loading with mismatched variable
+    names fails loud rather than silently accepting partial loads.
 
 Note on the fake backbone: the real RoBERTa backbone uses
 `padding_mask` for attention masking; the fake mimics this just
@@ -366,3 +370,180 @@ class TestPatternAWeightSharing:
             "Inference model predictions unchanged — Pattern A weight "
             "sharing not working as expected."
         )
+
+
+# -----------------------------------------------------------------------------
+# Pattern 2: cross-process serialization (Tier 3 Piece 2)
+# -----------------------------------------------------------------------------
+# Pattern 2 is what the eval script does: training in one process
+# saves weights; eval in a separate process rebuilds the architecture
+# from code with matching head configuration and loads weights by
+# name. The contract requires the variable-name hierarchies of the
+# two graphs to match exactly. These tests pin that contract as a
+# regression test (round-trip → bitwise-identical predictions) and
+# as a fail-loud test (mismatched names raise rather than silently
+# loading partial weights). See `docs/notes/tier3-design.md` Piece 2
+# for the design framing.
+
+
+class TestPatternTwoSerialization:
+    """Pattern 2 cross-process serialization invariant."""
+
+    def _build_pattern_a_and_save(self, fresh_backbone, fresh_head, weights_path):
+        """
+        Helper: build a Pattern A train + inference pair, train one
+        step so weights are non-default, save the inference model's
+        weights to `weights_path`. Returns the inference model
+        (Pattern A side) for later prediction comparison.
+        """
+        train_model = build_endpoint_model(
+            backbone=fresh_backbone,
+            heads={"cca": fresh_head},
+            seq_length=SEQ_LEN,
+            freeze_encoder=False,  # both backbone and head update
+        )
+        inf_model_a = build_inference_model(
+            backbone=fresh_backbone,
+            heads={"cca": fresh_head},
+            seq_length=SEQ_LEN,
+        )
+        train_model.compile(optimizer="adam")
+        train_model.fit(
+            _make_dummy_inputs(with_targets=True),
+            epochs=1, batch_size=BATCH, verbose=0,
+        )
+        inf_model_a.save_weights(str(weights_path))
+        return inf_model_a
+
+    def test_round_trip_predictions_match_bitwise(
+        self, fresh_backbone, fresh_head, tmp_path,
+    ):
+        """
+        The core Pattern 2 invariant: save + rebuild + load
+        produces bitwise-identical predictions to the original
+        Pattern A inference model.
+
+        Test flow:
+          1. Build Pattern A (train + inf sharing head/backbone),
+             fit one step so weights are non-default, save.
+          2. Build Pattern 2: fresh backbone + fresh head with the
+             same head name, fresh inference model.
+          3. Pre-load: assert Pattern 2's predictions DIFFER from
+             Pattern A's. This sanity-check breaks the symmetry —
+             without it, a no-op `load_weights` could pass the
+             post-load equality check on coincident initialization.
+          4. Load weights with `skip_mismatch=False`.
+          5. Post-load: assert Pattern 2's predictions match
+             Pattern A's BITWISE (`np.array_equal`, not
+             approximate). Pattern 2 should be exact.
+        """
+        weights_path = tmp_path / "test.weights.h5"
+
+        # Step 1: Pattern A + save
+        inf_model_a = self._build_pattern_a_and_save(
+            fresh_backbone, fresh_head, weights_path,
+        )
+
+        # Step 2: Pattern 2 fresh build with matching configuration
+        fresh_backbone_2 = _make_fake_backbone()
+        fresh_head_2 = ClassificationHead(
+            hidden_dim=HIDDEN_DIM, loss_fn=FLPULoss(prior=0.1), name="cca",
+        )
+        inf_model_b = build_inference_model(
+            backbone=fresh_backbone_2,
+            heads={"cca": fresh_head_2},
+            seq_length=SEQ_LEN,
+        )
+
+        inf_inputs = _make_dummy_inputs(with_targets=False)
+        preds_a = inf_model_a.predict(inf_inputs, verbose=0)
+        preds_a = preds_a["cca"] if isinstance(preds_a, dict) else preds_a
+
+        # Step 3: pre-load difference assertion
+        preds_b_pre = inf_model_b.predict(inf_inputs, verbose=0)
+        preds_b_pre = (
+            preds_b_pre["cca"] if isinstance(preds_b_pre, dict) else preds_b_pre
+        )
+        assert not np.array_equal(preds_a, preds_b_pre), (
+            "Pattern 2 predictions match Pattern A's BEFORE load — the test "
+            "isn't actually exercising the load path. Likely the two fresh "
+            "builds happened to have identical random initializations "
+            "(astronomically unlikely with float32 Glorot init; investigate)."
+        )
+
+        # Step 4: load with skip_mismatch=False discipline
+        inf_model_b.load_weights(str(weights_path), skip_mismatch=False)
+
+        # Step 5: post-load bitwise equality
+        preds_b_post = inf_model_b.predict(inf_inputs, verbose=0)
+        preds_b_post = (
+            preds_b_post["cca"] if isinstance(preds_b_post, dict) else preds_b_post
+        )
+        np.testing.assert_array_equal(
+            preds_a, preds_b_post,
+            err_msg=(
+                "Pattern 2 predictions don't match Pattern A bitwise after "
+                "load. Possible causes: dtype drift on save/load, missing "
+                "weights, save-format precision loss, or non-deterministic "
+                "forward pass (unlikely on CPU)."
+            ),
+        )
+
+    def test_load_weights_raises_on_shape_mismatch(
+        self, fresh_backbone, fresh_head, tmp_path,
+    ):
+        """
+        Fail-loud invariant: loading weights into a model with a
+        mismatched architectural shape (e.g., different `hidden_dim`)
+        must raise rather than silently accepting a partial load.
+
+        This test pins the `skip_mismatch=False` discipline. Without
+        it, a future architectural drift between train and eval
+        scripts (e.g., someone tweaks `hidden_dim` from 8 → 16 in
+        the eval-side head config and forgets to retrain) would
+        silently produce a model with zeroed-out or default-
+        initialized weights of the wrong shape — predictions would
+        still come out, but they would be nonsense.
+
+        **Note on the test scope (per Piece 2 design doc empirical
+        finding):** Keras's `.weights.h5` save format keys
+        variables by *layer-class-name + positional index*, NOT by
+        user-given name. So renaming a head from "cca" to "ccaa"
+        does NOT break load (originally the design's planned
+        mismatch test, abandoned after observation). What does
+        break load — and what `skip_mismatch=False` reliably
+        catches — is shape mismatch. That's what this test pins.
+
+        Test pattern: build a Pattern A model with `hidden_dim=8`
+        (HIDDEN_DIM, the test module's default), save. Build a
+        fresh inference model with `hidden_dim=16` (deliberately
+        doubled). Attempt load with `skip_mismatch=False`; expect
+        `ValueError` (Keras raises this on shape mismatch, with a
+        message about the target variable's shape not matching).
+        """
+        weights_path = tmp_path / "test.weights.h5"
+
+        # Pattern A side with default HIDDEN_DIM=8
+        self._build_pattern_a_and_save(
+            fresh_backbone, fresh_head, weights_path,
+        )
+
+        # Mismatched fresh build: hidden_dim doubled. The head's
+        # internal Dense layers will have weight shapes (8, 16) and
+        # (16, 1) instead of (8, 8) and (8, 1) — incompatible with
+        # the saved file's tensors.
+        wrong_hidden_dim = HIDDEN_DIM * 2
+        fresh_backbone_2 = _make_fake_backbone(hidden_dim=wrong_hidden_dim)
+        head_wrong = ClassificationHead(
+            hidden_dim=wrong_hidden_dim, loss_fn=FLPULoss(prior=0.1), name="cca",
+        )
+        inf_model_wrong = build_inference_model(
+            backbone=fresh_backbone_2,
+            heads={"cca": head_wrong},
+            seq_length=SEQ_LEN,
+        )
+
+        with pytest.raises(ValueError):
+            inf_model_wrong.load_weights(
+                str(weights_path), skip_mismatch=False,
+            )

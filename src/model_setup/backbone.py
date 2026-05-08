@@ -43,6 +43,14 @@ def load_dapt_backbone(weights_path):
     backbone = keras_hub.models.Backbone.from_preset(
         "roberta_base_en", preprocessor=None, load_weights=False
     )
-    backbone.load_weights(str(weights_path))
+    # `skip_mismatch=False`: pin the load-strict discipline (Tier 3
+    # Piece 2). Keras 3's `.weights.h5` save format keys variables
+    # by layer-class + positional index, so a *rename* of an
+    # internal layer wouldn't be caught here, but a *shape*
+    # mismatch (e.g., a future keras_hub roberta_base_en variant
+    # with different hidden_dim) would silently load partial
+    # weights without this. Explicit > implicit, even when
+    # explicit matches the framework default.
+    backbone.load_weights(str(weights_path), skip_mismatch=False)
 
     return backbone
