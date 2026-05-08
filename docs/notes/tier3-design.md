@@ -558,20 +558,37 @@ Reframed during implementation after the empirical finding below
 The original design framed Piece 2 around "Pattern-2 weight-
 loading-**by-name**" — the assumption that variable names in the
 training graph and the inference graph must match for load to
-succeed. Investigation during implementation showed this
-assumption is wrong.
+succeed. Investigation during implementation, sharpened by a
+follow-up question pointing at the [Keras 2 weights-loading
+docs][1], showed this assumption is wrong for the format we use.
 
-`Model.save_weights(path)` writes a `.weights.h5` file using paths
-like:
+[1]: https://keras.io/2/api/models/model_saving_apis/weights_saving_and_loading/
+
+**The two save formats:**
+
+| Format | Created by | Variable matching | `by_name=True` |
+|---|---|---|---|
+| `.weights.h5` (Keras 3 modern) | `save_weights("path.weights.h5")` | Topological / structural (layer-class + position) | **Not supported** — raises `ValueError("by_name only supports loading legacy '.h5' or '.hdf5' files")` |
+| `.h5` / `.hdf5` (legacy) | `save_weights("path.h5")` | Topological by default; user-given Layer name with `by_name=True` | Supported |
+
+Our project uses `.weights.h5`, so name-based loading is
+fundamentally not available for our save artifacts — not because
+we're passing wrong arguments, but because the format itself
+omits user-given Layer names from the file.
+
+**`Model.save_weights(path)` writes a `.weights.h5` file using
+paths like:**
 
   - `layers/classification_head/dense/vars/0`
   - `layers/classification_head/logits/vars/0`
   - `layers/functional/layers/embedding/vars/0`
 
-These are *layer-class-name + positional variable index* paths,
-**not** the variables' user-given `.path` attribute. The user-
-given head name (`name="cca"`) appears nowhere in the file
-structure.
+These are *layer-class-name (snake-cased) + positional variable
+index* paths, **not** the variables' user-given `.path` attribute.
+The user-given head name (`name="cca"`) appears nowhere in the
+file structure. Empirically verified: a head with `name="cca"`
+and a head with `name="ccaa"` produce **identical** h5 paths
+(`layers/classification_head/...`).
 
 `Model.load_weights(path, skip_mismatch=False)` matches variables
 by this structural path. So:
@@ -587,21 +604,21 @@ by this structural path. So:
 
 **Implication for the contract being pinned.** Pattern 2 is
 load-by-*structure*, not load-by-*name*. The invariant for
-preserving Pattern 2 across train/eval is: **the
-architectural shape (layer types, layer ordering, weight shapes)
-must match between train and eval scripts**. Head names, being
-purely user-facing labels, are *not* load-bearing for weight
-loading. They remain load-bearing for *call-site* contracts
+preserving Pattern 2 across train/eval is: **the architectural
+shape (layer types, layer ordering, weight shapes) must match
+between train and eval scripts**. Head names, being purely user-
+facing labels, are *not* load-bearing for weight loading. They
+remain load-bearing for *call-site* contracts
 (`compile(loss={head_name: ...})` routing, dict-output key
 matching) — which are Python-string equality at call time, a
 separate concern.
 
-**Implication for the test.** The original mismatch test
-(rename head, expect raise) was testing a failure mode that
-doesn't exist. The test reframes as a *shape* mismatch (build
-inference head with different `hidden_dim`, expect raise) — which
-is the failure mode `skip_mismatch=False` is designed to catch
-and a realistic bug to defend against (e.g., someone tweaks
+**Implication for the test.** The original mismatch test (rename
+head, expect raise) was testing a failure mode that doesn't
+exist. The test reframes as a *shape* mismatch (build inference
+head with different `hidden_dim`, expect raise) — which is the
+failure mode `skip_mismatch=False` is designed to catch and a
+realistic bug to defend against (e.g., someone tweaks
 `hidden_dim` in the eval script and tries to load weights from a
 mismatched-shape trained model).
 
@@ -613,6 +630,59 @@ call-site routing — Keras would fail loud on `compile(loss=...)`
 key not matching output key), but that's a different invariant
 than weight loading. Keep both contracts in mind when designing
 the config object.
+
+### Decision: stay with `.weights.h5`, accept structural matching
+
+Given the empirical finding, there is a real design question:
+**should we switch the save format to legacy `.h5` to enable
+`by_name=True` strict name matching?**
+
+Considered and rejected. Reasoning:
+
+**Pro switch to `.h5`:**
+
+  - Would enable `by_name=True` strict-name-matching enforcement,
+    catching the bug class "someone renames a head and forgets to
+    retrain" at load time.
+
+**Con switch to `.h5`:**
+
+  - Legacy format; may eventually be deprecated by Keras (the
+    docs already mark it "legacy").
+  - Less metadata, less robust to format evolution, less first-
+    class in the Keras 3 saving API.
+  - The bug class it would catch — head-name drift between train
+    and eval — is *also* caught at call time by Keras's
+    `compile(loss={head: ...})` routing, which raises on key
+    mismatch. So in practice it's protected by a different
+    mechanism. (The eval script's `predict()` flow doesn't go
+    through `compile`, so the call-site protection doesn't fire
+    *there* — but the eval script reconstructs the head from a
+    script-side hardcode, so a name change has to be a deliberate
+    intentional act in two scripts simultaneously, much less
+    likely than a single-script typo.)
+  - Switching is a small but real coordinated change: training
+    script, smoke test, eval script load expectations, possibly
+    test fixtures.
+
+**Decision criteria for revisiting.** Switch to `.h5` legacy
+format if any of the following becomes true:
+
+  1. Keras 3 deprecates `.weights.h5` in favor of `.h5` (unlikely;
+     `.weights.h5` is the documented Keras 3 weights-only path).
+  2. We ship a head-name-drift bug that the structural mismatch
+     test didn't catch and the call-site routing didn't catch
+     either — i.e., a real instance of the bug class.
+  3. Keras 3 adds first-class strict-name-matching to
+     `.weights.h5` (would let us avoid the legacy-format
+     trade-off entirely).
+
+Until then: `.weights.h5` is the chosen format, structural
+matching is the load-time invariant, head-name agreement is
+enforced at call sites by `compile(loss={...})` routing. The
+production code's `skip_mismatch=False` discipline still protects
+against shape mismatch and count mismatch, which is the relevant
+failure mode for `.weights.h5` loads.
 
 ### Decision
 
@@ -870,19 +940,22 @@ Total: 2 new tests in `tests/test_assembly.py`. File goes from 13
 
 ### Open / deferred
 
-- **Strict-load wrapper for fail-loud-on-name-mismatch.** Keras's
-  `.weights.h5` save format keys by structure (layer class +
-  positional index), not by user-given name. Renaming a head
-  silently loads weights into the renamed head's same-shape
-  slots. If we ever want a *name*-mismatch fail-loud invariant,
-  it would require a custom wrapper that reads the model's
-  variable paths, inspects the h5 file's contents, and verifies
-  agreement before calling `load_weights`. Not warranted now —
-  the head-name contract is enforced at *call sites* by Keras's
-  `compile(loss={head_name: ...})` routing (which fails loud on
-  key mismatch) and dict-output structure. Pinning that contract
-  is I4's territory (Piece 3) via the config object's
-  cross-script invariant.
+- **Fail-loud-on-name-mismatch.** Two paths, neither pursued in
+  this piece (see "Decision" subsection above for the format-
+  switch reasoning):
+    1. Switch save format to legacy `.h5` and use
+       `load_weights(path, by_name=True, skip_mismatch=False)`.
+       Catches name-mismatch but trades off the modern format's
+       benefits.
+    2. Custom wrapper that reads the model's variable paths,
+       inspects the h5 file's contents, and verifies agreement
+       before calling `load_weights`. Possible but adds
+       maintenance surface for marginal protection.
+  Neither warranted now — the head-name contract is enforced at
+  *call sites* by Keras's `compile(loss={head_name: ...})` routing
+  (which fails loud on key mismatch) and dict-output structure.
+  Pinning that contract more durably is I4's territory (Piece 3)
+  via the config object's cross-script invariant.
 - **Save-format choice.** Currently using `.weights.h5` (legacy
   HDF5 weights-only format). Keras 3 also supports
   `.keras` (full-model archive) and may add other formats. If we
