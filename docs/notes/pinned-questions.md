@@ -352,3 +352,142 @@ When we pick this up:
   handling.
 
 ---
+
+## 3. `ClassifierPreprocessor` train/predict shape: configuration vs. call mode
+
+**Pinned:** 2026-05-08 (during Tier 3 Piece 1 design discussion).
+
+### The question
+
+The current `ClassifierPreprocessor` encodes the train/predict
+distinction as a **configuration** difference: training uses
+`label_keys={"cca_targets": "cca_label"}`, predict uses
+`label_keys={}`. Two preprocessor instances are constructed (one
+each), each suitable for `tf.data.Dataset.map`. This is what
+`run_cca_classification.py` and `eval_cca_classifier.py` do today
+(documented in Tier 2 Piece 4c design notes as "Two-preprocessor
+split (training vs. predict)").
+
+The smell: encoding a *call-mode* distinction as a *configuration*
+distinction. The preprocessor's actual job — tokenize text, emit
+the right output shape — is one job with two output shapes; making
+"do I emit targets?" turn on "is `label_keys` empty?" is a
+workaround, not a contract. The eval script having to construct a
+*separate instance* with a deliberately-empty `label_keys` to
+express predict-mode makes the asymmetry visible in caller code.
+
+### The candidate cleaner shape
+
+Split `__call__` into two methods (or two callable accessors), both
+suitable for `tf.data.Dataset.map`:
+
+```python
+preprocessor = ClassifierPreprocessor(
+    SEQ_LENGTH=128,
+    text_key="headline_with_lead",
+    label_keys={"cca_targets": "cca_label"},  # always non-empty
+    endpoint_model=True,
+)
+train_ds   = train_ds.map(preprocessor.for_training, ...)
+predict_ds = predict_ds.map(preprocessor.for_prediction, ...)
+```
+
+What this buys:
+
+- One configuration; one preprocessor instance per (model, task);
+  call-mode is a method choice rather than a config choice.
+- Validation contracts get *stronger*, not weaker: `for_training`
+  demands source columns; `for_prediction` demands only `text_key`.
+  Each method has a clear precondition, expressible at the boundary.
+- Construction-time `label_keys={}` becomes always-rejected (no
+  special case for endpoint-mode predict-only). The "empty
+  `label_keys`" workaround disappears.
+- The Tier 3 Piece 3 (I4) config object inherits a cleaner mental
+  model: configuration encodes "what targets does this task use?"
+  — a fact about the task, not about the call. The train/predict
+  distinction lives at the call site, not in the serialized config.
+
+What this costs:
+
+- `__call__` either deprecates or becomes an alias that dispatches
+  by some flag. Backward-compatibility for any external caller of
+  `__call__` would need consideration (currently only the smoke
+  test, training script, and eval script call it, all in-repo).
+- `eval_cca_classifier.py` swaps its `label_keys={}` construction
+  for `preprocessor.for_prediction`.
+- `run_cca_classification.py` swaps its `__call__` use for
+  `for_training` (and possibly `for_prediction` on test-set predict).
+- Tests update, the smoke test updates, design docs update.
+
+Mechanically, a half-day refactor. Conceptually, a Tier 2 shape
+decision the team didn't see at the time — the
+two-preprocessor-instances pattern was accepted in Piece 4c without
+the design smell being surfaced.
+
+### Why deferred
+
+The user surfaced this during Tier 3 Piece 1's design discussion
+but agreed that expanding Piece 1 to include the API refactor
+would over-scope the piece. The refactor is structural (Tier-2-
+flavored) rather than boundary-enforcement (Tier-3-flavored), so
+folding it into Tier 3 confuses the tier's intent.
+
+The decision: pin it, ship Piece 1 as a focused validation piece
+under the current API, address the API refactor as a separate
+piece either before Tier 3 closes (if other refactor pressure
+accumulates) or in a follow-on tier.
+
+### What we're doing in the meantime
+
+- Piece 1's construction-time validation accepts the current contract:
+  `endpoint_model=True` allows empty `label_keys` (predict-only);
+  `endpoint_model=False` rejects empty `label_keys` (no targets to
+  route via `compile(loss={...})`).
+- After the refactor lands, Piece 1's construction-time validation
+  tightens (always reject empty `label_keys`), with a one-line
+  test rewrite. No structural rework.
+- I4's config object should *not* try to encode the train/predict
+  distinction as part of its serialized state. Train/predict is a
+  call-site choice; only the task configuration (text_key,
+  label_keys non-empty, target_dtype, etc.) is config. This
+  forward-pressure is captured in `tier3-design.md`'s Piece 3
+  section.
+
+### What deeper engagement would look like
+
+When this comes off the pin:
+
+1. Decide between method-split (`for_training`, `for_prediction`)
+   vs. mode-flag-on-call (`__call__(inputs, mode="train"|"predict")`).
+   Methods are cleaner for `tf.data.Dataset.map` (bound methods
+   work directly); mode flags require `functools.partial`. Lean
+   toward methods.
+2. Confirm the `endpoint_model=False` (standard mode) path stays
+   unchanged — there's no predict equivalent in standard mode (a
+   fit-mode preprocessor with `compile(loss={...})` routing already
+   handles eval; predict is just the bare-features pipeline that
+   endpoint mode also uses). The refactor primarily affects
+   endpoint mode.
+3. Update the Tier 2 Piece 3 / Piece 4c design notes to flag the
+   replaced pattern, so future readers understand why the
+   two-preprocessor-instances pattern existed historically.
+4. Consider whether the same refactor extends to `CustomPreprocessor`
+   (the DAPT/MLM preprocessor), which has its own train/predict-
+   like distinction (`masker is None` for non-MLM use). Probably a
+   separate question; the masker case is structurally different.
+
+### Related code touchpoints
+
+- `src/preproc/preprocessor.py` — `ClassifierPreprocessor.__call__`,
+  the method to split.
+- `src/run_cca_classification.py` — caller; constructs both train
+  and predict preprocessor instances today.
+- `src/eval_cca_classifier.py` — caller; constructs the predict-
+  only preprocessor with `label_keys={}` today.
+- `scripts/smoke_test_integrated_stack.py` — caller; constructs
+  both today.
+- `tests/test_preprocessor.py` — test contracts to update.
+- `docs/notes/tier2-design.md` Piece 4c — historical "Two-
+  preprocessor split" explanation.
+
+---

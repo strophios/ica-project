@@ -1,6 +1,6 @@
 # Audit and Refactor: Tiers, Checkpoints, and Process
 
-*Last updated: 2026-04-27 (Tier 2 closeout: pieces + integration smoke test + adversarial review + post-review fixes done; tier complete).*
+*Last updated: 2026-05-08 (Tier 3 Piece 1 done: dual-boundary input validation on `ClassifierPreprocessor`; M2 retired from Tier 4 list; suite at 87 → 101 tests).*
 
 This doc exists so that a new session — whether picked up by you after
 weeks away, by a fresh LLM collaborator, or by someone else entirely —
@@ -65,7 +65,11 @@ agent after the first three commits. Found several real issues
 (see `8685c47` commit message). Review transcript lives in session
 history; the substantive findings are addressed in `8685c47`.
 
-**Tier 2 complete.** All four pieces, integration smoke test, adversarial review, and post-review fixes done. Tier closes here; next session can move to Tier 3 (robustness) — which inherits a small backlog of Important issues from the Tier 2 review (I3, I4, I5) — or Tier 4 (hygiene) — which inherits the Minor issues (M1–M4).
+**Tier 2 complete.** All four pieces, integration smoke test, adversarial review, and post-review fixes done.
+
+**Tier 3 in progress.** Boundary-enforcement spine for the multi-head future. See `docs/notes/tier3-design.md` for overall framing (boundary-inventory pattern: each finding's data/config boundaries are inventoried, validation is added at each, defense-in-depth principle without forcing the four-layer carving) and per-piece design reasoning. Pieces planned: 1 (I3, preprocessor input validation), 2 (I5, Pattern-2 serialization round-trip test), 3 (I4, train/eval config coupling), 4 (original-scope test coverage for label construction and missing-value handling). Pieces 2–4 are pending design discussion; Piece 1 has landed.
+
+  - **Piece 1 done** (this commit). Dual-boundary input validation on `ClassifierPreprocessor`. `__init__` checks for *internal-config-validity* bugs (raises `ValueError` with informative messages naming the bad value): `text_key` non-empty string, `label_keys` is a dict, `target_dtype` is a Keras-recognized dtype string, and standard-mode (`endpoint_model=False`) requires non-empty `label_keys` (the empty-`label_keys` configuration is only valid in endpoint mode for predict-only flow). `__call__` checks for *config-vs-data-mismatch* bugs (raises `KeyError` with the missing column set, the configured expectation, and the batch's actual keys, enumerating *all* missing columns rather than failing fast). Retires M2 from the Tier 4 deferred list — `target_dtype` validation lives naturally in the construction-validation block. 14 new tests across two new test classes (`TestConstructionValidation`, `TestCallTimeInputValidation`); suite at 87 → 101 passing. Smoke test re-run: still passes (Pattern A vs. Pattern 2 max-diff 0.00e+00).
 
 - `789d88c` — Piece 1: `ClassificationHead` for multi-head refactor.
   Head-as-Layer abstraction, supports both standard mode (loss via
@@ -231,11 +235,14 @@ training and eval paths; the legacy `classifier_from_dapt_checkpoint`
   source-column validation), I4 (test-eval coupling to training
   preprocessor), I5 (Pattern-2 serialization-format invariant
   pinning).
-- **Deferred from review to Tier 4 (hygiene)**: M1–M4 (scratch-file
-  raise placement, `target_dtype` validation, `_default_group_fn`
-  separator, default head-name collision risk). M5 (stale Piece 3
-  design-doc paragraph) fixed in this commit alongside the post-
-  review section since it was a one-line edit.
+- **Deferred from review to Tier 4 (hygiene)**: M1, M3, M4
+  (scratch-file raise placement, `_default_group_fn` separator,
+  default head-name collision risk). **M2** (`target_dtype`
+  validation) was retired into Tier 3 Piece 1 (2026-05) where it
+  landed alongside the other construction-time validation checks
+  on `ClassifierPreprocessor.__init__`. M5 (stale Piece 3
+  design-doc paragraph) fixed in the Tier-2-review-corrections
+  commit since it was a one-line edit.
 
 Test suite after Piece 4c: **85 tests passing** (32 from Tier 1 + 17
 for `ClassificationHead` (11 original + 6 metrics) + 11 for `LayerLRModel`
@@ -356,19 +363,44 @@ a signal we designed the shape wrong.
 
 # Tier 3: Robustness
 
-Planned, not started. Scope includes:
+In progress. **Intent**: harden the boundaries the multi-head future
+will lean on. Tier 2 reshaped the code; Tier 3 enforces the contracts
+that reshape created. See `docs/notes/tier3-design.md` for the
+overall framing (boundary inventory replacing the four-layer
+defense-in-depth carving) and per-piece design reasoning.
 
-- Tests for the data pipeline shape contract (preprocessor inputs/outputs
-  under both standard and endpoint-layer modes).
-- Tests for label construction (validates the cca/immig/descriptor
-  boolean combinations).
-- Missing-value handling: test coverage for the `fill_null("")` path in
-  `data_from_parquet`.
-- Evaluation harness: proper metrics aggregation on test set;
-  calibration utilities.
-- Fix the S6 looping issue (`steps=validation_steps` used on test
-  predict calls causing duplicate predictions) with a finite,
-  correctly-sized test dataset.
+**Scope, with status markers:**
+
+1. **[DONE — Piece 1 (this commit)] I3 — preprocessor input
+   validation.** Dual-boundary validation on `ClassifierPreprocessor`:
+   `__init__` for internal-config-validity, `__call__` for
+   config-vs-data-mismatch. Retires M2 from Tier 4 inheritance.
+   14 new tests; suite at 87 → 101.
+2. **[PLANNED] I5 — Pattern-2 serialization round-trip test.**
+   Round-trip Pattern A (in-process) → save → fresh-build → load →
+   Pattern 2 produces bitwise-identical predictions. Tightens
+   `eval_cca_classifier.py` to call `load_weights(...,
+   skip_mismatch=False)` so future variable-name drift fails loudly.
+3. **[PLANNED] I4 — train/eval config coupling.** A config object
+   shared between training and eval scripts (Option B: serialized
+   alongside weights, or Option C: static module + serialized run
+   config). Per pinned question #3, the config should not encode
+   the train/predict distinction.
+4. **[PLANNED] Original-scope test coverage.** Label-construction
+   tests for the cca/immig/descriptor boolean combinations in
+   `create_classifier_data`; missing-value (`fill_null("")`)
+   coverage; any preprocessor shape-contract gaps surfaced by
+   Piece 1.
+
+**Deferred (not Tier 3): evaluation harness with calibration.**
+Originally listed in the Tier 3 plan, but it's a research deliverable
+(threshold selection on a hand-labeled PN test set, possibly Platt
+scaling or isotonic regression), not foundation work. Punt to a
+separate piece of work after Tier 4 hygiene.
+
+The S6 looping issue (`steps=validation_steps` on test predict
+producing duplicate predictions) was fixed during Tier 2 Piece 4c
+and doesn't need Tier 3 treatment.
 
 # Tier 4: Hygiene
 

@@ -37,7 +37,69 @@ class ClassifierPreprocessor:
         endpoint_model=False,
         target_dtype="float32",
     ):
-        # --- Stash configuration ---------------------------------
+        # ============================================================
+        # Boundary 1: construction-time validation (Tier 3 Piece 1)
+        # ============================================================
+        # Defense-in-depth: __init__ checks for *internal-config-validity*
+        # bugs — bugs visible from the constructor arguments alone,
+        # without needing to see actual data. __call__ has its own
+        # check (Boundary 2) for config-vs-data mismatches that
+        # __init__ can't see. Each boundary catches what the other
+        # can't. See `docs/notes/tier3-design.md` Piece 1 for the full
+        # framing. Validation block runs *first*, before any heavy
+        # setup (tokenizer download, packer construction), so config
+        # errors fail fast.
+
+        # `text_key` must be a non-empty string. Catches: forgotten
+        # default (text_key=None), empty-string typo, wrong type.
+        if not isinstance(text_key, str) or not text_key:
+            raise ValueError(
+                f"text_key must be a non-empty string; "
+                f"got {text_key!r} (type {type(text_key).__name__})."
+            )
+
+        # `label_keys` must be a dict. Catches the most plausible
+        # typo: hand-rolled list of (key, value) tuples instead of
+        # passing a dict literal. Without this check, the failure is
+        # an AttributeError on `.items()` deep in __call__.
+        if not isinstance(label_keys, dict):
+            raise ValueError(
+                f"label_keys must be a dict[str, str] mapping output_dict_key "
+                f"-> source_column_name; got {type(label_keys).__name__}."
+            )
+
+        # `target_dtype` must be a Keras-recognized dtype string.
+        # `keras.backend.standardize_dtype` raises on invalid input;
+        # we catch and re-raise with a more contextual message naming
+        # the bad value. Retires M2 from the Tier 2 review's deferred
+        # Tier-4 list — natural home is alongside the other
+        # construction-time checks.
+        try:
+            keras.backend.standardize_dtype(target_dtype)
+        except (ValueError, TypeError) as e:
+            raise ValueError(
+                f"target_dtype must be a valid Keras dtype string; "
+                f"got {target_dtype!r}. Underlying error: {e}"
+            ) from e
+
+        # Business rule: standard mode (endpoint_model=False) emits
+        # `(features, targets_dict)`; an empty `targets_dict` has
+        # nothing to route via `compile(loss={...})` and is
+        # structurally nonsensical. Empty `label_keys` is *only*
+        # valid in endpoint mode (predict-only configurations like
+        # the eval script's `label_keys={}` pattern — see pinned
+        # question #3 for the design smell this exposes and the
+        # planned future refactor).
+        if not endpoint_model and not label_keys:
+            raise ValueError(
+                "standard mode (endpoint_model=False) requires non-empty "
+                "label_keys; got empty label_keys. Empty label_keys is only "
+                "valid in endpoint mode (predict-only configuration)."
+            )
+
+        # ============================================================
+        # Stash configuration
+        # ============================================================
         # `label_keys` is a dict[str, str]: output_dict_key -> source_column_name.
         # The output_dict_key must match either the corresponding `keras.Input`
         # name (endpoint mode) or the model output name (standard mode); the
@@ -76,7 +138,53 @@ class ClassifierPreprocessor:
             - standard mode (`endpoint_model=False`): tuple
                 ({"token_ids": ..., "padding_mask": ...},
                  {<out_key>: <cast target>, ...})
+
+        Raises:
+            KeyError: if `inputs` is missing `text_key` or any source
+                column named in `label_keys`. See Boundary-2 check
+                below.
         """
+        # ============================================================
+        # Boundary 2: call-time input validation (Tier 3 Piece 1)
+        # ============================================================
+        # __init__ already checked the configuration is internally
+        # coherent (Boundary 1). This boundary catches a different
+        # shape of bug: configuration-vs-actual-data mismatch — the
+        # configured columns aren't in the batch. Without this check,
+        # the failure surfaces deep inside the tokenizer / cast call
+        # with a stack pointing at TF internals; with it, the failure
+        # surfaces at the entry point with an informative message.
+        #
+        # Enumerate all missing columns in a single check rather than
+        # failing fast on the first — diagnostic quality matters more
+        # than microseconds in a once-per-dataset trace. The cost is
+        # one set construction + one set difference per traced map
+        # call (so ~once per dataset construction in normal tf.data
+        # use), which is negligible.
+        expected_cols = {self.text_key, *self.label_keys.values()}
+        available_cols = set(inputs.keys())
+        missing = expected_cols - available_cols
+        if missing:
+            # KeyError (not ValueError) for consistency with the
+            # existing failure mode (`inputs[key]` raises KeyError);
+            # callers catching KeyError to handle missing-column
+            # errors keep working, just with a useful message and an
+            # earlier stack location. The exception class signals
+            # "the data you fed in is missing a column the
+            # configuration expected — fix the dataset pipeline,"
+            # distinct from __init__'s ValueError signal of "your
+            # configuration is malformed."
+            raise KeyError(
+                f"ClassifierPreprocessor: input batch is missing required "
+                f"column(s) {sorted(missing)}. "
+                f"Configured text_key={self.text_key!r}; "
+                f"label_keys source columns={sorted(self.label_keys.values())}. "
+                f"Available columns in batch: {sorted(available_cols)}."
+            )
+
+        # ============================================================
+        # Tokenize + pack
+        # ============================================================
         outputs = self.tokenizer(inputs[self.text_key])
         outputs = self.packer(outputs)
         outputs = {"token_ids": outputs[0], "padding_mask": outputs[1]}
