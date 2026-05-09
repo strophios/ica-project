@@ -981,3 +981,532 @@ Total: 2 new tests in `tests/test_assembly.py`. File goes from 13
   the-test signal).
 
 ---
+
+## Piece 3: I4 — train/eval config coupling
+
+**Status:** Sub-divided during implementation into Piece 3a (config
+module + tests) and Piece 3b (script integration). Piece 3a
+implemented 2026-05-09 (commit hash filled in by follow-up).
+Piece 3b pending.
+
+- **Piece 3a**: `src/cca_config.py` with all dataclasses
+  (`FLPULossConfig`, `HeadConfig`, `RatioBatchConfig`,
+  `LRScheduleConfig`, `OptimizerConfig`, `RunConfig`), JSON
+  serialization, `DEFAULT_CCA_CONFIG`, `config_path_for_weights`
+  helper, CLI subcommands (`write_default`, `show`).
+  `tests/test_cca_config.py` with 64 tests across 11 classes.
+  Suite 103 → 167.
+- **Piece 3b**: rewrite `src/run_cca_classification.py`,
+  `src/eval_cca_classifier.py`, and
+  `scripts/smoke_test_integrated_stack.py` to drive their values
+  from a `RunConfig` instance. Training writes the sidecar at
+  the end of fit; eval loads the sidecar at start; smoke test
+  exercises the round-trip.
+
+### Decision
+
+Introduce a frozen-dataclass `RunConfig` that captures the
+architectural and research-dimension parameters of a CCA training
+run, with JSON serialization to a sidecar file alongside the saved
+weights. Both the training script and the eval script construct
+their preprocessor + head + assembly from the same `RunConfig`
+instance — at training time from a Python-level configuration
+(typically `DEFAULT_CCA_CONFIG` or a `dataclasses.replace`-derived
+variant), at eval time loaded from the on-disk sidecar.
+
+**Option C** (static config module + serialized run config), per
+the earlier design discussion. The static module
+(`src/cca_config.py`) provides `DEFAULT_CCA_CONFIG` as the canonical
+starting point; experiments override fields via
+`dataclasses.replace`. The serialized sidecar travels with the
+weights file (suffix substitution: `.weights.h5` →
+`.config.json`).
+
+**Sidecar required, no legacy fallback.** A small CLI helper in
+`src/cca_config.py` writes `DEFAULT_CCA_CONFIG` as a sidecar at
+the right derived path for ad-hoc use cases (existing weights
+without a sidecar, test fixtures). Eval script raises a clear
+error if the sidecar is missing.
+
+**Scope of `RunConfig` is "the architectural and research
+identity of a training run" — wider than just-coupling-relevant.**
+Includes coupling-relevant fields (must agree between train and
+eval) plus HP-search-relevant fields (research dimensions we
+expect to sweep across). Excludes script-local operational fields
+(batch sizes, callbacks) and architectural-variant fields
+(different loss types, different head classes, different
+optimizer types) deferred to the corresponding future pieces.
+
+### Reasoning
+
+**Why Option C over Option B.** Both options would catch per-run
+drift via the saved sidecar. Option C *additionally* catches
+static drift in the training script: when training script values
+come from a module-level dataclass instance instead of hardcoded
+constants, typos surface as Python errors (NameError, AttributeError)
+at module-load time rather than as silent miscompilations. Cost
+is one module file. The user's research workflow (multiple model
+variants in flight during HP search and architecture exploration)
+benefits more from explicit configuration than from saving the
+small amount of structural ceremony.
+
+**Why expand scope beyond strictly-coupling-relevant.** The
+narrowest possible config (only the fields where train/eval can
+silently disagree) solves I4 but doesn't naturally accommodate the
+HP-search and architectural-variant workflows that are explicit
+project goals. Programmatic config generation
+(`for prior in [0.01, 0.02, 0.03]: train(replace(DEFAULT, ...))`)
+needs the sweepable parameters in the config. The
+sidecar-as-run-identity property makes saved models
+self-describing for later comparison. Including HP-search-relevant
+fields now is a small expansion that pays off the first time we
+do a sweep.
+
+**What's in vs. out.**
+
+| Field | In RunConfig? | Why |
+|---|---|---|
+| `seq_length` | Yes | Coupling-relevant + research dimension |
+| `text_key` | Yes | Coupling-relevant |
+| `target_dtype` | Yes | Coupling-relevant |
+| Per-head: `name`, `source_column`, `hidden_dim`, loss config | Yes | Coupling + research dimensions |
+| `epochs` | Yes | Train-only but a real research dimension |
+| Backbone weights path | Yes | Research dimension (with-DAPT vs. without-DAPT, different DAPT) |
+| Ratio Batch ratios (train/val/test pos) | Yes | Tier-2-pinned empirical-check item |
+| LR schedule params (initial_lr, warmup_target, etc.) | Yes | Research dimension |
+| `weight_decay` | Yes | Research dimension |
+| `BATCH_SIZE` | No | Script-local: train and eval have different memory and throughput needs |
+| Metrics list | No | Monitoring choice, not coupling-load-bearing for predict |
+| Optimizer type (AdamW) | No | Only one used; pre-namespacing not yet warranted |
+| LR schedule type (CosineDecay) | No | Only one used; pre-namespacing not yet warranted |
+| Train/predict mode | No | Call-site choice (per pinned question #3) |
+| Callbacks | No | Train-script-only operational choice |
+| DAPT input/cache paths (LDC corpus, cca_set/) | No | Environment-dependent, lives in `src/config.py` |
+
+**Why wrap mutable type-specific parameter groups (loss, LR
+schedule, batch composition, optimizer) into sub-config objects
+instead of leaving them as flat fields on RunConfig.** The
+forward-compat distinction that matters for schema evolution is
+**wrapped vs. flat**, not "Level 1 vs. Level 2 of pre-
+namespacing" (an earlier draft of this doc framed it that way and
+was misleading; corrected here).
+
+When we eventually want to add an alternative type — ALUM as an
+alternative to FLPU, ExponentialDecay as an alternative to
+CosineDecay, SGD as an alternative to AdamW — the migration looks
+like:
+
+  1. Add a `type: str = "<existing-type-name>"` discriminator
+     field with a default value pointing at the existing type. Old
+     sidecars (which lack the field) get the default; new sidecars
+     include the field explicitly.
+  2. Create a sibling dataclass for the new type with its own
+     `type` discriminator value and its own fields.
+  3. Widen the parent's annotation:
+     `loss: FLPULossConfig | ALUMLossConfig`,
+     `lr_schedule: CosineDecayConfig | ExponentialDecayConfig`,
+     etc.
+  4. Update `from_json` to dispatch on the `type` discriminator.
+
+This migration is **non-breaking for old sidecars**. Both the
+`loss` wrapper case and the `lr_schedule` wrapper case follow the
+same migration shape: add discriminator with default, create
+sibling, widen annotation.
+
+What's *different* between the wrapping cases is mostly cosmetic:
+
+  - The `loss` field is wrapped in `FLPULossConfig` — a name that
+    explicitly says "this is one specific loss type, expect
+    alternatives." Code-side migration is just adding the
+    discriminator and creating siblings; no rename of the
+    existing class.
+  - The `lr_schedule` field is wrapped in `LRScheduleConfig` — a
+    generic name. At migration time we'd want to *rename* the
+    class to `CosineDecayConfig` for clarity (find/replace across
+    the codebase), then create siblings. The JSON contents don't
+    change because class names aren't in JSON, just in code.
+
+Both wrappings are at the same effective forward-compat level for
+schema evolution. The `FLPULossConfig` naming signals an
+*expectation* of future alternatives (because ALUM is in
+pinned-question #1 as a planned future piece); the
+`LRScheduleConfig` and `RatioBatchConfig` naming is honest about
+not anticipating alternatives, and accepts a small code-rename
+cost if alternatives ever arrive.
+
+What's *substantively* different is the gap between **wrapped**
+and **flat**. A flat field on RunConfig (e.g., a hypothetical
+`weight_decay: float` directly on RunConfig) has worse forward-
+compat: adding optimizer-type discrimination would require
+*structurally moving* the field into a new wrapper, plus old-
+sidecar migration logic to synthesize the wrapper from top-level
+fields. That's actually-different migration work.
+
+So: wrap parameter groups that *might* one day need type
+discrimination (loss, LR schedule, batch composition, optimizer);
+flat is reserved for fields that are intrinsically singular and
+won't sprout type variants (`seq_length`, `text_key`,
+`target_dtype`, `epochs`, `backbone_weights_path`).
+
+Concretely: `weight_decay` is currently AdamW-specific (different
+optimizers have different parameters: SGD has momentum, etc.) so
+it goes into an `OptimizerConfig` wrapper, not as a flat
+`weight_decay` field on RunConfig. Same forward-compat reasoning
+as for the other wrappings.
+
+**Why required sidecar + CLI helper, not legacy fallback.** The
+research workflow concern (testing/validation cycles during the
+transition) is addressable by making sidecar creation trivial. A
+one-liner CLI command — `python -m src.cca_config write_default
+<weights_path>` — writes `DEFAULT_CCA_CONFIG` at the derived
+sidecar path for any standalone testing. Test fixtures construct
+`RunConfig` programmatically, no sidecar needed. The only place
+where missing sidecars actually bite is "eval a model whose
+training script didn't write a sidecar" — which is exactly the
+drift case I4 wants to catch, so failing loud there is the right
+behavior. Legacy fallback would add ~5 lines and a deprecation
+warning for protection we don't really need.
+
+**Why JSON, not pickle / YAML / msgpack / pydantic.** JSON is:
+- Human-readable (sidecar is a documentation artifact too).
+- Standard library (no new dependency).
+- Round-trips cleanly with `dataclasses.asdict` for serialization
+  and explicit reconstruction for deserialization.
+- Forward-compat-friendly: `from_json` can ignore unknown fields
+  and fail loud on missing-required fields.
+- Format-stable: a JSON sidecar from 2026 still loads in 2030.
+
+Pickle is unsafe (arbitrary code execution on load). YAML adds a
+dependency and ambiguous tag handling. Msgpack adds a dependency
+for marginal compactness. Pydantic adds a heavy dependency for
+slightly nicer ergonomics — not worth it for this use case.
+
+**Validation hierarchy: each dataclass owns its own
+`__post_init__`; cross-object invariants live at the parent.**
+Self-consistency invariants live in `__post_init__` of the
+*dataclass that owns the field being validated*. Cross-object
+invariants — those that depend on multiple sub-configs — live in
+the parent's `__post_init__`, which runs *after* sub-configs have
+already validated themselves (because Python constructs nested
+dataclasses bottom-up). External-context invariants — those
+requiring a runtime object the dataclass doesn't have access to
+— live in dedicated methods called explicitly at the appropriate
+script-level point.
+
+Concrete mapping:
+
+| Validation | Where | Why |
+|---|---|---|
+| `prior in (0, 1)` | `FLPULossConfig.__post_init__` | The prior is a field of FLPULossConfig |
+| `head.name` non-empty, `hidden_dim > 0` | `HeadConfig.__post_init__` | These fields belong to HeadConfig |
+| Each ratio `in (0, 1)` | `RatioBatchConfig.__post_init__` | The ratios are fields of RatioBatchConfig |
+| `initial_lr > 0`, `warmup_target > 0`, etc. | `LRScheduleConfig.__post_init__` | Fields of LRScheduleConfig |
+| `weight_decay >= 0` | `OptimizerConfig.__post_init__` | Field of OptimizerConfig |
+| `seq_length > 0`, `text_key` non-empty, `target_dtype` is valid Keras dtype | `RunConfig.__post_init__` | These fields belong to RunConfig |
+| Head names are unique | `RunConfig.__post_init__` | Cross-object: depends on the full `heads` tuple |
+| `head.hidden_dim == backbone.hidden_dim` | `RunConfig.validate_against_backbone(backbone)` | Requires runtime backbone instance, not available in `__post_init__` |
+
+Construction order is bottom-up: when `RunConfig(...)` is built,
+inner dataclasses (FLPULossConfig, HeadConfig, RatioBatchConfig,
+LRScheduleConfig, OptimizerConfig) construct first and their
+`__post_init__` runs first; then RunConfig's `__post_init__`
+runs and can rely on the inner configs already being self-valid.
+
+This is the same boundary-validation pattern from Piece 1, just
+applied at multiple nesting layers: each layer validates what it
+owns. The `validate_against_backbone` method is the explicit
+external-context layer (defense-in-depth on top of Piece 2's
+shape-mismatch check — catches the bug *before* the load attempt
+rather than at load time).
+
+**Why no schema-aware preprocessor validation.** The Piece 1
+"Open / deferred" entry promised that Piece 3 would introduce a
+config object suitable for schema-aware preprocessor validation
+(`expected_columns: set[str]`). On revisit during Piece 3 design,
+this turns out to be redundant: the Piece 1 `__call__` check
+already validates that the input batch contains
+`text_key` + `label_keys.values()` — which IS the schema-aware
+check, just at call time rather than construction time. The
+config does expose `expected_columns` as a property (useful for
+asserting against dataset schemas elsewhere if needed), but no
+new preprocessor validation is added. The Piece 1 boundary
+already protects this invariant.
+
+**Forward-pressure carried from prior pieces:**
+
+  - From **pinned question #3**: config does not encode
+    train/predict distinction. The preprocessor's `endpoint_model`
+    flag is a function of the head's loss type (endpoint mode for
+    losses with internal state — FLPU; standard mode for compile-
+    time losses — BCE), so it could in principle be derived from
+    the loss config. For now, both scripts construct their
+    preprocessor with `endpoint_model=True` (since FLPU is the
+    only loss). When ALUM/BCE land, the derivation becomes
+    explicit: `endpoint_model = isinstance(head.loss, (FLPULossConfig, ALUMLossConfig))`.
+  - From **Piece 2 finding**: config enforces head-name agreement
+    as a *call-site contract* (compile-loss routing, dict-output
+    keys), not as a load-bearing weight-loading contract. The
+    `head.name` field in `HeadConfig` is therefore present
+    primarily to drive the call-site routing and to be the
+    user-facing identifier in logs/metrics — not for weight
+    loading, which is structural per the Piece 2 finding.
+
+### Layout
+
+- `src/cca_config.py` — new file. Exports `RunConfig`, `HeadConfig`,
+  `FLPULossConfig`, `RatioBatchConfig`, `LRScheduleConfig`,
+  `OptimizerConfig`, `DEFAULT_CCA_CONFIG`,
+  `config_path_for_weights`, plus a `__main__` block providing
+  the `write_default` and `show` CLI commands.
+- `src/run_cca_classification.py` — modified to import the config,
+  use it as the source of all coupling-relevant + HP-search-
+  relevant values, and write the sidecar at the end of training.
+- `src/eval_cca_classifier.py` — modified to load the config from
+  the sidecar at the start, and use its values throughout.
+- `scripts/smoke_test_integrated_stack.py` — modified to use the
+  config pattern (constructed programmatically with synthetic
+  values rather than loaded from disk, since it's a self-contained
+  fixture).
+- `tests/test_cca_config.py` — new file with construction-
+  validation, JSON round-trip, derived-property correctness, and
+  backbone-validation tests.
+
+No test fixture changes to `tests/test_assembly.py` — that file
+tests assembly primitives, not the config layer.
+
+### Contracts
+
+**`FLPULossConfig(prior, kiryo_clawback=False)`**
+
+Frozen dataclass. Validates `0 < prior < 1` in `__post_init__`.
+
+**`HeadConfig(name, source_column, hidden_dim, loss)`**
+
+Frozen dataclass.
+- `name: str` — non-empty; used for compile-loss routing and
+  dict-output keys.
+- `source_column: str` — non-empty; the dataset column with this
+  head's labels.
+- `hidden_dim: int` — positive; intermediate Dense width.
+  Conventionally matches the backbone's hidden_dim; checked by
+  `RunConfig.validate_against_backbone`.
+- `loss: FLPULossConfig` — currently fixed type, future
+  discriminated union when ALUM lands. The `loss` wrapping is
+  the forward-compat decision (see Reasoning).
+
+**`RatioBatchConfig(train_pos=0.1, val_pos=0.5, test_pos=0.5)`**
+
+Frozen dataclass with float fields each in `(0, 1)`. Defaults
+match current script behavior (1:9 train, 1:1 val/test). The
+"pos" field is the positive-class weight; the unlabeled weight
+is implicitly `1 - pos`.
+
+**`LRScheduleConfig(initial_lr=1e-4, warmup_target=1e-3, decay_alpha=0.1, warmup_steps_factor=0.25, decay_steps_factor=3.0)`**
+
+Frozen dataclass. Schedule type is `keras.optimizers.schedules.CosineDecay`
+implicitly; parameters here drive its construction.
+`warmup_steps_factor` is the fraction of one epoch's steps used
+for warmup; `decay_steps_factor` is the multiple of one epoch's
+steps over which decay happens. `decay_alpha` is the
+`alpha` argument to `CosineDecay` (final LR / warmup_target).
+Defaults match current script. Will be renamed `CosineDecayConfig`
+when alternative schedule types are introduced (see "Open /
+deferred").
+
+**`OptimizerConfig(weight_decay=5e-3)`**
+
+Frozen dataclass for AdamW-specific optimizer parameters.
+Currently a single field; wrapping `weight_decay` here (rather
+than as a flat field on RunConfig) keeps optimizer parameters
+together and makes future optimizer-type discrimination a
+non-breaking schema evolution (add `type: str = "adamw"`
+discriminator + sibling configs for SGD/etc.). Validates
+`weight_decay >= 0`. Will likely be renamed `AdamWOptimizerConfig`
+when alternative optimizer types are introduced.
+
+**`RunConfig`**
+
+Frozen dataclass. Fields:
+- `seq_length: int` — preprocessor + assembly seq dim. Positive.
+- `text_key: str` — preprocessor text column key. Non-empty.
+- `target_dtype: str` — preprocessor target cast dtype.
+  Validated as a Keras dtype string.
+- `heads: tuple[HeadConfig, ...]` — non-empty; head names unique.
+- `epochs: int` — train epochs. Positive.
+- `backbone_weights_path: str` — path to DAPT backbone weights.
+  Stored as `str` (not `Path`) for clean JSON serialization.
+- `ratio_batch: RatioBatchConfig`
+- `lr_schedule: LRScheduleConfig`
+- `optimizer: OptimizerConfig`
+
+Derived properties:
+- `label_keys: dict[str, str]` —
+  `{f"{h.name}_targets": h.source_column for h in self.heads}`.
+- `head_names: tuple[str, ...]` — `(h.name for h in self.heads)`.
+- `expected_columns: set[str]` —
+  `{self.text_key, *(h.source_column for h in self.heads)}`.
+
+Methods:
+- `validate_against_backbone(backbone) -> None` — raises
+  `ValueError` if any `head.hidden_dim != backbone.hidden_dim`.
+  Called from both training and eval scripts after backbone load.
+- `to_json(path) -> None` — writes JSON via
+  `dataclasses.asdict(self)` + `json.dump(..., indent=2)`.
+- `from_json(path) -> RunConfig` (classmethod) — reads JSON,
+  reconstructs nested dataclasses (FLPULossConfig in HeadConfig in
+  heads tuple, RatioBatchConfig, LRScheduleConfig). Fails loud on
+  missing required fields; ignores unknown fields with a warning
+  (forward-compat).
+
+**`DEFAULT_CCA_CONFIG`**
+
+Module-level `RunConfig` instance representing the current
+canonical CCA configuration. Imported by training script as the
+starting point; experiments use `dataclasses.replace` to derive
+variants.
+
+```python
+DEFAULT_CCA_CONFIG = RunConfig(
+    seq_length=128,
+    text_key="headline_with_lead",
+    target_dtype="float32",
+    heads=(
+        HeadConfig(
+            name="cca",
+            source_column="cca_label",
+            hidden_dim=768,
+            loss=FLPULossConfig(prior=0.02, kiryo_clawback=False),
+        ),
+    ),
+    epochs=7,
+    backbone_weights_path=str(config.DAPT_BACKBONE_WEIGHTS),
+    ratio_batch=RatioBatchConfig(),     # 0.1 / 0.5 / 0.5
+    lr_schedule=LRScheduleConfig(),     # current script defaults
+    optimizer=OptimizerConfig(),        # weight_decay=5e-3
+)
+```
+
+**`config_path_for_weights(weights_path: Path | str) -> Path`**
+
+File-naming convention helper. Substitutes `.weights.h5` →
+`.config.json`. So `cca_classifier/cca.weights.h5` →
+`cca_classifier/cca.config.json`. If the input doesn't end in
+`.weights.h5`, appends `.config.json` to the filename (graceful
+fallback for unusual paths).
+
+**CLI** (`python -m src.cca_config <subcommand>`):
+
+- `write_default <weights_path>` — write `DEFAULT_CCA_CONFIG` as a
+  sidecar at the derived path for the given weights file.
+- `show <config_path>` — pretty-print the JSON contents of an
+  existing sidecar.
+
+### Test coverage anticipated
+
+`tests/test_cca_config.py`, new file. Anticipated test classes:
+
+**`TestConstructionValidation`** — `__post_init__` rejects
+malformed configs. Tests are organized per-dataclass, mirroring
+the validation hierarchy:
+
+- `FLPULossConfig` rejects `prior=0`, `prior=1`, `prior=-0.5`,
+  `prior=1.5`.
+- `HeadConfig` rejects empty name, empty source_column,
+  non-positive hidden_dim, missing/wrong-type loss. (Doesn't
+  re-test loss-internal validation — that's FLPULossConfig's
+  job, fired during nested construction.)
+- `RatioBatchConfig` rejects out-of-range ratios.
+- `LRScheduleConfig` rejects non-positive learning rates,
+  negative warmup_target, etc.
+- `OptimizerConfig` rejects negative weight_decay.
+- `RunConfig` rejects seq_length≤0, empty text_key, invalid
+  target_dtype, empty heads tuple, duplicate head names (the
+  cross-object invariant — multiple heads with the same name
+  passes each HeadConfig's own validation but fails RunConfig's),
+  negative epochs.
+
+**`TestDerivedProperties`** — `label_keys`, `head_names`,
+`expected_columns` produce the right values for single-head and
+multi-head configs.
+
+**`TestJSONRoundTrip`** — `to_json` followed by `from_json`
+produces an equivalent config. Includes nested dataclasses
+(loss in head, RatioBatchConfig, LRScheduleConfig).
+
+**`TestJSONForwardCompat`** — `from_json` ignores unknown fields
+in the JSON (with warning) and fails loud on missing required
+fields.
+
+**`TestBackboneValidation`** — `validate_against_backbone` raises
+on hidden_dim mismatch, accepts on match. Uses a fake backbone
+similar to `tests/test_assembly.py`'s `_make_fake_backbone`.
+
+**`TestPathHelper`** — `config_path_for_weights` produces correct
+paths for `.weights.h5` inputs and reasonable fallback paths for
+unusual inputs.
+
+Anticipated total: ~18-22 tests. Suite goes from 103 → ~120-125.
+
+### Patterns introduced
+
+- **Frozen dataclass + JSON sidecar as run identity.** The config
+  IS the identity of a training run. Saved alongside weights
+  ensures the model is self-describing. Loading config + weights
+  together restores both architectural shape and run-identifying
+  context.
+
+- **Pre-namespacing for forward-compat.** When a field is *known*
+  to need future discrimination (loss type, given the planned
+  ALUM work), wrap it in a config sub-object now even if there's
+  only one type today. Migration to discriminated union is
+  type-annotation-only; no schema break.
+
+- **Static default + `dataclasses.replace` for variants.** The
+  pattern for HP search and experimental variants: import
+  `DEFAULT_CCA_CONFIG`, derive variants via `replace(...)`,
+  iterate. No subclassing, no builder pattern, no script forking.
+
+- **Sidecar-derived path convention.** Suffix substitution
+  (`.weights.h5` → `.config.json`) makes the relationship
+  programmatic and predictable. Discoverable from a weights file
+  alone.
+
+- **Validation across two layers: dataclass-internal
+  (`__post_init__`) and external-context (`validate_against_*`).**
+  Self-consistency invariants in `__post_init__`; cross-object
+  invariants in explicit methods called at construction time in
+  the relevant scripts. Mirrors the Piece 1 boundary-validation
+  pattern at a different layer.
+
+### Open / deferred
+
+- **Loss-type discrimination.** Lands with the ALUM piece (pinned
+  question #1). At that point: `loss: FLPULossConfig` widens to
+  `loss: FLPULossConfig | ALUMLossConfig | BCELossConfig`,
+  preprocessor `endpoint_model` flag becomes derived from the
+  loss type. The `loss` wrapper is in place now to make this
+  non-breaking.
+- **Head-type discrimination.** Lands with the multi-head ICA
+  piece. `HeadConfig` widens to a discriminated union over
+  `ClassificationHead` / `CombinedClassificationHead` / etc., or
+  `RunConfig.heads` becomes `tuple[HeadConfig | CombinedHeadConfig, ...]`.
+  Either way, the current `HeadConfig` continues to mean
+  "ClassificationHead-shaped head" and serializes cleanly under
+  the new schema.
+- **Optimizer type discrimination.** Lands when we want to sweep
+  across optimizer types (currently AdamW only). Same pattern.
+- **LR schedule type discrimination.** Same.
+- **Data-source choices** (which parquet, time-window subset).
+  Lands when DoCA expansion or time-window experiments come
+  online. Currently the script's data-loading is fixed; config
+  doesn't carry data-source identifiers.
+- **`metrics` in config.** Currently script-local. Could move
+  into config if metric configurations become a research dimension
+  worth comparing. Not warranted now.
+- **Multiple defaults per task.** The static module currently
+  exports a single `DEFAULT_CCA_CONFIG`. When the immigration head
+  lands, may also want a `DEFAULT_IMMIG_CONFIG` and possibly a
+  `DEFAULT_ICA_CONFIG`. Same module can hold multiple; no
+  structural change needed.
+
+---
