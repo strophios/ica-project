@@ -989,11 +989,12 @@ module + tests) and Piece 3b (script integration). Piece 3a
 implemented 2026-05-09 (commit hash filled in by follow-up).
 Piece 3b pending.
 
-- **Piece 3a**: `src/cca_config.py` with all dataclasses
-  (`FLPULossConfig`, `HeadConfig`, `RatioBatchConfig`,
-  `LRScheduleConfig`, `OptimizerConfig`, `RunConfig`), JSON
-  serialization, `DEFAULT_CCA_CONFIG`, `config_path_for_weights`
-  helper, CLI subcommands (`write_default`, `show`).
+- **Piece 3a**: implemented in commit `d9c0348`.
+  `src/cca_config.py` with all dataclasses (`FLPULossConfig`,
+  `HeadConfig`, `RatioBatchConfig`, `LRScheduleConfig`,
+  `OptimizerConfig`, `RunConfig`), JSON serialization,
+  `DEFAULT_CCA_CONFIG`, `config_path_for_weights` helper, CLI
+  subcommands (`write_default`, `show`).
   `tests/test_cca_config.py` with 64 tests across 11 classes.
   Suite 103 → 167.
 - **Piece 3b**: rewrite `src/run_cca_classification.py`,
