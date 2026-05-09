@@ -34,6 +34,7 @@ import datetime
 
 import src.config as config
 import src.cca_config as cca_config
+from src.cca_metrics import make_cca_metrics
 import src.data_setup.data
 from src.preproc.preprocessor import ClassifierPreprocessor
 from src.model_setup.backbone import load_dapt_backbone
@@ -122,6 +123,27 @@ else:
                 str(config.CCA_SET_DIR / f"{split}_{pu}.tf")
             )
 
+# Layer-1 schema-aware validation: confirm the dataset contains
+# the columns run_config says it expects, BEFORE the preprocessor
+# trace-time check fires. Tier 3 closeout (addressing I1 from the
+# adversarial review): the design doc claims a 3-layer validation
+# hierarchy — config self-validity, schema-vs-config (this), and
+# call-time data validation; this assertion makes that hierarchy
+# real rather than aspirational.
+_dataset_columns = set(ldc_data["train"]["pos"].element_spec.keys())
+_missing_columns = run_config.expected_columns - _dataset_columns
+if _missing_columns:
+    raise ValueError(
+        f"Cached dataset at {config.CCA_SET_DIR} does not contain "
+        f"every column run_config expects. Missing: {sorted(_missing_columns)}. "
+        f"Dataset columns: {sorted(_dataset_columns)}. "
+        f"Configured: text_key={run_config.text_key!r}, "
+        f"label_keys source columns={sorted(run_config.label_keys.values())}. "
+        f"Either rebuild the cache (delete CCA_SET_DIR) with the "
+        f"current run config or update the run config to match the "
+        f"existing cache."
+    )
+
 
 # -----------------------------------------------------------------------------
 # Preprocessors
@@ -182,26 +204,15 @@ validation_set = src.data_setup.data.dataset_create(
         1 - run_config.ratio_batch.val_pos,
     ],
 )
-test_set = src.data_setup.data.dataset_create(
-    SHUFFLE_BUFFER,
-    BATCH_SIZE,
-    train_preprocess,
-    data=[ldc_data["test"]["pos"], ldc_data["test"]["unl"]],
-    weights=[
-        run_config.ratio_batch.test_pos,
-        1 - run_config.ratio_batch.test_pos,
-    ],
-)
-
 # Steps. Train: 18300 positives, 1026418 unlabeled.
 # Val: 1017 positives, 57024 unlabeled.
-# Test split is also 5% of source; positive count is approximately equal
-# to val (same sampling logic). Computing exact test positive count
-# from the saved tf.data dataset is possible but adds I/O; the val-
-# derived approximation is fine for `steps=` purposes.
+# Test set isn't constructed via dataset_create here — Tier 3
+# closeout (I5) replaces the Ratio-Batch + `.repeat()` + `steps=`-
+# approximation pattern with a finite, concat-based test dataset
+# constructed below near the evaluate() call. evaluate iterates
+# the whole test set exactly once without needing `steps=`.
 steps_per_epoch = math.floor(18300 / (BATCH_SIZE / 10))
 validation_steps = math.floor(1017 / (BATCH_SIZE / 2))
-test_steps = validation_steps  # see comment above
 
 
 # -----------------------------------------------------------------------------
@@ -243,12 +254,7 @@ cca_head = ClassificationHead(
         prior=_cca_head_config.loss.prior,
         kiryo_clawback=_cca_head_config.loss.kiryo_clawback,
     ),
-    metrics=[
-        keras.metrics.BinaryAccuracy(threshold=0.0),
-        keras.metrics.Precision(thresholds=0.0, name="precision"),
-        keras.metrics.Recall(thresholds=0.0, name="recall"),
-        keras.metrics.AUC(curve="PR", from_logits=True, name="pr_auc"),
-    ],
+    metrics=make_cca_metrics(),
     name=_cca_head_config.name,
 )
 
@@ -369,11 +375,27 @@ print(f"Saved run config sidecar: {sidecar_path}")  # LOG
 # -----------------------------------------------------------------------------
 # Evaluate on test set
 # -----------------------------------------------------------------------------
-# Uses the training model (which has cca_targets as inputs and
-# add_loss/add_metric machinery wired up).
-test_results = cca_classifier.evaluate(
-    test_set, steps=test_steps, return_dict=True
+# Build a *finite* test set for evaluate() — Tier 3 closeout
+# (addressing I5 from the adversarial review). The previous version
+# evaluated `test_set` (a Ratio-Batch-sampled, .repeat()-ed dataset
+# from dataset_create) for `steps=test_steps` where
+# `test_steps = validation_steps` (an approximation). That produced
+# evaluate-on-an-arbitrary-prefix behavior, with the test loss being
+# computed on a slightly-too-small or slightly-too-large slice
+# depending on whether test had more or fewer positives than val.
+# Following Piece 2's discipline for predict, build a finite
+# (non-repeated) dataset sized to the actual test data — concat
+# pos + unl, batch, preprocess. evaluate() iterates the whole
+# thing exactly once, no `steps=` approximation needed.
+test_pos_raw = tf.data.Dataset.load(str(config.CCA_SET_DIR / "test_pos.tf"))
+test_unl_raw = tf.data.Dataset.load(str(config.CCA_SET_DIR / "test_unl.tf"))
+test_set_finite = (
+    test_pos_raw.concatenate(test_unl_raw)
+    .batch(BATCH_SIZE, drop_remainder=False)
+    .map(train_preprocess, num_parallel_calls=tf.data.AUTOTUNE)
+    .prefetch(tf.data.AUTOTUNE)
 )
+test_results = cca_classifier.evaluate(test_set_finite, return_dict=True)
 print(f"Test results: {test_results}")  # LOG
 
 
@@ -386,7 +408,8 @@ print(f"Test results: {test_results}")  # LOG
 # was sized from val positives, not test) to a repeated dataset,
 # which produced duplicate predictions; downstream code worked around
 # this by slicing to the real dataframe length. Building finite
-# datasets here removes the workaround.
+# datasets here removes the workaround. Tier 3 closeout extends the
+# same discipline to evaluate (above).
 #
 # `predict_preprocess` is used (no `cca_targets` in output) because
 # the inference model's input signature doesn't include target tensors.

@@ -261,3 +261,44 @@ class TestMetrics:
         _ = head(_dummy_features(), targets=None)
         # Calling with targets shouldn't error either.
         _ = head(_dummy_features(), targets=_dummy_targets())
+
+    def test_multi_head_metric_names_are_distinct(self):
+        """Two heads with overlapping metric types should produce
+        distinct metric names — the rename's whole purpose. Pins
+        the multi-head collision protection that the design doc
+        claims (Tier 3 closeout, addressing I6 from the adversarial
+        review).
+
+        Without the rename, both heads' BinaryAccuracy would carry
+        the default name `"binary_accuracy"` and collide in
+        `model.metrics`; the rename produces
+        `cca_binary_accuracy` and `immig_binary_accuracy`.
+        """
+        head_cca = ClassificationHead(
+            hidden_dim=HIDDEN_DIM,
+            metrics=[
+                keras.metrics.BinaryAccuracy(),
+                keras.metrics.Precision(name="precision"),
+            ],
+            name="cca",
+        )
+        head_immig = ClassificationHead(
+            hidden_dim=HIDDEN_DIM,
+            metrics=[
+                keras.metrics.BinaryAccuracy(),
+                keras.metrics.Precision(name="precision"),
+            ],
+            name="immig",
+        )
+        cca_names = {m.name for m in head_cca.metric_objs}
+        immig_names = {m.name for m in head_immig.metric_objs}
+        # Disjoint: no metric name appears in both heads.
+        assert cca_names.isdisjoint(immig_names), (
+            f"Metric names collide between heads: "
+            f"cca={cca_names}, immig={immig_names}"
+        )
+        # And specifically the head-name-prefixed forms exist.
+        assert "cca_binary_accuracy" in cca_names
+        assert "immig_binary_accuracy" in immig_names
+        assert "cca_precision" in cca_names
+        assert "immig_precision" in immig_names

@@ -507,3 +507,26 @@ class TestCallTimeInputValidation:
         # Should produce just the model inputs, no targets.
         assert isinstance(out, dict)
         assert set(out.keys()) == {"token_ids", "padding_mask"}
+
+    def test_non_string_text_column_raises(self, tokenizer, labels_batch):
+        """Layer-2 dtype check (Tier 3 closeout, addressing I7 from the
+        adversarial review): the text column must be string-typed.
+        A column that's present but has the wrong dtype (e.g., int64
+        because someone accidentally passed already-tokenized ids
+        instead of raw text) should raise at the boundary with a
+        clear message, rather than failing deep inside the tokenizer
+        with a less helpful TF error."""
+        pp = ClassifierPreprocessor(
+            SEQ_LENGTH=SEQ_LENGTH,
+            text_key="text",
+            label_keys={"cca_targets": "cca_label"},
+            tokenizer=tokenizer,
+            endpoint_model=True,
+        )
+        # text column is int instead of string
+        bad_inputs = {
+            "text": tf.constant([1, 2, 3, 4], dtype=tf.int64),
+            **labels_batch,
+        }
+        with pytest.raises(TypeError, match="text_key"):
+            pp(bad_inputs)

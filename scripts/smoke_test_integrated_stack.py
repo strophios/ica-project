@@ -25,6 +25,20 @@ data:
     DEFAULT is calibrated for real RoBERTa-base + production
     dataset shape).
 
+Note (Tier 3 closeout, I2): the fake backbone exposes a
+`hidden_dim` instance attribute (set on the keras.Model after
+construction). Production uses `keras_hub.models.Backbone.from_preset(...)`
+which exposes `hidden_dim` as a *class property*. Both work with
+`getattr(backbone, "hidden_dim", None)` in
+`RunConfig.validate_against_backbone`, but the smoke test only
+exercises the instance-attribute path. If keras_hub ever renames
+this property, the smoke test won't catch it; production would
+silently raise the "no hidden_dim attribute" error from
+validate_against_backbone, which is loud enough to be safe.
+Adding a real-keras_hub-backbone variant of this smoke test (or
+a separate cluster-only smoke test) would close that gap; not
+warranted for a wiring smoke test today.
+
 Run with:
     PYTHONPATH=. uv run python scripts/smoke_test_integrated_stack.py
 
@@ -147,6 +161,17 @@ tf.data.Dataset.from_tensor_slices({
     "headline_with_lead": unlabeled_texts,
     "cca_label": [0] * N_UNL,
 }).save(str(unl_path))
+
+# Schema-aware validation matching the production scripts'
+# discipline (Tier 3 closeout, addressing I1).
+_pos_dataset = tf.data.Dataset.load(str(pos_path))
+_dataset_columns = set(_pos_dataset.element_spec.keys())
+_missing = run_config.expected_columns - _dataset_columns
+assert not _missing, (
+    f"Synthetic dataset is missing columns {sorted(_missing)}; "
+    f"available={sorted(_dataset_columns)}; "
+    f"expected={sorted(run_config.expected_columns)}."
+)
 
 
 # ---------------------------------------------------------------------------

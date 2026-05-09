@@ -76,21 +76,26 @@ run_config.validate_against_backbone(backbone)
 # up with the saved weights because architecture-shape comes from
 # the same config — see `docs/notes/tier3-design.md` Piece 2 for
 # the structural-vs-name-matching framing of weight loading.
-# The metrics list is reproduced for parity, although it's not
-# actually used at inference (inf model calls the head with
-# targets=None, so update_state never fires).
+#
+# Metrics are intentionally NOT constructed here. Tier 3 closeout
+# (addressing I3 from the adversarial review): empirically verified
+# that metric state variables live on the metric instances under
+# `head.metrics` but are NOT included in `head.weights`, which is
+# what `save_weights` / `load_weights` operate on. So eval-side
+# metrics are not load-bearing for shape match — and the inference
+# graph never updates them anyway (head's `call` only updates
+# metrics when targets are provided; the inference graph passes
+# `targets=None`). The previous "for parity" reproduction here was
+# unused machinery + a hand-coupling drift risk; both are gone now.
+# When `evaluate()` is needed at eval time (e.g., a hand-labeled
+# PN test set lands), construct a separate evaluate-mode model
+# from the same RunConfig with metrics from `make_cca_metrics()`.
 cca_head = ClassificationHead(
     hidden_dim=_cca_head_config.hidden_dim,
     loss_fn=FLPULoss(
         prior=_cca_head_config.loss.prior,
         kiryo_clawback=_cca_head_config.loss.kiryo_clawback,
     ),
-    metrics=[
-        keras.metrics.BinaryAccuracy(threshold=0.0),
-        keras.metrics.Precision(thresholds=0.0, name="precision"),
-        keras.metrics.Recall(thresholds=0.0, name="recall"),
-        keras.metrics.AUC(curve="PR", from_logits=True, name="pr_auc"),
-    ],
     name=_cca_head_config.name,
 )
 
@@ -119,6 +124,25 @@ cca_inference.load_weights(
 # -----------------------------------------------------------------------------
 # Build finite predict datasets
 # -----------------------------------------------------------------------------
+# Layer-1 schema-aware validation against the cached test datasets,
+# matching the discipline in run_cca_classification.py. Tier 3
+# closeout (addressing I1). At eval time the labels columns aren't
+# strictly required (predict mode emits no targets), but checking
+# `run_config.text_key` ensures the dataset structure is what eval
+# expects. We validate against test_pos as a representative; the
+# saved tf.data datasets all have the same element_spec.
+_test_pos_dataset = tf.data.Dataset.load(str(config.CCA_SET_DIR / "test_pos.tf"))
+_dataset_columns = set(_test_pos_dataset.element_spec.keys())
+if run_config.text_key not in _dataset_columns:
+    raise ValueError(
+        f"Cached test dataset at {config.CCA_SET_DIR} does not "
+        f"contain text_key={run_config.text_key!r}. "
+        f"Dataset columns: {sorted(_dataset_columns)}. The run "
+        f"config sidecar at {_sidecar_path} declares this text_key, "
+        f"but the cached dataset doesn't have it — likely a stale "
+        f"cache vs. config mismatch."
+    )
+
 # Predict-only preprocessor: no targets emitted, just the model inputs
 # the inference graph declares (`token_ids`, `padding_mask`).
 predict_preprocess = ClassifierPreprocessor(

@@ -489,6 +489,135 @@ class TestPatternTwoSerialization:
             ),
         )
 
+    def test_load_weights_actually_copies_head_weights(self, tmp_path):
+        """
+        Tier 3 closeout (addressing C1 from the adversarial review).
+        The `test_round_trip_predictions_match_bitwise` test claims
+        a "no-op load_weights could pass the post-load equality
+        check on coincident initialization" but its setup uses
+        `freeze_encoder=False` — so the trained backbone diverges
+        from a fresh-init backbone, and *backbone* weight loading
+        is what produces the post-load match. A `load_weights` that
+        silently dropped *head* weights would still pass that test.
+
+        This test pins the head-load invariant explicitly:
+          - Backbones in both Pattern A and Pattern 2 are SEEDED
+            IDENTICALLY before construction → backbone weights are
+            bitwise-equal at construction.
+          - `freeze_encoder=True` → backbone weights stay equal
+            through training.
+          - Head weights diverge: Pattern A's head is trained;
+            Pattern 2's head is freshly initialized.
+          - Pre-load: predictions differ because head weights
+            differ.
+          - Load weights into Pattern 2.
+          - Post-load: if predictions match Pattern A bitwise,
+            `load_weights` actually copied the trained head weights.
+            A no-op load would leave Pattern 2's head random and
+            predictions would still differ.
+
+        The other round-trip test exercises the integrated path;
+        this one isolates the no-op-protection invariant.
+        """
+        weights_path = tmp_path / "test.weights.h5"
+
+        # --- Pattern A side ---
+        # Seed BEFORE constructing fresh_backbone (in fixture). Since
+        # fresh_backbone is already constructed by the fixture, we
+        # build a new "seeded" backbone here for explicit control.
+        keras.utils.set_random_seed(42)
+        backbone_a = _make_fake_backbone()
+        head_a = ClassificationHead(
+            hidden_dim=HIDDEN_DIM,
+            loss_fn=FLPULoss(prior=0.1),
+            name="cca",
+        )
+        train_model = build_endpoint_model(
+            backbone=backbone_a,
+            heads={"cca": head_a},
+            seq_length=SEQ_LEN,
+            freeze_encoder=True,  # backbone stays put
+        )
+        inf_model_a = build_inference_model(
+            backbone=backbone_a,
+            heads={"cca": head_a},
+            seq_length=SEQ_LEN,
+        )
+        train_model.compile(optimizer="adam")
+        train_model.fit(
+            _make_dummy_inputs(with_targets=True),
+            epochs=1, batch_size=BATCH, verbose=0,
+        )
+        inf_model_a.save_weights(str(weights_path))
+
+        # --- Pattern 2 side, with IDENTICALLY-SEEDED backbone ---
+        keras.utils.set_random_seed(42)  # reset to same seed
+        backbone_b = _make_fake_backbone()
+        head_b = ClassificationHead(
+            hidden_dim=HIDDEN_DIM,
+            loss_fn=FLPULoss(prior=0.1),
+            name="cca",
+        )
+        inf_model_b = build_inference_model(
+            backbone=backbone_b,
+            heads={"cca": head_b},
+            seq_length=SEQ_LEN,
+        )
+
+        # Sanity check: backbones are bitwise-equal at construction.
+        for w_a, w_b in zip(backbone_a.weights, backbone_b.weights):
+            np.testing.assert_array_equal(
+                w_a.numpy(), w_b.numpy(),
+                err_msg=(
+                    "Backbones not bitwise-equal at construction; "
+                    "the same-seed assumption isn't holding. The "
+                    "no-op-load-protection invariant this test is "
+                    "supposed to pin can't be checked."
+                ),
+            )
+
+        inf_inputs = _make_dummy_inputs(with_targets=False)
+        preds_a = inf_model_a.predict(inf_inputs, verbose=0)
+        preds_a = preds_a["cca"] if isinstance(preds_a, dict) else preds_a
+
+        # Pre-load: Pattern A's trained head vs. Pattern 2's
+        # fresh-init head produces different predictions even
+        # though backbones are equal.
+        preds_b_pre = inf_model_b.predict(inf_inputs, verbose=0)
+        preds_b_pre = (
+            preds_b_pre["cca"] if isinstance(preds_b_pre, dict) else preds_b_pre
+        )
+        assert not np.array_equal(preds_a, preds_b_pre), (
+            "Pre-load predictions match — head weights happen to be "
+            "identical despite Pattern A's having been trained. "
+            "Either training had no effect on the head (unlikely) or "
+            "the same-seed setup is producing the same head init AND "
+            "fit was a no-op."
+        )
+
+        # Load weights — this is the operation under test.
+        inf_model_b.load_weights(str(weights_path), skip_mismatch=False)
+
+        # Post-load: if predictions now match bitwise, load_weights
+        # actually copied the trained head's weights into Pattern 2's
+        # head. A no-op load would leave them at fresh-init (and
+        # predictions would still differ as in the pre-load assertion).
+        preds_b_post = inf_model_b.predict(inf_inputs, verbose=0)
+        preds_b_post = (
+            preds_b_post["cca"] if isinstance(preds_b_post, dict) else preds_b_post
+        )
+        np.testing.assert_array_equal(
+            preds_a, preds_b_post,
+            err_msg=(
+                "Pattern 2 predictions don't match Pattern A bitwise "
+                "after load. With same-seed backbones and "
+                "freeze_encoder=True, the only thing load_weights "
+                "needs to copy is the head's trained weights. "
+                "A failure here means head weights weren't actually "
+                "loaded (no-op or partial load)."
+            ),
+        )
+
     def test_load_weights_raises_on_shape_mismatch(
         self, fresh_backbone, fresh_head, tmp_path,
     ):

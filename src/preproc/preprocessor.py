@@ -2,6 +2,19 @@ import keras
 import keras_hub
 
 
+def _is_string_dtype(dtype) -> bool:
+    """Robustly check whether a tensor dtype is string/bytes-typed.
+
+    Handles both TensorFlow's `tf.dtypes.DType` (which has an `is_string`
+    attribute) and Keras's dtype-string convention. Used by the Layer-2
+    text-column check in `ClassifierPreprocessor.__call__`.
+    """
+    if hasattr(dtype, "is_string"):
+        return bool(dtype.is_string)
+    # Fallback: stringly-typed dtype (e.g., a numpy or string-name dtype).
+    return str(dtype) in {"string", "<U", "bytes", "object"} or "string" in str(dtype).lower()
+
+
 class ClassifierPreprocessor:
     """
     Multi-head-aware classifier preprocessor.
@@ -180,6 +193,26 @@ class ClassifierPreprocessor:
                 f"Configured text_key={self.text_key!r}; "
                 f"label_keys source columns={sorted(self.label_keys.values())}. "
                 f"Available columns in batch: {sorted(available_cols)}."
+            )
+
+        # Layer-2 check on the text column's dtype. Tier 3 closeout
+        # (addressing I7 from the adversarial review): the column
+        # is present, but if it's the wrong dtype (e.g., int64
+        # because someone accidentally fed already-tokenized ids
+        # instead of raw text), the failure surfaces deep inside
+        # the tokenizer with a less helpful TF error. We only check
+        # text_key here — source columns get cast via `keras.ops.cast`
+        # below, which fails loudly on incompatible dtypes; tokenizer
+        # input is the dtype-fragile boundary.
+        text_tensor = inputs[self.text_key]
+        text_dtype = getattr(text_tensor, "dtype", None)
+        if text_dtype is not None and not _is_string_dtype(text_dtype):
+            raise TypeError(
+                f"ClassifierPreprocessor: column at text_key="
+                f"{self.text_key!r} must be string-typed; got "
+                f"dtype={text_dtype!r}. The most common cause is "
+                f"feeding already-tokenized ids instead of raw "
+                f"strings; the tokenizer expects text."
             )
 
         # ============================================================

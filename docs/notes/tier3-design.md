@@ -1518,5 +1518,157 @@ Anticipated total: ~18-22 tests. Suite goes from 103 → ~120-125.
   lands, may also want a `DEFAULT_IMMIG_CONFIG` and possibly a
   `DEFAULT_ICA_CONFIG`. Same module can hold multiple; no
   structural change needed.
+- **LR schedule resolution gap (Tier 3 closeout, I4 from review).**
+  `LRScheduleConfig` carries `warmup_steps_factor` and
+  `decay_steps_factor` rather than resolved step counts. The
+  resolved counts are
+  `factor * steps_per_epoch`, where `steps_per_epoch` is computed
+  in the training script from data row counts and `BATCH_SIZE`
+  (a script-local). The sidecar therefore can't fully reproduce
+  the schedule absent train-time `steps_per_epoch`. Not a current
+  bug — eval doesn't reconstruct the schedule — but a future-
+  workflow gap if we want HP search across `BATCH_SIZE`. Three
+  candidate fixes when this becomes pressing: record resolved
+  step counts alongside factors; record `BATCH_SIZE` and row
+  counts in the sidecar (currently script-local-by-design);
+  switch from factor-based to absolute-steps-based schedule
+  parameters. None warranted now.
+
+---
+
+## Tier 3 closeout (2026-05-09, addressing adversarial review)
+
+The Tier 3 adversarial review (dispatched after Piece 4 +
+documentation updates landed) returned **1 Critical, 8 Important,
+7 Minor**. Critical and a subset of Important issues are
+addressed here; remaining items deferred with explicit notes.
+
+### Fixed in closeout
+
+- **C1**: round-trip test's "pre-load difference assertion" was
+  symmetry-driven (training-modifies-backbone) rather than
+  explicitly load-driven; a no-op `load_weights` could have
+  passed under `freeze_encoder=True`. Fix: added a separate
+  `test_load_weights_actually_copies_head_weights` test in
+  `tests/test_assembly.py` that explicitly seeds both backbones
+  identically and uses `freeze_encoder=True`, so the only thing
+  that can produce a bitwise post-load match is `load_weights`
+  actually copying the trained head weights. Pre-load assertion
+  now does what its comment claims.
+- **I1**: `expected_columns` was unused dead code despite the
+  design doc claiming a 3-layer validation hierarchy. Fix:
+  wired into `run_cca_classification.py` (assertion against the
+  cached dataset's `element_spec` after data load) and
+  `eval_cca_classifier.py` (assertion that the cached test
+  dataset has `text_key`). Smoke test exercises the same check.
+  Validation hierarchy now matches what's documented.
+- **I3**: eval-side head reproduced `metrics=[...]` "for parity"
+  manually. Empirical investigation: metric state variables
+  live on the metric instances under `head.metrics` but are
+  *not* in `head.weights`, which is what `save_weights` /
+  `load_weights` operate on. So the eval-side metrics weren't
+  load-bearing, just unused machinery + a hand-coupling drift
+  risk. Fix (collapsed with I8): metrics dropped from eval-side
+  head construction; train-side metrics now imported from a new
+  `src/cca_metrics.py` module via `make_cca_metrics()`.
+- **I5**: `test_steps = validation_steps` was wrong-by-construction
+  (val-positives count used as test-step count); pre-Tier-3 fix
+  for the same bug class on predict (Piece 2c) didn't extend to
+  evaluate. Fix: build a finite (non-repeated) test dataset by
+  concatenating test pos + unl, batch, preprocess. `evaluate()`
+  iterates the whole test set exactly once; no `steps=`
+  approximation. Removed the `test_set` and `test_steps`
+  variables entirely.
+- **I6**: no test pinned that two heads with overlapping metric
+  types produce distinct names despite the design's claim that
+  the rename protects against multi-head collisions. Fix: added
+  `test_multi_head_metric_names_are_distinct` in
+  `tests/test_heads.py` constructing two heads with overlapping
+  metric types and asserting `cca_*` and `immig_*` names are
+  disjoint and head-prefixed.
+- **I7**: Piece 1 `__call__` validation was set-membership only;
+  a column present-but-wrong-dtype (e.g., text column accidentally
+  fed as int64) would surface deep inside the tokenizer rather
+  than at the boundary. Fix: added a Layer-2 dtype check on
+  `inputs[text_key]` (must be string-typed) in
+  `ClassifierPreprocessor.__call__`, plus a test
+  (`test_non_string_text_column_raises`). Source-column dtype
+  checks deliberately not added — `keras.ops.cast` already
+  fails loudly on incompatible dtypes there.
+- **I8 (interim)**: metrics list duplicated by hand between
+  `run_cca_classification.py` and `eval_cca_classifier.py` —
+  the same shape of train/eval coupling I4 set out to fix.
+  Interim fix (full fix is metrics in RunConfig, deferred):
+  factored the metrics list into `src/cca_metrics.py` exporting
+  a `make_cca_metrics()` helper. Train script imports + uses;
+  eval script doesn't import (per I3, doesn't construct metrics
+  at all). Single source of truth, drift impossible. The full
+  RunConfig-resident version of this is deferred; the metric
+  set is currently uniform across runs, so the JSON-serialization-
+  of-keras-Metrics complexity isn't warranted yet.
+
+### Deferred with explicit notes
+
+- **I2**: smoke test's `validate_against_backbone` exercises the
+  instance-attribute path (fake backbone) rather than the
+  class-property path (real keras_hub backbone). Documented as
+  a limitation in `scripts/smoke_test_integrated_stack.py`'s
+  module docstring. Closing this gap would require running real
+  keras_hub against the smoke test (heavyweight); not warranted
+  for a wiring-test fixture.
+- **I4**: LR schedule resolution gap — sidecar carries factors,
+  not resolved step counts. Documented in the "Open / deferred"
+  list above with three candidate fixes for when the gap
+  becomes pressing.
+- **I8 (full version)**: metrics in RunConfig (proper, JSON-
+  serializable). The interim shared-module fix above eliminates
+  the immediate hand-coupling drift; the full version waits
+  until metric configurations themselves become a research
+  dimension worth comparing across runs.
+
+### Tier 4 hygiene scope (deferred, low priority)
+
+- **M1**: `_filter_known_fields` `stacklevel=3` is fragile under
+  indirection; affects diagnostics only.
+- **M2**: stale comment in `cca_config.py` about `_from_dict`
+  attachment pattern — methods are inline, not deferred-attached.
+- **M3**: `config_path_for_weights` graceful fallback produces
+  `bar.h5.config.json`-style two-extension paths for unusual
+  inputs.
+- **M4**: `assembly.build_endpoint_model` doesn't enforce that
+  `heads={head_name: head_instance}` dict-keys match
+  `head.name`; relies on caller convention.
+- **M5**: `tests/test_data_loading.py` writes string columns with
+  explicit `pl.Utf8`; doesn't catch real-LDC string-subtype
+  divergences.
+- **M6**: `tests/test_cca_config.py` doesn't test duplicate
+  `source_column` across heads (cross-object invariant gap —
+  whether duplicate source columns *should* be rejected is also
+  a design question).
+- **M7**: forward-compat sketch — adding `type` field to existing
+  configs may produce noisy warnings during the migration
+  because `_filter_known_fields` warns on unknown fields.
+  Cosmetic.
+
+### Process note
+
+The review caught an interesting subset of bug-shapes:
+- **I1** (dead code claimed as production check) — exactly the
+  shape of "documented but not delivered" that the Tier 2 review
+  caught with the missing-on-disk caller scripts (C2).
+- **C1** + **I7** (tests/checks that exercise less than they claim)
+  — the same shape as Tier 2's "smoke test asserts on prediction
+  match but not on `history.history` content" finding.
+- **I8** (hand-coupled values that the abstraction was supposed
+  to deduplicate) — exactly the bug class the abstraction (I4)
+  was designed to prevent, surfaced in the metrics block we'd
+  decided to leave script-local.
+
+Lesson for future tiers: the most valuable adversarial review
+findings consistently take this shape — not "the code is wrong,"
+but "the documented protection isn't actually delivered" or "the
+abstraction's principle isn't applied consistently." Worth
+explicitly probing for that shape on Tier 4's review when it
+comes.
 
 ---
