@@ -20,6 +20,7 @@ import polars as pl
 import tensorflow as tf
 
 import src.config as config
+import src.cca_config as cca_config
 import src.data_setup.data
 from src.preproc.preprocessor import ClassifierPreprocessor
 from src.model_setup.backbone import load_dapt_backbone
@@ -35,56 +36,81 @@ keras.config.set_dtype_policy(config.DTYPE_POLICY)
 # keeps any incidental shuffling / sampling deterministic).
 keras.utils.set_random_seed(200)
 
-BATCH_SIZE = 256
-SEQ_LENGTH = 128
 
-# Class prior — must match the value used at training time so the
-# head's reconstructed loss has the same configuration as the trained
-# model (weights load by name; loss config doesn't strictly affect
-# inference, but matching is good hygiene). Updated 4c: 0.03 → 0.02.
-FLPU_PRIOR = 0.02
+# -----------------------------------------------------------------------------
+# Run configuration
+# -----------------------------------------------------------------------------
+# Load the RunConfig sidecar that the training script wrote
+# alongside the weights file (Tier 3 Piece 3 — I4: train/eval
+# coupling). Drives preprocessor + head + assembly construction
+# below with the *exact* same values the training script used —
+# eliminating the class of bugs where train and eval scripts
+# silently disagree on `seq_length`, `text_key`, head config, etc.
+#
+# If the sidecar is missing (e.g., a weights file from before the
+# Piece 3 sidecar discipline), `from_json` raises a clear error
+# pointing at the CLI helper for ad-hoc sidecar creation:
+# `python -m src.cca_config write_default <weights_path>`.
+
+_sidecar_path = cca_config.config_path_for_weights(config.CCA_CLASSIFIER_WEIGHTS)
+run_config = cca_config.RunConfig.from_json(_sidecar_path)
+_cca_head_config = run_config.heads[0]
+
+# Script-local: BATCH_SIZE is eval-only operational (loading
+# throughput vs. memory), independent of train.
+BATCH_SIZE = 256
 
 
 # -----------------------------------------------------------------------------
 # Build inference model (Pattern 2: fresh head, weights loaded by name)
 # -----------------------------------------------------------------------------
-backbone = load_dapt_backbone(config.DAPT_BACKBONE_WEIGHTS)
+backbone = load_dapt_backbone(run_config.backbone_weights_path)
 
-# Fresh head instance with the same configuration the training script
-# used. Variable names within the head are derived from the head's
-# `name="cca"` plus sublayer names, so they line up with the saved
-# weights from training. The metrics list is reproduced for
-# parity, although it's not actually used at inference (inf model
-# calls the head with targets=None, so update_state never fires).
+# Defense-in-depth: catch backbone-vs-config hidden_dim drift before
+# weight load. Piece 2's `skip_mismatch=False` is the load-time
+# backstop; this fires earlier with a clearer message.
+run_config.validate_against_backbone(backbone)
+
+# Fresh head instance with the same configuration the training
+# script used (driven by the same `RunConfig`). Variable shapes line
+# up with the saved weights because architecture-shape comes from
+# the same config — see `docs/notes/tier3-design.md` Piece 2 for
+# the structural-vs-name-matching framing of weight loading.
+# The metrics list is reproduced for parity, although it's not
+# actually used at inference (inf model calls the head with
+# targets=None, so update_state never fires).
 cca_head = ClassificationHead(
-    hidden_dim=backbone.hidden_dim,
-    loss_fn=FLPULoss(prior=FLPU_PRIOR, kiryo_clawback=False),
+    hidden_dim=_cca_head_config.hidden_dim,
+    loss_fn=FLPULoss(
+        prior=_cca_head_config.loss.prior,
+        kiryo_clawback=_cca_head_config.loss.kiryo_clawback,
+    ),
     metrics=[
         keras.metrics.BinaryAccuracy(threshold=0.0),
         keras.metrics.Precision(thresholds=0.0, name="precision"),
         keras.metrics.Recall(thresholds=0.0, name="recall"),
         keras.metrics.AUC(curve="PR", from_logits=True, name="pr_auc"),
     ],
-    name="cca",
+    name=_cca_head_config.name,
 )
 
 cca_inference = build_inference_model(
     backbone=backbone,
-    heads={"cca": cca_head},
-    seq_length=SEQ_LENGTH,
+    heads={_cca_head_config.name: cca_head},
+    seq_length=run_config.seq_length,
 )
 
 # Load weights saved by the training script. Keras 3's `.weights.h5`
 # save format keys variables by layer-class + positional index —
 # matching is structural (layer types, ordering, weight shapes),
 # not by user-given name. The fresh head here uses the same
-# `ClassificationHead(name="cca", hidden_dim=...)` configuration as
-# the training script, so the architecture aligns and weights load
-# cleanly. `skip_mismatch=False` pins the load-strict discipline
-# (Tier 3 Piece 2): a future architectural drift between training
-# and eval (e.g., changing `hidden_dim`, adding a head-internal
-# layer) raises `ValueError` rather than silently producing a model
-# with partial-or-default weights.
+# `ClassificationHead` configuration the training script used (same
+# RunConfig), so the architecture aligns and weights load cleanly.
+# `skip_mismatch=False` pins the load-strict discipline (Tier 3
+# Piece 2): a future architectural drift between training and eval
+# (e.g., changing `hidden_dim`, adding a head-internal layer)
+# raises `ValueError` rather than silently producing a model with
+# partial-or-default weights.
 cca_inference.load_weights(
     str(config.CCA_CLASSIFIER_WEIGHTS), skip_mismatch=False
 )
@@ -96,10 +122,11 @@ cca_inference.load_weights(
 # Predict-only preprocessor: no targets emitted, just the model inputs
 # the inference graph declares (`token_ids`, `padding_mask`).
 predict_preprocess = ClassifierPreprocessor(
-    SEQ_LENGTH=SEQ_LENGTH,
-    text_key="headline_with_lead",
+    SEQ_LENGTH=run_config.seq_length,
+    text_key=run_config.text_key,
     label_keys={},
     endpoint_model=True,
+    target_dtype=run_config.target_dtype,
 )
 
 

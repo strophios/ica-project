@@ -33,6 +33,7 @@ import math
 import datetime
 
 import src.config as config
+import src.cca_config as cca_config
 import src.data_setup.data
 from src.preproc.preprocessor import ClassifierPreprocessor
 from src.model_setup.backbone import load_dapt_backbone
@@ -52,26 +53,39 @@ keras.utils.set_random_seed(200)
 
 
 # -----------------------------------------------------------------------------
-# Hyperparameters
+# Run configuration
 # -----------------------------------------------------------------------------
+# All architectural and research-dimension parameters come from a
+# `RunConfig` instance (Tier 3 Piece 3 — I4: train/eval coupling).
+# The config drives preprocessor / head / assembly / optimizer
+# construction, and gets serialized to a JSON sidecar alongside the
+# saved weights at the end of training. The eval script
+# (`eval_cca_classifier.py`) reads that sidecar and constructs its
+# inference model with the exact same values, eliminating the
+# class of bugs where train and eval scripts silently disagree on
+# `seq_length`, `text_key`, head config, prior, etc.
+#
+# To run an experimental variant, replace `DEFAULT_CCA_CONFIG` with
+# a `dataclasses.replace`-derived alternative — e.g.,
+#
+#     run_config = dataclasses.replace(
+#         cca_config.DEFAULT_CCA_CONFIG, epochs=10,
+#     )
+#
+# See `docs/notes/tier3-design.md` Piece 3 for the design framing.
 
-# Preprocessing params
-# SEQ_LENGTH and BATCH_SIZE of 128 for local testing (see notes in the
-# memo for rough assessment of how much truncation that causes); maybe
-# bump SEQ_LENGTH back to 256 for Explorer? Not sure.
+run_config = cca_config.DEFAULT_CCA_CONFIG
+
+# The single (currently only) head's config; convenience binding
+# since multi-head support is not yet wired through the rest of
+# this script.
+_cca_head_config = run_config.heads[0]
+
+# Script-local operational params. Not in run_config because they
+# differ between train/eval (BATCH_SIZE: throughput-vs-memory) or
+# don't affect the trained model (shuffle_buffer).
 BATCH_SIZE = 256
-SEQ_LENGTH = 128
-
-# Training params
-EPOCHS = 7
-
-# Class prior estimate for FLPU. π_pos ≈ 0.02 — the corrected
-# estimate from `run_prior_estimate.py` (after fixing the bandwidth-
-# scale mis-calibration in DEDPUL; see the comment in
-# `run_prior_estimate.py` for the four-variant attribution table).
-# Was 0.03 in the pre-Tier-2 code; the bump down to 0.02 is one of
-# the deferred empirical checks Tier 2 was tracking.
-FLPU_PRIOR = 0.02
+SHUFFLE_BUFFER = 100_000
 
 
 # -----------------------------------------------------------------------------
@@ -125,16 +139,18 @@ else:
 # label_keys produces target columns. Empty label_keys + endpoint
 # mode → output is just `{token_ids, padding_mask}`.
 train_preprocess = ClassifierPreprocessor(
-    SEQ_LENGTH=SEQ_LENGTH,
-    text_key="headline_with_lead",
-    label_keys={"cca_targets": "cca_label"},
+    SEQ_LENGTH=run_config.seq_length,
+    text_key=run_config.text_key,
+    label_keys=run_config.label_keys,
     endpoint_model=True,
+    target_dtype=run_config.target_dtype,
 )
 predict_preprocess = ClassifierPreprocessor(
-    SEQ_LENGTH=SEQ_LENGTH,
-    text_key="headline_with_lead",
+    SEQ_LENGTH=run_config.seq_length,
+    text_key=run_config.text_key,
     label_keys={},
     endpoint_model=True,
+    target_dtype=run_config.target_dtype,
 )
 
 
@@ -142,31 +158,39 @@ predict_preprocess = ClassifierPreprocessor(
 # Datasets
 # -----------------------------------------------------------------------------
 # Ratio Batch sampling: every training batch contains a known fraction
-# of labeled positives. 1:9 for training (matching the original
-# 9-unl-to-1-pos ratio); 1:1 for val/test where we want positives and
-# unlabeled equally represented for metric stability.
-shuffle_buffer = 100000
-
+# of labeled positives. The `RatioBatchConfig` defaults match the
+# pre-Tier-3 hardcodes (0.1 train, 0.5 val/test = 1:9 / 1:1) but are
+# now sweepable via run_config — see the Tier-2-pinned "Ratio Batch
+# sensitivity sweep" deferred empirical-check item.
 training_set = src.data_setup.data.dataset_create(
-    shuffle_buffer,
+    SHUFFLE_BUFFER,
     BATCH_SIZE,
     train_preprocess,
     data=[ldc_data["train"]["pos"], ldc_data["train"]["unl"]],
-    weights=[1 / 10, 9 / 10],
+    weights=[
+        run_config.ratio_batch.train_pos,
+        1 - run_config.ratio_batch.train_pos,
+    ],
 )
 validation_set = src.data_setup.data.dataset_create(
-    shuffle_buffer,
+    SHUFFLE_BUFFER,
     BATCH_SIZE,
     train_preprocess,
     data=[ldc_data["val"]["pos"], ldc_data["val"]["unl"]],
-    weights=[0.5, 0.5],
+    weights=[
+        run_config.ratio_batch.val_pos,
+        1 - run_config.ratio_batch.val_pos,
+    ],
 )
 test_set = src.data_setup.data.dataset_create(
-    shuffle_buffer,
+    SHUFFLE_BUFFER,
     BATCH_SIZE,
     train_preprocess,
     data=[ldc_data["test"]["pos"], ldc_data["test"]["unl"]],
-    weights=[0.5, 0.5],
+    weights=[
+        run_config.ratio_batch.test_pos,
+        1 - run_config.ratio_batch.test_pos,
+    ],
 )
 
 # Steps. Train: 18300 positives, 1026418 unlabeled.
@@ -184,14 +208,21 @@ test_steps = validation_steps  # see comment above
 # Model assembly
 # -----------------------------------------------------------------------------
 # Backbone: DAPT-finetuned RoBERTa, weights loaded from the .h5 file
-# produced by the DAPT phase.
-backbone = load_dapt_backbone(config.DAPT_BACKBONE_WEIGHTS)
+# at the path declared in run_config.backbone_weights_path (defaults
+# to config.DAPT_BACKBONE_WEIGHTS via DEFAULT_CCA_CONFIG).
+backbone = load_dapt_backbone(run_config.backbone_weights_path)
+
+# Defense-in-depth: verify the backbone's hidden_dim matches what
+# the head config declares. Catches the bug class "wrong backbone
+# for this run config" *before* weight load (Piece 2's shape-
+# mismatch check is the load-time backstop).
+run_config.validate_against_backbone(backbone)
 
 # Single-head classifier: FLPU loss handled internally via the head's
 # add_loss path (endpoint mode). Per-head metrics handled internally
 # via the head's metric_objs path (Tier 2 Piece 4c addition; symmetric
-# with loss_fn). The head's name "cca" prefixes the metrics for
-# disambiguation when more heads land later.
+# with loss_fn). The head's name (from run_config) prefixes the
+# metrics for disambiguation when more heads land later.
 #
 # With a ~2% class prior and 50/50-weighted validation batches,
 # BinaryAccuracy alone is misleading (the model can score well by
@@ -201,16 +232,24 @@ backbone = load_dapt_backbone(config.DAPT_BACKBONE_WEIGHTS)
 # F1 isn't included because keras.metrics.F1Score requires threshold
 # in (0, 1] (probability output); compute it post-hoc from precision
 # and recall.
+#
+# Metrics are script-local (not in run_config) — they're monitoring
+# choices, not load-bearing for predict, and serializing keras
+# Metric configs is a layer of ceremony we don't need yet. See
+# `docs/notes/tier3-design.md` Piece 3 "What's in vs. out".
 cca_head = ClassificationHead(
-    hidden_dim=backbone.hidden_dim,
-    loss_fn=FLPULoss(prior=FLPU_PRIOR, kiryo_clawback=False),
+    hidden_dim=_cca_head_config.hidden_dim,
+    loss_fn=FLPULoss(
+        prior=_cca_head_config.loss.prior,
+        kiryo_clawback=_cca_head_config.loss.kiryo_clawback,
+    ),
     metrics=[
         keras.metrics.BinaryAccuracy(threshold=0.0),
         keras.metrics.Precision(thresholds=0.0, name="precision"),
         keras.metrics.Recall(thresholds=0.0, name="recall"),
         keras.metrics.AUC(curve="PR", from_logits=True, name="pr_auc"),
     ],
-    name="cca",
+    name=_cca_head_config.name,
 )
 
 # Pattern A: build train + inference models sharing the head and
@@ -220,38 +259,40 @@ cca_head = ClassificationHead(
 # build_inference_model for the operational rule.
 cca_classifier = build_endpoint_model(
     backbone=backbone,
-    heads={"cca": cca_head},
-    seq_length=SEQ_LENGTH,
+    heads={_cca_head_config.name: cca_head},
+    seq_length=run_config.seq_length,
     freeze_encoder=True,
 )
 cca_inference = build_inference_model(
     backbone=backbone,
-    heads={"cca": cca_head},
-    seq_length=SEQ_LENGTH,
+    heads={_cca_head_config.name: cca_head},
+    seq_length=run_config.seq_length,
 )
 
 
 # -----------------------------------------------------------------------------
 # Optimizer and compile
 # -----------------------------------------------------------------------------
-# CosineDecay LR schedule with warmup. ChatGPT-suggested params from
-# the pre-Tier-2 sweep; keep until we have a real LR sweep.
+# CosineDecay LR schedule with warmup. Parameters come from
+# run_config.lr_schedule. The factor-based fields
+# (warmup_steps_factor, decay_steps_factor) are interpreted relative
+# to one epoch's `steps_per_epoch` here.
 lr_schedule = keras.optimizers.schedules.CosineDecay(
-    initial_learning_rate=1e-4,
-    decay_steps=steps_per_epoch * 3,
-    alpha=1e-1,
-    warmup_target=1e-3,
-    warmup_steps=steps_per_epoch / 4,
+    initial_learning_rate=run_config.lr_schedule.initial_lr,
+    decay_steps=steps_per_epoch * run_config.lr_schedule.decay_steps_factor,
+    alpha=run_config.lr_schedule.decay_alpha,
+    warmup_target=run_config.lr_schedule.warmup_target,
+    warmup_steps=steps_per_epoch * run_config.lr_schedule.warmup_steps_factor,
 )
 
 # AdamW + LossScaleOptimizer wrapping under mixed_float16 (cluster).
 # Loss scaling protects against fp16 gradient underflow on small
 # gradients, which is the standard practice for CUDA mixed precision.
 # Locally (float32) it's unnecessary and just adds machinery, so
-# we skip the wrap.
+# we skip the wrap. weight_decay comes from run_config.optimizer.
 base_optimizer = keras.optimizers.AdamW(
     learning_rate=lr_schedule,
-    weight_decay=5e-3,
+    weight_decay=run_config.optimizer.weight_decay,
 )
 if config.IS_CLUSTER:
     optimizer = keras.optimizers.LossScaleOptimizer(base_optimizer)
@@ -301,7 +342,7 @@ callbacks_list = [
 cca_classifier.fit(
     training_set,
     validation_data=validation_set,
-    epochs=EPOCHS,
+    epochs=run_config.epochs,
     steps_per_epoch=steps_per_epoch,
     validation_steps=validation_steps,
     callbacks=callbacks_list,
@@ -312,6 +353,17 @@ cca_classifier.fit(
 # weights load by name into a freshly-constructed model in the eval
 # script — Pattern 2 for cross-process weight loading).
 cca_classifier.save_weights(str(config.CCA_CLASSIFIER_WEIGHTS))
+
+# Save the run config sidecar alongside the weights (Tier 3 Piece 3
+# — I4: train/eval coupling). The eval script
+# (`eval_cca_classifier.py`) reads this file at startup and drives
+# its preprocessor + head + assembly construction from the same
+# values used here, eliminating silent drift between the two
+# scripts. Sidecar path is derived from the weights path via
+# `config_path_for_weights` (.weights.h5 -> .config.json).
+sidecar_path = cca_config.config_path_for_weights(config.CCA_CLASSIFIER_WEIGHTS)
+run_config.to_json(sidecar_path)
+print(f"Saved run config sidecar: {sidecar_path}")  # LOG
 
 
 # -----------------------------------------------------------------------------

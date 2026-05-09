@@ -1,6 +1,6 @@
 # Audit and Refactor: Tiers, Checkpoints, and Process
 
-*Last updated: 2026-05-09 (Tier 3 Piece 3a done: `src/cca_config.py` introduces RunConfig dataclass + JSON sidecar pattern; 64 new tests; suite 103 → 167. Piece 3b — script integration — pending.).*
+*Last updated: 2026-05-09 (Tier 3 Piece 3 done: training/eval scripts and smoke test wired to RunConfig + sidecar; I3/I4/I5 boundary work complete; Piece 4 (original-scope test coverage) remains).*
 
 This doc exists so that a new session — whether picked up by you after
 weeks away, by a fresh LLM collaborator, or by someone else entirely —
@@ -72,7 +72,7 @@ history; the substantive findings are addressed in `8685c47`.
   - **Piece 1 done** (commit `79ab31c`). Dual-boundary input validation on `ClassifierPreprocessor`. `__init__` checks for *internal-config-validity* bugs (raises `ValueError` with informative messages naming the bad value): `text_key` non-empty string, `label_keys` is a dict, `target_dtype` is a Keras-recognized dtype string, and standard-mode (`endpoint_model=False`) requires non-empty `label_keys` (the empty-`label_keys` configuration is only valid in endpoint mode for predict-only flow). `__call__` checks for *config-vs-data-mismatch* bugs (raises `KeyError` with the missing column set, the configured expectation, and the batch's actual keys, enumerating *all* missing columns rather than failing fast). Retires M2 from the Tier 4 deferred list — `target_dtype` validation lives naturally in the construction-validation block. 14 new tests across two new test classes (`TestConstructionValidation`, `TestCallTimeInputValidation`); suite at 87 → 101 passing.
   - **Piece 2 done** (commit `4243c63`, plus follow-on `8e58350` filling in the hash and a follow-on documenting the format-choice decision). Pattern 2 serialization invariant pinned in `tests/test_assembly.py` via `TestPatternTwoSerialization` (2 tests): `test_round_trip_predictions_match_bitwise` (Pattern A → save → fresh-build → load → bitwise-identical predictions, with a pre-load-difference assertion to break symmetry) and `test_load_weights_raises_on_shape_mismatch` (different `hidden_dim` → `skip_mismatch=False` raises `ValueError`). Production-path `load_weights` calls in `src/eval_cca_classifier.py`, `src/model_setup/backbone.py`, and `scripts/smoke_test_integrated_stack.py` gain explicit `skip_mismatch=False` to pin the load-strict discipline. **Empirical finding during implementation** (see `tier3-design.md` Piece 2 "Empirical finding" subsection): Keras 3's `.weights.h5` save format keys variables by *layer-class + positional index*, NOT by user-given name. Switching to legacy `.h5` format would enable `by_name=True` strict matching but was deliberately rejected (deprecation risk + redundant with call-site routing protection); decision criteria for revisiting captured in `tier3-design.md` "Decision: stay with `.weights.h5`" subsection. The originally-planned name-mismatch test was reframed as shape-mismatch. Implication: Pattern 2 is load-by-*structure*, not load-by-*name*; the head-name contract is enforced at call sites by Keras's `compile(loss={head: ...})` routing (a separate concern from weight loading). Suite: 101 → 103 passing.
   - **Piece 3a done** (this commit). `src/cca_config.py` introduces frozen-dataclass `RunConfig` capturing the architectural and research-dimension parameters of a CCA training run, with JSON sidecar serialization, `validate_against_backbone(backbone)` for hidden_dim cross-validation, `DEFAULT_CCA_CONFIG` as the canonical starting point, and a CLI helper for ad-hoc sidecar creation. Wrapped sub-configs (`FLPULossConfig`, `HeadConfig`, `RatioBatchConfig`, `LRScheduleConfig`, `OptimizerConfig`) — the `loss` wrapping is pre-namespaced for the planned ALUM piece (pinned question #1); the others are organizationally wrapped (lifts fields from flat to wrapped, makes future type-discrimination non-breaking — see `tier3-design.md` Piece 3 "wrapped vs. flat" reasoning). Per-dataclass `__post_init__` validation; cross-object validation (head names unique) at RunConfig; external-context validation (`validate_against_backbone`) as an explicit method. JSON forward-compat: ignores unknown fields with warning, fails loud on missing required fields. 64 new tests in `tests/test_cca_config.py`. Suite: 103 → 167 passing.
-  - **Piece 3b pending.** Wire `src/run_cca_classification.py`, `src/eval_cca_classifier.py`, and `scripts/smoke_test_integrated_stack.py` to use the config + sidecar pattern. Run scripts pull values from `DEFAULT_CCA_CONFIG` (or a `dataclasses.replace`-derived variant); training writes the sidecar at the end; eval loads the sidecar at start.
+  - **Piece 3b done** (this commit). `src/run_cca_classification.py` builds from `cca_config.DEFAULT_CCA_CONFIG` (preprocessor, head, assembly, LR schedule, optimizer, ratio batch all driven from run_config), validates against the loaded backbone, writes the sidecar via `RunConfig.to_json(config_path_for_weights(...))` after fit. `src/eval_cca_classifier.py` loads the sidecar at startup via `RunConfig.from_json(...)`, validates against the loaded backbone, constructs its inference model from the same values. `scripts/smoke_test_integrated_stack.py` exercises the full RunConfig → fit → save (weights + sidecar) → load (sidecar + weights) → predict round-trip on synthetic data; the fake backbone now exposes a `hidden_dim` attribute matching the real keras_hub Backbone's contract. Smoke test re-run: still passes (Pattern A vs Pattern 2 max-diff 0.00e+00). Suite still at 167 (no new tests; the script integration is exercised by the smoke test).
 
 - `789d88c` — Piece 1: `ClassificationHead` for multi-head refactor.
   Head-as-Layer abstraction, supports both standard mode (loss via
@@ -388,11 +388,14 @@ defense-in-depth carving) and per-piece design reasoning.
    finding (captured in tier3-design.md): Keras `.weights.h5`
    matches by structure not name — head renames don't break load,
    shape changes do.
-3. **[IN PROGRESS — Piece 3a done] I4 — train/eval config
-   coupling.** Option C (static config module + serialized run
-   config sidecar). Piece 3a — `src/cca_config.py` with
-   dataclasses, JSON I/O, validation, CLI helper — landed this
-   commit. Piece 3b — script integration — pending.
+3. **[DONE — Pieces 3a + 3b (this commit)] I4 — train/eval
+   config coupling.** Option C (static config module + serialized
+   run config sidecar). Piece 3a (commit `d9c0348`):
+   `src/cca_config.py` with dataclasses, JSON I/O, validation,
+   CLI helper. Piece 3b (this commit): training/eval scripts and
+   smoke test wired through. The I3/I4/I5 boundary-enforcement
+   spine is complete; only Piece 4 (original-scope test coverage)
+   remains in Tier 3.
 4. **[PLANNED] Original-scope test coverage.** Label-construction
    tests for the cca/immig/descriptor boolean combinations in
    `create_classifier_data`; missing-value (`fill_null("")`)

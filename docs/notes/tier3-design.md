@@ -997,12 +997,21 @@ Piece 3b pending.
   subcommands (`write_default`, `show`).
   `tests/test_cca_config.py` with 64 tests across 11 classes.
   Suite 103 → 167.
-- **Piece 3b**: rewrite `src/run_cca_classification.py`,
-  `src/eval_cca_classifier.py`, and
-  `scripts/smoke_test_integrated_stack.py` to drive their values
-  from a `RunConfig` instance. Training writes the sidecar at
-  the end of fit; eval loads the sidecar at start; smoke test
-  exercises the round-trip.
+- **Piece 3b**: implemented 2026-05-09 (commit hash filled in by
+  follow-up). `src/run_cca_classification.py` builds from
+  `cca_config.DEFAULT_CCA_CONFIG`, validates against the loaded
+  backbone, and writes the sidecar via
+  `RunConfig.to_json(config_path_for_weights(weights_path))` after
+  fit. `src/eval_cca_classifier.py` loads the sidecar at startup,
+  validates against the loaded backbone, and constructs its
+  inference model from the same values. `scripts/smoke_test_integrated_stack.py`
+  exercises the full RunConfig → fit → save (weights + sidecar) →
+  load (sidecar + weights) → predict round-trip; the fake backbone
+  in the smoke test now exposes a `hidden_dim` attribute matching
+  the real keras_hub Backbone's contract. Smoke test still passes
+  (Pattern A vs Pattern 2 max-diff 0.00e+00). No new tests in this
+  commit (script integration is exercised by the smoke test).
+  Suite still at 167.
 
 ### Decision
 
