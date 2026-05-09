@@ -997,8 +997,8 @@ Piece 3b pending.
   subcommands (`write_default`, `show`).
   `tests/test_cca_config.py` with 64 tests across 11 classes.
   Suite 103 → 167.
-- **Piece 3b**: implemented 2026-05-09 (commit hash filled in by
-  follow-up). `src/run_cca_classification.py` builds from
+- **Piece 3b**: implemented in commit `c034597` (2026-05-09).
+  `src/run_cca_classification.py` builds from
   `cca_config.DEFAULT_CCA_CONFIG`, validates against the loaded
   backbone, and writes the sidecar via
   `RunConfig.to_json(config_path_for_weights(weights_path))` after
