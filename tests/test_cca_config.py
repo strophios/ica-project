@@ -26,6 +26,7 @@ from src.cca_config import (
     RunConfig,
     DEFAULT_CCA_CONFIG,
     config_path_for_weights,
+    ResolvedSteps,
 )
 
 
@@ -560,3 +561,211 @@ class TestPathHelper:
         assert result == Path(
             "/abs/path/to/cca_classifier/cca.config.json"
         )
+
+
+# ---------------------------------------------------------------------------
+# TestResolvedSteps (Tier 4 Piece 2 — I4)
+# ---------------------------------------------------------------------------
+
+
+class TestResolvedSteps:
+    """ResolvedSteps captures the resolved LR schedule step counts
+    that LRScheduleConfig factors are multiplied against at
+    training time. See docs/notes/tier4-design.md Piece 2."""
+
+    def test_construction_with_valid_positive_ints(self):
+        rs = ResolvedSteps(
+            warmup_steps=1250,
+            decay_steps=15000,
+            steps_per_epoch=5000,
+        )
+        assert rs.warmup_steps == 1250
+        assert rs.decay_steps == 15000
+        assert rs.steps_per_epoch == 5000
+
+    def test_is_frozen(self):
+        rs = ResolvedSteps(warmup_steps=1, decay_steps=1, steps_per_epoch=1)
+        with pytest.raises(dataclasses.FrozenInstanceError):
+            rs.warmup_steps = 2  # type: ignore[misc]
+
+    @pytest.mark.parametrize("field,value", [
+        ("warmup_steps", 0),
+        ("warmup_steps", -1),
+        ("decay_steps", 0),
+        ("decay_steps", -1),
+        ("steps_per_epoch", 0),
+        ("steps_per_epoch", -1),
+    ])
+    def test_rejects_non_positive(self, field, value):
+        kwargs = {"warmup_steps": 1, "decay_steps": 1, "steps_per_epoch": 1}
+        kwargs[field] = value
+        with pytest.raises(ValueError, match=field):
+            ResolvedSteps(**kwargs)
+
+    @pytest.mark.parametrize("field,value", [
+        ("warmup_steps", 1.5),
+        ("warmup_steps", "1"),
+        ("decay_steps", 1.5),
+        ("steps_per_epoch", 1.5),
+    ])
+    def test_rejects_non_int(self, field, value):
+        kwargs = {"warmup_steps": 1, "decay_steps": 1, "steps_per_epoch": 1}
+        kwargs[field] = value
+        with pytest.raises(ValueError, match=field):
+            ResolvedSteps(**kwargs)
+
+    def test_from_dict_round_trips(self):
+        original = ResolvedSteps(
+            warmup_steps=1250, decay_steps=15000, steps_per_epoch=5000
+        )
+        payload = dataclasses.asdict(original)
+        reconstructed = ResolvedSteps._from_dict(payload)
+        assert reconstructed == original
+
+
+# ---------------------------------------------------------------------------
+# TestLRScheduleConfigResolvedField (Tier 4 Piece 2 — I4)
+# ---------------------------------------------------------------------------
+
+
+class TestLRScheduleConfigResolvedField:
+    """LRScheduleConfig.resolved holds optional resolved step counts.
+    See docs/notes/tier4-design.md Piece 2 for the rationale."""
+
+    def test_default_is_none(self):
+        cfg = LRScheduleConfig()
+        assert cfg.resolved is None
+
+    def test_accepts_resolved_steps_instance(self):
+        rs = ResolvedSteps(
+            warmup_steps=1, decay_steps=1, steps_per_epoch=1
+        )
+        cfg = LRScheduleConfig(resolved=rs)
+        assert cfg.resolved is rs
+
+    def test_rejects_non_resolved_steps_non_none(self):
+        with pytest.raises(ValueError, match="resolved"):
+            LRScheduleConfig(resolved={"warmup_steps": 1})  # type: ignore[arg-type]
+
+
+# ---------------------------------------------------------------------------
+# TestLRScheduleConfigWithResolved (Tier 4 Piece 2 — I4)
+# ---------------------------------------------------------------------------
+
+
+class TestLRScheduleConfigWithResolved:
+    """LRScheduleConfig.with_resolved populates the resolved field
+    via math.floor(factor * steps_per_epoch). See
+    docs/notes/tier4-design.md Piece 2."""
+
+    def test_populates_resolved_from_factors(self):
+        cfg = LRScheduleConfig(
+            warmup_steps_factor=0.25, decay_steps_factor=3.0
+        )
+        resolved_cfg = cfg.with_resolved(steps_per_epoch=5000)
+
+        assert resolved_cfg.resolved is not None
+        assert resolved_cfg.resolved.warmup_steps == 1250  # floor(0.25 * 5000)
+        assert resolved_cfg.resolved.decay_steps == 15000  # floor(3.0 * 5000)
+        assert resolved_cfg.resolved.steps_per_epoch == 5000
+
+    def test_uses_floor_for_non_integer_results(self):
+        cfg = LRScheduleConfig(
+            warmup_steps_factor=0.25, decay_steps_factor=3.0
+        )
+        # 2287 * 0.25 = 571.75 → 571
+        resolved_cfg = cfg.with_resolved(steps_per_epoch=2287)
+        assert resolved_cfg.resolved.warmup_steps == 571
+
+    def test_returns_new_instance_not_mutation(self):
+        cfg = LRScheduleConfig()
+        assert cfg.resolved is None
+        resolved_cfg = cfg.with_resolved(steps_per_epoch=100)
+
+        # Original unchanged
+        assert cfg.resolved is None
+        # Returned is a different instance
+        assert resolved_cfg is not cfg
+        assert resolved_cfg.resolved is not None
+
+    def test_preserves_other_fields(self):
+        cfg = LRScheduleConfig(
+            initial_lr=2e-4,
+            warmup_target=2e-3,
+            decay_alpha=5e-2,
+            warmup_steps_factor=0.5,
+            decay_steps_factor=4.0,
+        )
+        resolved_cfg = cfg.with_resolved(steps_per_epoch=1000)
+
+        assert resolved_cfg.initial_lr == 2e-4
+        assert resolved_cfg.warmup_target == 2e-3
+        assert resolved_cfg.decay_alpha == 5e-2
+        assert resolved_cfg.warmup_steps_factor == 0.5
+        assert resolved_cfg.decay_steps_factor == 4.0
+
+    def test_rejects_non_positive_steps_per_epoch(self):
+        cfg = LRScheduleConfig()
+        with pytest.raises(ValueError, match="steps_per_epoch"):
+            cfg.with_resolved(steps_per_epoch=0)
+        with pytest.raises(ValueError, match="steps_per_epoch"):
+            cfg.with_resolved(steps_per_epoch=-1)
+
+
+# ---------------------------------------------------------------------------
+# TestLRScheduleConfigJSONRoundTripWithResolved (Tier 4 Piece 2 — I4)
+# ---------------------------------------------------------------------------
+
+
+class TestLRScheduleConfigJSONRoundTripWithResolved:
+    """JSON round-trip preserves the resolved field when populated.
+    See docs/notes/tier4-design.md Piece 2."""
+
+    def test_round_trips_with_resolved_populated(self, tmp_path):
+        # Construct a RunConfig with a resolved LRScheduleConfig
+        original_run_config = _valid_run_config()
+        original_run_config = dataclasses.replace(
+            original_run_config,
+            lr_schedule=original_run_config.lr_schedule.with_resolved(
+                steps_per_epoch=5000
+            ),
+        )
+
+        # Round-trip via JSON sidecar
+        sidecar = tmp_path / "config.json"
+        original_run_config.to_json(sidecar)
+        reconstructed = RunConfig.from_json(sidecar)
+
+        assert reconstructed.lr_schedule.resolved is not None
+        assert reconstructed.lr_schedule.resolved.warmup_steps == 1250
+        assert reconstructed.lr_schedule.resolved.decay_steps == 15000
+        assert reconstructed.lr_schedule.resolved.steps_per_epoch == 5000
+        # Equality check across the whole config
+        assert reconstructed == original_run_config
+
+    def test_round_trips_with_resolved_none(self, tmp_path):
+        # Default (resolved=None) round-trip
+        original_run_config = _valid_run_config()
+        assert original_run_config.lr_schedule.resolved is None
+
+        sidecar = tmp_path / "config.json"
+        original_run_config.to_json(sidecar)
+        reconstructed = RunConfig.from_json(sidecar)
+
+        assert reconstructed.lr_schedule.resolved is None
+        assert reconstructed == original_run_config
+
+    def test_loads_pre_resolved_sidecar_without_key(self, tmp_path):
+        """Backward compat: older sidecars written before Piece 2
+        have no 'resolved' key in the lr_schedule dict."""
+        # Construct an old-shape sidecar manually
+        run_config = _valid_run_config()
+        payload = dataclasses.asdict(run_config)
+        del payload["lr_schedule"]["resolved"]
+
+        sidecar = tmp_path / "old_config.json"
+        with open(sidecar, "w") as f:
+            json.dump(payload, f)
+
+        reconstructed = RunConfig.from_json(sidecar)
+        assert reconstructed.lr_schedule.resolved is None

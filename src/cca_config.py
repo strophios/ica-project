@@ -77,6 +77,7 @@ from __future__ import annotations
 
 import dataclasses
 import json
+import math
 import warnings
 from pathlib import Path
 from typing import Any
@@ -251,6 +252,47 @@ class RatioBatchConfig:
 
 
 # ---------------------------------------------------------------------------
+# Resolved steps (Tier 4 Piece 2 — I4)
+# ---------------------------------------------------------------------------
+
+
+@dataclasses.dataclass(frozen=True)
+class ResolvedSteps:
+    """LR schedule step counts resolved from LRScheduleConfig
+    factors against a concrete steps_per_epoch.
+
+    Populated by `LRScheduleConfig.with_resolved` at training
+    time; `steps_per_epoch` is recorded for provenance. See
+    docs/notes/tier4-design.md Piece 2 for the rationale.
+    """
+
+    warmup_steps: int
+    decay_steps: int
+    steps_per_epoch: int
+
+    def __post_init__(self):
+        for name, val in (
+            ("warmup_steps", self.warmup_steps),
+            ("decay_steps", self.decay_steps),
+            ("steps_per_epoch", self.steps_per_epoch),
+        ):
+            if not isinstance(val, int) or isinstance(val, bool):
+                raise ValueError(
+                    f"ResolvedSteps.{name} must be an int; got "
+                    f"{val!r} (type {type(val).__name__})."
+                )
+            if val <= 0:
+                raise ValueError(
+                    f"ResolvedSteps.{name} must be > 0; got {val}."
+                )
+
+    @classmethod
+    def _from_dict(cls, payload: dict, _source: str = "<dict>") -> "ResolvedSteps":
+        kwargs = _filter_known_fields(cls, payload, _source=_source)
+        return cls(**kwargs)
+
+
+# ---------------------------------------------------------------------------
 # LR schedule config
 # ---------------------------------------------------------------------------
 
@@ -276,6 +318,7 @@ class LRScheduleConfig:
     decay_alpha: float = 1e-1
     warmup_steps_factor: float = 0.25
     decay_steps_factor: float = 3.0
+    resolved: "ResolvedSteps | None" = None
 
     def __post_init__(self):
         for name, val, must_be_positive in (
@@ -299,11 +342,76 @@ class LRScheduleConfig:
                     f"LRScheduleConfig.{name} must be >= 0; got {val}."
                 )
 
+        if self.resolved is not None and not isinstance(
+            self.resolved, ResolvedSteps
+        ):
+            raise ValueError(
+                f"LRScheduleConfig.resolved must be a ResolvedSteps "
+                f"instance or None; got {self.resolved!r} (type "
+                f"{type(self.resolved).__name__})."
+            )
+
+    def with_resolved(self, steps_per_epoch: int) -> "LRScheduleConfig":
+        """Return a new LRScheduleConfig instance with the resolved
+        field populated.
+
+        Computes warmup_steps = floor(warmup_steps_factor *
+        steps_per_epoch) and decay_steps = floor(decay_steps_factor
+        * steps_per_epoch), matching the math.floor pattern used at
+        src/run_cca_classification.py:214 for steps_per_epoch itself.
+
+        Existing behavior at lines 286-291 of run_cca_classification.py
+        multiplied factors by steps_per_epoch without flooring,
+        passing floats to Keras's CosineDecay (which coerces).
+        Switching to explicit floor here makes the resolved values
+        deterministic integers — the numerical effect is tiny (e.g.,
+        571.75 → 571) and the project doesn't rely on byte-exact
+        reproduction.
+        """
+        if not isinstance(steps_per_epoch, int) or isinstance(
+            steps_per_epoch, bool
+        ):
+            raise ValueError(
+                f"steps_per_epoch must be a positive int; got "
+                f"{steps_per_epoch!r} (type "
+                f"{type(steps_per_epoch).__name__})."
+            )
+        if steps_per_epoch <= 0:
+            raise ValueError(
+                f"steps_per_epoch must be > 0; got {steps_per_epoch}."
+            )
+
+        resolved = ResolvedSteps(
+            warmup_steps=math.floor(
+                self.warmup_steps_factor * steps_per_epoch
+            ),
+            decay_steps=math.floor(
+                self.decay_steps_factor * steps_per_epoch
+            ),
+            steps_per_epoch=steps_per_epoch,
+        )
+        return dataclasses.replace(self, resolved=resolved)
+
     @classmethod
     def _from_dict(
         cls, payload: dict, _source: str = "<dict>"
     ) -> LRScheduleConfig:
+        # Reconstruct the nested ResolvedSteps if present.
+        resolved_payload = payload.get("resolved")
+        if resolved_payload is None:
+            resolved = None
+        elif isinstance(resolved_payload, dict):
+            resolved = ResolvedSteps._from_dict(
+                resolved_payload, _source=f"{_source}.resolved"
+            )
+        else:
+            raise ValueError(
+                f"Expected 'resolved' in {_source} to be a dict or "
+                f"null; got {type(resolved_payload).__name__}."
+            )
+
         kwargs = _filter_known_fields(cls, payload, _source=_source)
+        kwargs["resolved"] = resolved
         return cls(**kwargs)
 
 

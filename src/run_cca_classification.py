@@ -29,8 +29,9 @@ This script integrates the Tier 2 abstractions:
 import keras
 import tensorflow as tf
 
-import math
+import dataclasses
 import datetime
+import math
 
 import src.config as config
 import src.cca_config as cca_config
@@ -214,6 +215,14 @@ validation_set = src.data_setup.data.dataset_create(
 steps_per_epoch = math.floor(18300 / (BATCH_SIZE / 10))
 validation_steps = math.floor(1017 / (BATCH_SIZE / 2))
 
+# Resolve LR schedule factors against the concrete steps_per_epoch
+# so the sidecar is self-sufficient. See
+# docs/notes/tier4-design.md Piece 2.
+run_config = dataclasses.replace(
+    run_config,
+    lr_schedule=run_config.lr_schedule.with_resolved(steps_per_epoch),
+)
+
 
 # -----------------------------------------------------------------------------
 # Model assembly
@@ -280,15 +289,20 @@ cca_inference = build_inference_model(
 # Optimizer and compile
 # -----------------------------------------------------------------------------
 # CosineDecay LR schedule with warmup. Parameters come from
-# run_config.lr_schedule. The factor-based fields
-# (warmup_steps_factor, decay_steps_factor) are interpreted relative
-# to one epoch's `steps_per_epoch` here.
+# run_config.lr_schedule, with resolved step counts populated
+# by with_resolved() earlier. Warmup and decay steps are now read
+# directly from the resolved sub-object.
+resolved = run_config.lr_schedule.resolved
+assert resolved is not None, (
+    "lr_schedule.resolved should be populated by the with_resolved "
+    "call earlier; this is a programmer error if it fires."
+)
 lr_schedule = keras.optimizers.schedules.CosineDecay(
     initial_learning_rate=run_config.lr_schedule.initial_lr,
-    decay_steps=steps_per_epoch * run_config.lr_schedule.decay_steps_factor,
+    decay_steps=resolved.decay_steps,
     alpha=run_config.lr_schedule.decay_alpha,
     warmup_target=run_config.lr_schedule.warmup_target,
-    warmup_steps=steps_per_epoch * run_config.lr_schedule.warmup_steps_factor,
+    warmup_steps=resolved.warmup_steps,
 )
 
 # AdamW + LossScaleOptimizer wrapping under mixed_float16 (cluster).

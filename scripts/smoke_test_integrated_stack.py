@@ -51,6 +51,7 @@ re-run after Tier 3/4 changes or library upgrades to verify the
 integration still composes.
 """
 
+import dataclasses
 import tempfile
 from pathlib import Path
 
@@ -273,6 +274,16 @@ print("[6/8] Saving weights + run config sidecar...")
 weights_path = tmp_dir / "smoke_classifier.weights.h5"
 train_model.save_weights(str(weights_path))
 
+# Resolve LR schedule for sidecar self-sufficiency
+# (mirrors what run_cca_classification.py does after computing
+# steps_per_epoch). See docs/notes/tier4-design.md Piece 2.
+run_config = dataclasses.replace(
+    run_config,
+    lr_schedule=run_config.lr_schedule.with_resolved(
+        steps_per_epoch=4,
+    ),
+)
+
 # Save the run config sidecar alongside the weights, matching
 # the discipline in run_cca_classification.py (Tier 3 Piece 3).
 sidecar_path = cca_config.config_path_for_weights(weights_path)
@@ -292,6 +303,15 @@ assert run_config_2 == run_config, (
     "Loaded RunConfig differs from the one the train side wrote — "
     "JSON round-trip regression."
 )
+
+# Verify the resolved sub-object round-tripped correctly.
+assert run_config_2.lr_schedule.resolved is not None, (
+    "Loaded sidecar should have resolved populated."
+)
+assert (
+    run_config_2.lr_schedule.resolved
+    == run_config.lr_schedule.resolved
+), "Resolved values should round-trip exactly."
 
 backbone_2 = _make_fake_backbone()
 run_config_2.validate_against_backbone(backbone_2)
