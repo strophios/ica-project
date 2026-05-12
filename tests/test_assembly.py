@@ -195,7 +195,7 @@ class TestBuildEndpointModel:
                 return 2
 
         fake_heads = _DuplicateKeyHeads()
-        with pytest.raises(ValueError, match="duplicate"):
+        with pytest.raises(ValueError, match=r"duplicates?.*\['x'\]"):
             build_endpoint_model(backbone=fresh_backbone, heads=fake_heads, seq_length=SEQ_LEN)
 
 
