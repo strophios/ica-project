@@ -61,9 +61,9 @@ prevents "validated" from becoming a self-reinforcing assertion.
 
 **Validation status**: Used in Tier 2 (started 2026-04-20), Tier 3 (started 2026-05-08), and Tier 4 (started 2026-05-11) with consistently positive results. Each tier's design doc captures decisions + alternatives + rationale rather than just outcomes, which has made later sessions and future-Claude able to reconstruct *why* decisions were made.
 
-**First used**: 2026-04-20, Tier 2 design opening (commit `789d88c`).
+**First used**: 2026-04-21, Tier 2 design opening (commit `789d88c`).
 
-**Last used**: 2026-05-11, Tier 4 design (commit `6bc897a`).
+**Last used**: 2026-05-12, Tier 4 Piece 2 closeout (commit `9d92c17`).
 
 **Known boundary conditions**: Works when work is design-amenable — multiple alternatives worth exploring, non-trivial decisions with clear tradeoffs. For purely mechanical fixes (a one-line null-check, a forgotten docstring), the pattern compresses to "decision: do X; reasoning: it fixes the bug." A lighter version of the pattern still applies even in mechanical contexts, but the full dialogic exploration is overkill.
 
@@ -75,7 +75,7 @@ Apply this pattern when facing design decisions with genuine alternatives. When 
 
 ### Adversarial review after implementation
 
-**Validation status**: Used at end of Tier 2 (8 findings, 2 critical) and Tier 3 (16 findings, 1 critical); closeout commits addressed selected items with explicit deferrals for the rest. Both reviews caught real bugs and design gaps that wouldn't have been found during in-flight piece-by-piece review.
+**Validation status**: Used at end of Tier 2 (11 findings, 2 critical) and Tier 3 (16 findings, 1 critical); closeout commits addressed selected items with explicit deferrals for the rest. Both reviews caught real bugs and design gaps that wouldn't have been found during in-flight piece-by-piece review.
 
 **First used**: 2026-04-28, Tier 2 closeout review (commit `76c353f`).
 
@@ -93,7 +93,7 @@ Apply this pattern at tier completion or after major-piece work. Don't run it fo
 
 **Validation status**: Used for Tier 2 (started 2026-04-20), Tier 3 (started 2026-05-08), and Tier 4 (started 2026-05-11). The "living document — appended piece-by-piece" framing matches how the work actually unfolds (decisions made dialogically, not drafted up-front). The Post-review corrections section explicitly records what the adversarial review caught and which items got fixed vs deferred — the doc itself becomes auditable.
 
-**First used**: 2026-04-20, Tier 2 design doc (commit `789d88c`).
+**First used**: 2026-04-21, Tier 2 design doc (commit `789d88c`).
 
 **Last used**: 2026-05-11, Tier 4 design doc (commit `6bc897a`).
 
@@ -109,9 +109,9 @@ Apply this pattern to tier-shaped work. Create a doc at the tier's opening with 
 
 **Validation status**: Used pervasively across Tier 2, Tier 3, and Tier 4 design docs and in `docs/notes/pinned-questions.md`. The discipline is that items are deferred with stated reasoning (why deferred), tracking location (where to find when revisited), and closure path (what would close them) — never silently dropped.
 
-**First used**: 2026-04-20, Tier 2 design (commit `789d88c`, multiple deferred items in piece descriptions).
+**First used**: 2026-04-21, Tier 2 design (commit `789d88c`, multiple deferred items in piece descriptions).
 
-**Last used**: 2026-05-11, Tier 4 design (commit `6bc897a`, I2 and I8-full deferrals in the closeout section).
+**Last used**: 2026-05-09, Tier 3 design closeout (commit `987a8c0`), where I2 and I8-full deferrals are documented.
 
 **Known boundary conditions**: Requires periodic revisiting of the deferred list, or items accumulate unbounded. Currently no explicit cadence — relies on tier-boundary reviews surfacing whether deferred items have become pressing. If the deferred list grows beyond ~10-15 items, the lack of cadence will start to bite.
 

@@ -31,6 +31,8 @@ independent applications in this project** *and* we can
 articulate **at least one boundary condition** (where the pattern
 doesn't apply, or where its limits are unclear).
 
+The boundary-condition requirement is the discipline that prevents "validated" from becoming a self-reinforcing assertion.
+
 ## Patterns
 
 ### Validated
@@ -52,7 +54,7 @@ doesn't apply, or where its limits are unclear).
 
 **First used**: 2026-05-08, Tier 3 Piece 1 (commit `79ab31c`).
 
-**Last used**: 2026-05-09, Tier 4 Piece 1 M4 (commit `a3505ae`).
+**Last used**: 2026-05-12, Tier 4 Piece 1 M4 (commit `a3505ae`).
 
 **Known boundary conditions**: Applies to **data-flow boundaries** specifically — places where data crosses from one trust domain or representation into another. The house-style `defense-in-depth` skill's web-app-flavored 4-layer carving (entry-point / business-logic / environment-guards / debug-instrumentation) is only partial fit for this codebase; Layers 1 (entry-point) and 2 (business-logic) map cleanly, but Layers 3 and 4 are web-app-specific and don't transfer. The pattern doesn't apply to internal helper functions that operate on already-validated data.
 
@@ -66,7 +68,7 @@ Apply this pattern to data-flow boundaries. When designing a multi-part system (
 
 **Validation status**: Used in `scripts/smoke_test_integrated_stack.py` (fake backbone) and pervasively in `tests/` (synthetic row counts, mock datasets). Two+ applications in this project with positive results in terms of test-suite speed. The canonical boundary case (I2, see below) confirms the pattern's limits are non-trivial — promoted to Validated despite n=2 because the boundary condition is explicit and the value is clear.
 
-**First used**: 2026-04-20, smoke test introduction (commit `079deff` "Add Tier 2 integration smoke test").
+**First used**: 2026-04-27, smoke test introduction (commit `079deff` "Add Tier 2 integration smoke test").
 
 **Last used**: 2026-05-09, Tier 3 Piece 4 (commit `96ea283` "Tier 3 Piece 4: original-scope test coverage"), which added data-loading tests using synthetic dataframes.
 
@@ -82,9 +84,9 @@ Apply this pattern to tests where the real dependency adds >1 second of overhead
 
 **Validation status**: Used in Tier 3 Piece 3a (RunConfig with four sub-configs: `FLPULossConfig`, `OptimizerConfig`, `LRScheduleConfig`, `RatioBatchConfig`, commit `d9c0348`) and Tier 4 Piece 2 (`ResolvedSteps` nested in `LRScheduleConfig`, commit `017dffe`). Two independent applications with clear positive results — both cases anticipated future variants and the wrapping shape paid off.
 
-**First used**: 2026-05-08, Tier 3 Piece 3a (commit `d9c0348`).
+**First used**: 2026-05-09, Tier 3 Piece 3a (commit `d9c0348`).
 
-**Last used**: 2026-05-11, Tier 4 Piece 2 (commit `017dffe`).
+**Last used**: 2026-05-12, Tier 4 Piece 2 (commit `017dffe`).
 
 **Known boundary conditions**: Pattern applies when (a) future variants of the wrapped object are anticipated (e.g., `FLPULossConfig` anticipates ALUM and BCE variants per `docs/notes/pinned-questions.md`), OR (b) the wrapped fields form a coherent semantic group (e.g., `ResolvedSteps` wraps three fields that all come from the same train-time computation). Not justified for ad-hoc collections of unrelated fields — the extra nesting cost in JSON and code reads doesn't pay back without one of these justifications. Premature wrapping is its own anti-pattern.
 
@@ -104,7 +106,7 @@ Apply this pattern when designing config objects. Ask: will these fields evolve 
 
 **Validation status**: Used in Tier 2 Piece 4c only (n=1 architecturally, commit `06e161c`, though both variants exercised). Pattern A in `run_cca_classification.py` (in-process Layer-instance sharing between train and post-train predict). Pattern 2 in `eval_cca_classifier.py` (cross-process: load weights into a freshly-built model). Boundary conditions were further explored in Tier 3 Piece 2 (commit `4243c63`) via the `.weights.h5` load-by-structure vs load-by-name finding. Promotion to Validated waits for one more architectural use case to confirm the patterns generalize.
 
-**First used**: 2026-05-06, Tier 2 Piece 4c (commit `06e161c`).
+**First used**: 2026-04-27, Tier 2 Piece 4c (commit `06e161c`).
 
 **Last used**: 2026-05-08, Tier 3 Piece 2 (commit `4243c63`, explored related territory).
 
