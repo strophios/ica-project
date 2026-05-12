@@ -57,13 +57,13 @@ def _dummy_targets(batch=BATCH_SIZE):
 class TestConstruction:
     def test_standard_mode_constructs_with_only_hidden_dim(self):
         """Minimum-required-args construction path (standard mode)."""
-        head = ClassificationHead(hidden_dim=HIDDEN_DIM)
+        head = ClassificationHead(hidden_dim=HIDDEN_DIM, name="test_head")
         assert head.loss_fn is None, "Default loss_fn should be None (standard mode)"
 
     def test_endpoint_mode_constructs_with_loss_fn(self):
         """Constructing with a loss_fn should store it and activate endpoint mode."""
         loss = FLPULoss(prior=0.1)
-        head = ClassificationHead(hidden_dim=HIDDEN_DIM, loss_fn=loss)
+        head = ClassificationHead(hidden_dim=HIDDEN_DIM, loss_fn=loss, name="test_head")
         assert head.loss_fn is loss
 
     def test_custom_dropout_and_name_are_stored(self):
@@ -71,6 +71,17 @@ class TestConstruction:
         head = ClassificationHead(hidden_dim=HIDDEN_DIM, dropout=0.3, name="cca_head")
         assert head.dropout_rate == 0.3
         assert head.name == "cca_head"
+
+    def test_rejects_name_none(self):
+        """name must be explicit; name=None would fall back to Keras
+        auto-generated names that collide silently across heads."""
+        with pytest.raises(ValueError, match="name"):
+            ClassificationHead(hidden_dim=HIDDEN_DIM, name=None)
+
+    def test_rejects_missing_name_arg(self):
+        """name has no default — must be passed."""
+        with pytest.raises(TypeError):
+            ClassificationHead(hidden_dim=HIDDEN_DIM)
 
 
 # -----------------------------------------------------------------------------
@@ -80,7 +91,7 @@ class TestConstruction:
 class TestForwardPass:
     def test_output_shape_is_batch_by_one(self):
         """Binary-classification head emits one logit per sample."""
-        head = ClassificationHead(hidden_dim=HIDDEN_DIM)
+        head = ClassificationHead(hidden_dim=HIDDEN_DIM, name="test_head")
         out = head(_dummy_features())
         assert tuple(out.shape) == (BATCH_SIZE, 1), (
             f"Expected output shape ({BATCH_SIZE}, 1), got {tuple(out.shape)}"
@@ -88,14 +99,14 @@ class TestForwardPass:
 
     def test_forward_pass_runs_without_targets_in_standard_mode(self):
         """In standard mode, call(features) should work without targets."""
-        head = ClassificationHead(hidden_dim=HIDDEN_DIM)
+        head = ClassificationHead(hidden_dim=HIDDEN_DIM, name="test_head")
         # Should not raise.
         _ = head(_dummy_features())
 
     def test_forward_pass_runs_without_targets_in_endpoint_mode(self):
         """In endpoint mode, call(features) without targets should also work.
         This is the inference-time path — loss is not computed."""
-        head = ClassificationHead(hidden_dim=HIDDEN_DIM, loss_fn=FLPULoss(prior=0.1))
+        head = ClassificationHead(hidden_dim=HIDDEN_DIM, loss_fn=FLPULoss(prior=0.1), name="test_head")
         # Should not raise. No loss is added (see TestEndpointMode for that).
         _ = head(_dummy_features())
 
@@ -109,7 +120,7 @@ class TestEndpointMode:
         """The core endpoint-layer contract: with a loss_fn and with targets
         supplied to call(), the head registers exactly one loss via add_loss.
         Keras's outer Model picks this up automatically during training."""
-        head = ClassificationHead(hidden_dim=HIDDEN_DIM, loss_fn=FLPULoss(prior=0.1))
+        head = ClassificationHead(hidden_dim=HIDDEN_DIM, loss_fn=FLPULoss(prior=0.1), name="test_head")
         _ = head(_dummy_features(), targets=_dummy_targets())
         assert len(head.losses) == 1, (
             f"Expected exactly 1 loss registered via add_loss, got {len(head.losses)}"
@@ -119,7 +130,7 @@ class TestEndpointMode:
         """Inference-time path: targets=None should NOT register a loss,
         even if loss_fn is configured. Otherwise prediction would corrupt
         the aggregated model loss state."""
-        head = ClassificationHead(hidden_dim=HIDDEN_DIM, loss_fn=FLPULoss(prior=0.1))
+        head = ClassificationHead(hidden_dim=HIDDEN_DIM, loss_fn=FLPULoss(prior=0.1), name="test_head")
         _ = head(_dummy_features())
         assert len(head.losses) == 0
 
@@ -128,7 +139,7 @@ class TestEndpointMode:
         even if targets happen to be passed. In standard mode the outer
         Model's compile-time loss handles things; a head that also
         registered a loss would cause double-counting."""
-        head = ClassificationHead(hidden_dim=HIDDEN_DIM, loss_fn=None)
+        head = ClassificationHead(hidden_dim=HIDDEN_DIM, loss_fn=None, name="test_head")
         _ = head(_dummy_features(), targets=_dummy_targets())
         assert len(head.losses) == 0
 
@@ -143,7 +154,7 @@ class TestTrainableWeights:
         a kernel and a bias, gives 4 trainable weight tensors total.
         Dropouts have no weights. A count mismatch typically means the
         head is missing a sub-layer or has an extra one."""
-        head = ClassificationHead(hidden_dim=HIDDEN_DIM)
+        head = ClassificationHead(hidden_dim=HIDDEN_DIM, name="test_head")
         _ = head(_dummy_features())  # build sublayers via first forward pass
         assert len(head.trainable_weights) == 4, (
             f"Expected 4 trainable weight tensors (2 Dense × 2), "

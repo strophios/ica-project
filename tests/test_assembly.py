@@ -174,6 +174,30 @@ class TestBuildEndpointModel:
         # Outputs keyed by head name (not "<head>_targets")
         assert {"cca", "immig"} <= set(model.output_names)
 
+    def test_build_endpoint_model_rejects_duplicate_head_names(
+        self, fresh_backbone
+    ):
+        """Forward-compat boundary-inventory check: same unique-names
+        invariant enforced at call-site (here) and construction-site
+        (ClassificationHead.__init__ requires explicit name). Dict
+        structurally prevents duplicates today, but a future API
+        change (heads as list of pairs) could allow them — the
+        assert is the guard. Test triggers the assert via a
+        mapping-like fake that reports duplicate keys."""
+
+        class _DuplicateKeyHeads:
+            """Test helper: mimics dict.keys() returning duplicates."""
+            def keys(self):
+                return ["x", "x"]
+            def items(self):
+                return []  # Not reached; assert fires first
+            def __len__(self):
+                return 2
+
+        fake_heads = _DuplicateKeyHeads()
+        with pytest.raises(ValueError, match="duplicate"):
+            build_endpoint_model(backbone=fresh_backbone, heads=fake_heads, seq_length=SEQ_LEN)
+
 
 class TestBuildInferenceModel:
     def test_returns_keras_model_not_layer_lr_model(

@@ -132,6 +132,19 @@ def build_endpoint_model(
         — heads handle loss via `add_loss`) and fit.
     """
 
+    # Forward-compat boundary-inventory check: enforce unique head names
+    # at the call site as well as construction-site (ClassificationHead
+    # now requires explicit name). Dict structurally prevents duplicates
+    # today, but a future API change (e.g., heads as list of pairs)
+    # could allow them — this assertion is the forward-compat guard.
+    names = list(heads.keys())
+    if len(set(names)) != len(names):
+        duplicates = sorted({n for n in names if names.count(n) > 1})
+        raise ValueError(
+            f"build_endpoint_model requires unique head names; got "
+            f"duplicates: {duplicates}"
+        )
+
     if freeze_encoder:
         backbone.trainable = False
 

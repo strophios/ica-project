@@ -159,6 +159,14 @@ class HeadConfig:
                 f"HeadConfig.name must be a non-empty string; "
                 f"got {self.name!r}."
             )
+        if "/" in self.name:
+            raise ValueError(
+                f"HeadConfig.name must not contain '/'; got {self.name!r}. "
+                f"'/' is the Keras variable-path separator that "
+                f"_default_group_fn in src/model_setup/assembly.py splits "
+                f"on to group variables by head; a name containing '/' "
+                f"would silently mis-group, breaking discriminative LR."
+            )
         if not isinstance(self.source_column, str) or not self.source_column:
             raise ValueError(
                 f"HeadConfig.source_column must be a non-empty string; "

@@ -1,5 +1,9 @@
-"""
-Script to create and train a toy model to facilitate (local) testing.
+"""Sandbox script exercising the endpoint-layer training pattern
+with the Tier 2 abstractions (load_dapt_backbone +
+ClassificationHead + build_endpoint_model).
+
+Does NOT exercise standard-mode training — that path is covered
+by tests/test_heads.py and tests/test_assembly.py.
 """
 
 import keras
@@ -184,26 +188,3 @@ trial_model.fit(
 )
 
 # There may be an issue with the profiler; leads to a warning during training, may or may not impact the usefulness of profiler
-
-preprocess = src.preproc.preprocessor.ClassifierPreprocessor(
-    SEQ_LENGTH=SEQ_LENGTH,
-    text_key="headline_with_lead",
-    label_key="cca_label",
-    endpoint_model=False,
-)
-
-# cca_classifier = src.model_setup.classification_setup.classifier_from_dapt_checkpoint(
-#     str(config.DAPT_BACKBONE_WEIGHTS)
-# )  # retired in Tier 2 Piece 4c — use load_dapt_backbone + ClassificationHead +
-#    # build_endpoint_model from src.model_setup instead. This scratch script is
-#    # slated for Tier 4 hygiene cleanup.
-raise RuntimeError(
-    "test_script.py is partially broken pending Tier 4 cleanup; the "
-    "classifier-construction path was retired in Piece 4c."
-)
-cca_classifier.compile(
-    optimizer=optimizer,
-    loss=keras.losses.BinaryCrossentropy(from_logits=True),
-    jit_compile=False,
-)
-cca_classifier.fit(trial_set, epochs=EPOCHS, steps_per_epoch=steps_per_epoch)

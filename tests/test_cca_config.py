@@ -177,6 +177,17 @@ class TestHeadConfigValidation:
                 loss={"prior": 0.02},  # type: ignore[arg-type]
             )
 
+    def test_rejects_name_containing_slash(self):
+        """Head names with '/' collide with Keras's variable-path
+        separator used by _default_group_fn (assembly.py:54-65)."""
+        with pytest.raises(ValueError, match="/"):
+            HeadConfig(
+                name="cca/v2",
+                source_column="cca_label",
+                hidden_dim=768,
+                loss=FLPULossConfig(prior=0.02),
+            )
+
 
 class TestRatioBatchConfigValidation:
     def test_valid_defaults(self):

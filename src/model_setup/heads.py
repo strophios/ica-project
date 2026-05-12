@@ -93,9 +93,12 @@ class ClassificationHead(keras.layers.Layer):
         original metric instances passed in are not mutated.
         Symmetric with `loss_fn`: both fire only when targets are
         provided, both are part of the endpoint-layer pattern.
-    name : str or None
-        Passed to `keras.layers.Layer.__init__`. Appears in
-        `model.summary()` output and is used for serialization.
+    name : str
+        Required keyword-only parameter. Passed to
+        `keras.layers.Layer.__init__`. Appears in `model.summary()`
+        output and is used for serialization. Must be non-None to
+        prevent accidental Keras auto-generated name collisions across
+        multiple heads.
 
     Notes
     -----
@@ -112,8 +115,16 @@ class ClassificationHead(keras.layers.Layer):
         dropout=0.1,
         loss_fn=None,
         metrics=None,
-        name=None,
+        *,
+        name,
     ):
+        if name is None:
+            raise ValueError(
+                "ClassificationHead requires an explicit name; name=None "
+                "would fall back to Keras auto-generated names "
+                "(e.g., 'classification_head_1') which collide silently "
+                "across heads in a multi-head model."
+            )
         super().__init__(name=name)
         self.hidden_dim = hidden_dim
         self.dropout_rate = dropout
