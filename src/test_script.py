@@ -1,9 +1,13 @@
-"""Sandbox script exercising the endpoint-layer training pattern
-with the Tier 2 abstractions (load_dapt_backbone +
-ClassificationHead + build_endpoint_model).
+"""Sandbox script exercising an inline endpoint-layer training
+pattern (pre-Tier-2 shape: raw keras_hub Backbone + ad-hoc
+EndpointLayer + plain keras.Model). Predates and does not use
+the Tier 2 abstractions (load_dapt_backbone, ClassificationHead,
+build_endpoint_model) — those are exercised in production scripts
+(src/run_cca_classification.py) and in
+scripts/smoke_test_integrated_stack.py.
 
-Does NOT exercise standard-mode training — that path is covered
-by tests/test_heads.py and tests/test_assembly.py.
+Tier 4 Piece 1 deleted the stub-commented second half referring
+to the retired classifier_from_dapt_checkpoint API.
 """
 
 import keras
