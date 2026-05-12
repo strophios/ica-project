@@ -368,6 +368,11 @@ class LRScheduleConfig:
         571.75 → 571) and the project doesn't rely on byte-exact
         reproduction.
         """
+        # Input validation duplicated from ResolvedSteps.__post_init__
+        # (intentional): this boundary check produces a clearer error
+        # message at the public-API level before attempting the
+        # ResolvedSteps construction. Invariant: any change to the
+        # input rules must be applied to both places.
         if not isinstance(steps_per_epoch, int) or isinstance(
             steps_per_epoch, bool
         ):

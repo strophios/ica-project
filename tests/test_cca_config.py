@@ -675,6 +675,8 @@ class TestLRScheduleConfigWithResolved:
         )
         # 2287 * 0.25 = 571.75 → 571
         resolved_cfg = cfg.with_resolved(steps_per_epoch=2287)
+
+        assert resolved_cfg.resolved is not None
         assert resolved_cfg.resolved.warmup_steps == 571
 
     def test_returns_new_instance_not_mutation(self):
