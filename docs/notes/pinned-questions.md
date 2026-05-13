@@ -491,3 +491,79 @@ When this comes off the pin:
   preprocessor split" explanation.
 
 ---
+
+## 4. Is "scope-creep correction via revert" a real pattern, or a one-off?
+
+**Pinned:** 2026-05-12 (during Tier 4 lessons-docs revision).
+
+### The observation
+
+Tier 4 Piece 2 closeout produced one instance of a candidate workflow
+pattern. When a bug-fixer subagent produced an unrequested commit (a
+factually-inaccurate CLAUDE.md update alongside the actually-requested
+two minor fixes), the orchestrator reverted the unrequested commit
+(`0188f39` → `4143c3a`) rather than editing it to correct the errors.
+The wanted work survived in a separate commit; only the scope creep
+was undone. The orchestrator's reasoning: editing the scope-creep
+commit accepts the scope as fait accompli and signals to future
+subagents that any work they produce is fair game.
+
+This *might* be a workflow pattern worth cataloging — "treat revert
+as the default response to subagent scope creep" — but at n=1, that's
+a claim, not evidence.
+
+### What we know
+
+- The mechanic works: reverting cleanly removed the unwanted work
+  without affecting the wanted work.
+- The signaling argument is plausible: orchestrators that edit-rather-
+  than-revert in response to scope creep arguably let scope discipline
+  erode across subagent dispatches.
+- It worked in this particular case because the scope creep was in a
+  separable commit.
+
+### What we don't know
+
+- Does the signaling effect actually compound across subagent
+  dispatches, or does each dispatch reset the contract independently?
+  Subagents don't have cross-dispatch memory, but the orchestrator
+  does — the question is whether the orchestrator's own behavior
+  shifts toward absorbing creep when they edit rather than revert.
+- How to handle scope creep that's mixed with wanted work in a single
+  commit (no clean revert target)? Cherry-pick + amend? Accept the
+  creep? Revert the whole thing and re-dispatch the wanted work?
+- Is there a threshold below which revert is over-reaction? A scope
+  creep that's one extra line of comment vs. an unrequested file?
+  The framing has been about workflow signaling, but the cost-benefit
+  may not justify revert for trivial creeps.
+
+### What deferring means
+
+Not adding this to `docs/notes/process-patterns.md` yet. The
+Validated/Developing framework in that doc requires ≥2 independent
+applications + an articulable boundary condition; we have 1
+application and the boundary conditions above are speculative.
+Promoting now would either undermine the promotion rule or require
+accepting the speculative conditions as if we'd tested them.
+
+### What deeper engagement would look like
+
+- Look for additional instances. Each future subagent dispatch is a
+  candidate; the orchestrator should track whether scope creep occurs
+  and what response was used.
+- After 2-3 instances, evaluate: was revert always the right response?
+  Are there cases where edit was better? What distinguishes them?
+- If the pattern stabilizes, promote to `process-patterns.md`
+  (probably Developing first, Validated once boundary conditions are
+  confirmed by actual variation rather than asserted in advance).
+
+### Related touchpoints
+
+- This session's commits `0188f39` (the scope-creep commit) and
+  `4143c3a` (the revert).
+- `docs/notes/process-patterns.md` — where this would land once
+  promoted.
+- The orchestrator-subagent dispatch pattern in general (no single
+  doc; spread across implementation plan execution).
+
+---

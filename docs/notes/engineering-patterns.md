@@ -62,7 +62,7 @@ The boundary-inventory pattern starts with a question: where do data or configur
 
 Applied in Tier 3 Piece 1: the preprocessor's dual-boundary validation caught two different failure modes. Applied in Tier 4 Piece 1 M4: head-name validation appears at two boundaries — `ClassificationHead.__init__` requires explicit naming (catches "I forgot to name this"); `build_endpoint_model` asserts unique names across all heads (catches "I named two things the same"). The pattern's power comes from the fact that each boundary checks exactly what it can see. A constructor can't see how many other heads are being built; an assembly function can't check internal dataclass consistency. Validating at both points is redundant in the happy path but catches different failure modes.
 
-Apply this pattern to data-flow boundaries. When designing a multi-part system (preprocessor + model; data loading + training), inventory the handoff points and decide what each should validate. Don't try to do all validation in one place — you'll either over-validate at one boundary (expensive) or under-validate at others (dangerous).
+When designing a multi-part system (preprocessor + model; data loading + training), inventory the handoff points and decide what each should validate. Don't try to do all validation in one place — you'll either over-validate at one boundary (expensive) or under-validate at others (dangerous).
 
 ### Synthetic stand-ins for heavyweight dependencies in fast tests
 
@@ -96,7 +96,7 @@ Tier 3 Piece 3a chose wrapped for the loss config: `FLPULossConfig` groups the f
 
 Tier 4 Piece 2 applied the pattern again: `ResolvedSteps` groups `warmup_steps`, `decay_steps`, and `steps_per_epoch` inside `LRScheduleConfig`. These three fields are computed together at train time and are useless separately. If future schedule types (cyclical, polynomial decay) add more train-time-computed fields, `ResolvedSteps` grows as a unit. The wrapped shape makes it clear: "this is the computed record of what the schedule needs"; it's separate from the factor-input (`warmup_steps_factor`, `decay_steps_factor`).
 
-Apply this pattern when designing config objects. Ask: will these fields evolve together? Will future variants add different fields? Do they form a coherent semantic group? If yes to any of these, wrap them. If the fields are unrelated (field A for loss, field B for optimizer, field C for logging), don't wrap — keep them flat. The cost-benefit only works if the nesting carries meaning.
+When designing config objects, ask: will these fields evolve together? Will future variants add different fields? Do they form a coherent semantic group? If yes to any of these, wrap. If the fields are unrelated (field A for loss, field B for optimizer, field C for logging), keep them flat. The cost-benefit only works if the nesting carries meaning.
 
 ---
 
