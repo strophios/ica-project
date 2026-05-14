@@ -218,7 +218,10 @@ class LayerLRModel(keras.Model):
             # so a partial last batch contributes proportionally to the
             # epoch mean.
             self._loss_tracker.update_state(
-                loss, sample_weight=tf.shape(tf.nest.flatten(x)[0])[0]
+                loss,
+                sample_weight=tf.shape(
+                    next(t for t in tf.nest.flatten(x) if t is not None)
+                )[0],
             )
             # Loss scaling for LossScaleOptimizer (no-op for plain
             # optimizers). MUST happen inside the GradientTape context
