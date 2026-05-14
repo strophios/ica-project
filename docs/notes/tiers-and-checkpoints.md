@@ -1,6 +1,6 @@
 # Audit and Refactor: Tiers, Checkpoints, and Process
 
-*Last updated: 2026-05-09 (Tier 3 closeout: adversarial review done, fix-pass done, deferrals documented. Tier 3 complete.).*
+*Last updated: 2026-05-14 (Tier 4 complete: hygiene + I4 LR resolution + lessons docs. Cross-phase review done; post-Tier-4 lessons-docs revision pass also done. 220 tests passing.).*
 
 This doc exists so that a new session — whether picked up by you after
 weeks away, by a fresh LLM collaborator, or by someone else entirely —
@@ -12,6 +12,10 @@ It pairs with (but does not duplicate):
 - `CLAUDE.md` — the orientation doc for the project as a whole.
 - `docs/notes/pinned-questions.md` — substantive questions deliberately
   deferred for deeper engagement, with enough context to re-engage.
+- `docs/notes/process-patterns.md` and `docs/notes/engineering-patterns.md`
+  — catalogs of process and engineering patterns validated through
+  Tier 2/3/4 work, each with per-pattern metadata (validation status,
+  first/last used, known boundary conditions) plus prose.
 - `scratchpad.md` at the repo root — the user's working notes, including
   the original audit findings.
 
@@ -76,7 +80,18 @@ history; the substantive findings are addressed in `8685c47`.
   - **Piece 4 done** (commit `96ea283`). Original-scope test coverage. `tests/test_data_splits.py` extended with `TestLabelConstruction` (11 tests covering all four boolean combinations of `(cca, cca_descriptor) → cca_label` and `(immig, immig_descriptor) → immig_label`, plus integer-dtype assertions and a per-row independence test). `tests/test_data_loading.py` is new — 11 tests across `TestParquetMissingValueHandling` (null and `"NA"` substitution in `headline`/`lead_paragraph`) and `TestHeadlineWithLeadConcatenation` (the `headline + "</s>" + lead` build across all empty/normal combinations). Tests use pytest's `tmp_path` fixture to write small parquet files into temporary directories and call `data_from_parquet(tmp_path, ...)` — no production data needed. Three style observations flagged on the data-loading code (Python list comprehension for `headline_with_lead` rather than vectorized polars expression; list comprehension used for side-effect on `cols_to_select`; implicit ordering between `fill_null` and `"NA"` substitution); not bugs, deferred to Tier 4 hygiene if useful. Implemented via subagent delegation; output verified before commit. Suite: 167 → 189 passing.
   - **Closeout done** (this commit). Adversarial review of cumulative Tier 3 (commits `76c353f..96ea283`) returned 1 Critical + 8 Important + 7 Minor. Fixed in this commit: **C1** (round-trip test reframed to explicitly pin no-op-load-protection — same-seeded backbones + `freeze_encoder=True`, so post-load match is achievable only via actual head-weight load); **I1** (`expected_columns` wired into train/eval scripts + smoke test, making the 3-layer validation hierarchy real); **I3** (eval-side metrics dropped — empirically verified metric state vars aren't in `head.weights`); **I5** (finite test dataset for `evaluate()`, removing the `test_steps = validation_steps` approximation); **I6** (multi-head metric distinctness test added); **I7** (Layer-2 string-dtype check on `inputs[text_key]` in preprocessor `__call__`); **I8 interim** (metrics factored into `src/cca_metrics.py::make_cca_metrics()`; both production scripts use it; eval doesn't construct metrics at all). Deferred with explicit notes: **I2** (smoke-test exercises instance-attribute path, not class-property path — documented in smoke test docstring); **I4** (LR schedule resolution gap — sidecar carries factors, not resolved step counts; documented in design doc with revisit criteria); **I8 full** (metrics in RunConfig with JSON serialization — pinned for proper engagement when metric configurations become a research dimension). Tier 4 hygiene scope: M1–M7 (cosmetic / dead-comment / minor enforcement gaps). Suite: 189 → 192 passing. Smoke test: still passes (Pattern A vs Pattern 2 max-diff 0.00e+00). See `docs/notes/tier3-design.md` "Tier 3 closeout" subsection for the full triage and review-shape lessons.
 
-**Tier 3 complete.** All four implementation pieces + closeout done. Next session can move to Tier 4 (hygiene) or to deferred empirical / research items.
+**Tier 3 complete.** All four implementation pieces + closeout done.
+
+**Tier 4 complete.** Three pieces (hygiene + I4 LR resolution + lessons docs), each landing as main + closeout commits, plus a final cross-phase review and a post-Tier-4 lessons-docs revision pass. See `docs/notes/tier4-design.md` for design reasoning.
+
+  - **Piece 1 done** (commits `a3505ae` + `44b1faf`). Hygiene fixes from the Tier 2/3 inherited deferred list: M1 (`src/test_script.py` second-half deletion, lines 188-209 referencing the retired `classifier_from_dapt_checkpoint`), M3 (`HeadConfig.__post_init__` rejects head names containing `/`, which is Keras's variable-path separator used by `_default_group_fn` for discriminative-LR grouping), M4a (`ClassificationHead.__init__` requires explicit `name` — keyword-only, no default; `None` explicitly rejected with a ValueError), M4b (`build_endpoint_model` asserts unique head names — same invariant at construction-site as M4a, applying the boundary-inventory pattern at two boundaries). Closeout commit tightened a too-loose regex in the M4b test. Suite: 192 → 196 passing.
+  - **Piece 2 done** (commits `017dffe` + `9d92c17`). I4 LR schedule resolution via nested `ResolvedSteps`. New frozen dataclass `ResolvedSteps(warmup_steps, decay_steps, steps_per_epoch)` in `src/cca_config.py`; `LRScheduleConfig` extended with `resolved: ResolvedSteps | None = None` field, `with_resolved(steps_per_epoch)` method using `math.floor(factor * steps_per_epoch)`, and `_from_dict` reconstruction with backward compat for older sidecars missing the key. `src/run_cca_classification.py` rewired: calls `with_resolved` after computing `steps_per_epoch`; `keras.optimizers.schedules.CosineDecay` reads `resolved.warmup_steps` and `resolved.decay_steps` rather than multiplying factors inline. Sidecar is now self-sufficient for LR schedule reconstruction (closes I4 from the Tier 3 closeout deferred list). Numerical note: explicit `math.floor` is a deliberate change from the prior float-passing behavior (effect e.g. 571.75 → 571; well below training noise floor; project doesn't rely on byte-exact reproduction). Closeout commit documented the deliberate validation duplication between `with_resolved` (boundary-condition error-message clarity) and `ResolvedSteps.__post_init__`; also added a type-narrowing assert in one test. Suite: 196 → 220 passing (24 new tests, several from `@pytest.mark.parametrize` expansion).
+  - **Piece 3 done** (commits `ffa6efc` + `8476848`). Lessons docs. `docs/notes/process-patterns.md` (4 Validated + 1 Developing content-agnostic process patterns: Pedagogical pattern, Adversarial review after implementation, Design-doc-per-tier as living working doc + Post-review corrections section, Deferred-with-explicit-notes discipline; Skill-orchestrated design workflow as Developing). `docs/notes/engineering-patterns.md` (3 Validated + 2 Developing CS-specific patterns: Boundary-inventory pattern, Synthetic stand-ins for heavyweight dependencies, Wrapped-vs-flat forward-compat for config sub-objects; Pattern A vs Pattern 2 model sharing, Empirical investigation before committing to design as Developing). I2 dual-captured as the canonical boundary-condition example in the Synthetic-stand-ins entry. Closeout commit fixed 6 factual-accuracy issues against git history (dates, commit hashes, the Tier 2 review finding count) plus added a missing rationale sentence to engineering-patterns' Promotion rule. Suite unchanged (docs only); 220 passing.
+  - **Cross-phase review done** (commit `76d569a`). Final cross-phase review across the whole Tier 4 closeout surfaced one Minor: `src/test_script.py`'s post-Piece-1 docstring misattributed the file's content as using the Tier 2 abstractions when in fact lines 1-185 use pre-Tier-2 inline shape (raw `keras_hub.models.Backbone.from_preset`, ad-hoc `EndpointLayer`, plain `keras.Model`). Closeout commit rewrote the docstring to accurately describe the file's actual shape and direct readers to the production scripts for examples of the Tier 2 abstractions in use.
+  - **CLAUDE.md update done** (commit `f536153`, via project-claude-librarian subagent). 8 targeted edits: freshness date, test count, per-file test counts, M4a/M4b contracts, new `ResolvedSteps` API, Piece-by-piece status, residual deferrals. Replaced an earlier scope-creep CLAUDE.md attempt (`0188f39`) that was reverted (`4143c3a`) because of factual errors — Question 4 in `pinned-questions.md` captures the workflow observation that came out of that.
+  - **Post-Tier-4 lessons-docs revision pass done** (commits `2b0feec` + `9b50c8a` + `e3f601f`). A read-through identified substance gaps in the original rapid-implementation drafts of the Piece 3 lessons docs. The Pedagogical-pattern entry was structurally correct but analytically thin — missed the actual *pedagogical* point (the user learns by being made to engage with substance dialogically, not just by having reasoning preserved for retrospective reading). Revision rewrote the entry, added a sub-pattern (human implementation at key code points with scaffolding), and added two new Validated entries to `process-patterns.md` (Investigator-subagent pattern; Implementation plans with file:line specificity). Four metadata-restating closing paragraphs across both lessons docs were trimmed. A new Question 4 in `pinned-questions.md` captured the n=1 "scope-creep correction via revert" observation. A new boundary condition was added to the Skill-orchestrated entry (substantive-prose work breaks the skill chain's TDD-equivalent forcing function). CLAUDE.md refreshed via the librarian. Suite still 220.
+
+**Whole-project final review:** Line 43 of this doc anticipated "a final adversarial pass over the whole" after Tier 4. What actually happened: each tier received its own cumulative adversarial review (Tier 1's at `8685c47`, Tier 2's at `079deff`, Tier 3's at `987a8c0`, Tier 4's at `76d569a`). A single whole-project review covering Tier 1+2+3+4 cumulatively was not run. Whether the per-tier reviews collectively suffice, or whether a single end-state pass is still worth doing, is a decision point for a future session.
 
 - `789d88c` — Piece 1: `ClassificationHead` for multi-head refactor.
   Head-as-Layer abstraction, supports both standard mode (loss via
@@ -417,18 +432,43 @@ The S6 looping issue (`steps=validation_steps` on test predict
 producing duplicate predictions) was fixed during Tier 2 Piece 4c
 and doesn't need Tier 3 treatment.
 
-# Tier 4: Hygiene
+# Tier 4: Closeout (hygiene + I4 + lessons docs)
 
-Planned, not started. Scope includes:
+**Done.** Scope expanded beyond the original "Hygiene" framing
+(see `docs/notes/tier4-design.md` for the design reasoning) to
+three pieces: selected hygiene fixes from the Tier 2/3 inherited
+deferred list, the I4 LR-resolution carry-over from Tier 3, and
+new lessons-docs work. Per-piece breakdown is in the "Where we
+are" section above; for the design reasoning see
+`docs/notes/tier4-design.md`.
+
+**Items from the original Tier 4 placeholder scope still pending**
+(low-priority cumulative sweep work; pick up when the cost-benefit
+warrants):
 
 - Move scratch files (`test_module.py`, `test_script.py`,
-  `endpoint_layer_test.py`) to `scratch/` or `scripts/scratch/`. Extract
-  the useful "save DAPT backbone weights" logic from `test_module.py`
-  into `model_setup/` as a real function.
-- Remove commented-out dead code from `preprocessor.py`, `dapt_data.py`,
-  and the exploration-log block in `dapt.py`.
-- Consider archiving or deleting `ramaswamy2016.py` (confirmed dropped).
+  `endpoint_layer_test.py`) to `scratch/` or `scripts/scratch/`,
+  with the useful "save DAPT backbone weights" logic from
+  `test_module.py` extracted into `model_setup/` as a real
+  function.
+- Remove commented-out dead code from `preprocessor.py`,
+  `data.py` (formerly `dapt_data.py`), and the exploration-log
+  block in `dapt.py`.
+- Archive or delete `ramaswamy2016.py`.
 - Minor style / import cleanups.
+
+**Note on pre-Tier-2 sandbox state in `test_script.py`:** Tier 4
+Piece 1 deleted the file's dead second half (lines 188-209,
+referencing the retired `classifier_from_dapt_checkpoint`), but
+the kept first half (lines 1-185) still uses pre-Tier-2 inline
+shape (raw `keras_hub.models.Backbone.from_preset`, ad-hoc
+`EndpointLayer`, plain `keras.Model`). The docstring was updated
+in the cross-phase-review closeout (`76d569a`) to accurately
+describe this state. Reshape into the Tier 2 abstractions is a
+candidate follow-up if the file's pedagogical / sandbox value
+justifies the work; not a current priority since the production
+stack is covered by `run_cca_classification.py`,
+`eval_cca_classifier.py`, and the integrated smoke test.
 
 # How to pick up mid-work
 
@@ -442,9 +482,14 @@ comes back later. To reconstruct state:
    current tier and what is pending.
 4. `cat docs/notes/pinned-questions.md` — knows the substantive deferred
    questions.
-5. `cat scratchpad.md` — the original audit findings and user working
+5. `cat docs/notes/process-patterns.md` and
+   `docs/notes/engineering-patterns.md` — catalogs of process and
+   engineering patterns validated through Tier 2/3/4 work; useful for
+   "do we have an approach for X?" lookups and pattern-suggestion when
+   designing.
+6. `cat scratchpad.md` — the original audit findings and user working
    notes.
-6. `uv run pytest tests/ -q` — confirm the test suite still passes.
+7. `uv run pytest tests/ -q` — confirm the test suite still passes.
 
 If a design doc exists for the current tier
 (e.g., `docs/notes/tier2-design.md`), read that next.
