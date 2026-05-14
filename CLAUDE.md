@@ -2,7 +2,7 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
-*Last updated: 2026-05-12 (Tier 4 closeout: Piece 1 hygiene (M1 + M3 + M4a/b) done, Piece 2 (I4 — LR schedule resolution via nested `ResolvedSteps`) done, Piece 3 (lessons docs) done; Tier 4 complete; 220 tests passing).*
+*Last updated: 2026-05-14 (post-Tier-4 lessons docs revision pass, commit `2b0feec` on 2026-05-13: Pedagogical pattern reframed to foreground pedagogy-through-dialogue rather than retrospective reasoning-preservation; two new Validated process patterns added — Investigator-subagent and Implementation plans with file:line specificity; new Question 4 added to pinned-questions.md; four closing-paragraph trims across process- and engineering-patterns. Tier 4 closeout state otherwise unchanged; 220 tests passing).*
 
 ## Project Overview
 
@@ -135,9 +135,9 @@ The project implements a three-phase pipeline, each with dedicated training scri
 - `docs/notes/tier2-design.md` — per-piece design reasoning for Tier 2.
 - `docs/notes/tier3-design.md` — per-piece design reasoning for Tier 3, with overall boundary-inventory framing for the I3/I4/I5 inherited findings.
 - `docs/notes/tier4-design.md` — per-piece design reasoning for Tier 4 (hygiene + I4 LR schedule resolution + lessons docs).
-- `docs/notes/process-patterns.md` — content-agnostic process patterns extracted across Tiers 1–4 (pedagogical, adversarial-review, design-doc-per-tier, deferred-with-explicit-notes, skill-orchestrated-workflow). Validated + Developing tiers with explicit promotion criteria. New in Tier 4 Piece 3.
-- `docs/notes/engineering-patterns.md` — CS-specific patterns extracted across Tiers 1–4 (boundary-inventory, synthetic-stand-ins, wrapped-vs-flat-forward-compat, Pattern-A-vs-Pattern-2, empirical-investigation-before-design). New in Tier 4 Piece 3.
-- `docs/notes/pinned-questions.md` — deliberately deferred substantive questions, currently covering (1) composing nnPU + α + γ + ALUM across a four-layer framing, (2) extension to multi-class heads, and (3) `ClassifierPreprocessor` train/predict shape — config-vs-call-mode design smell, with a candidate `for_training` / `for_prediction` method-split refactor sketched.
+- `docs/notes/process-patterns.md` — content-agnostic process patterns extracted across Tiers 1–4 (pedagogical, adversarial-review, investigator-subagent, design-doc-per-tier, implementation-plans-with-file:line-specificity, deferred-with-explicit-notes, skill-orchestrated-workflow). Validated + Developing tiers with explicit promotion criteria. New in Tier 4 Piece 3; revised in `2b0feec` (2026-05-13) — Pedagogical pattern entry rewritten to foreground pedagogy-through-dialogue (substantive engagement with material the user would otherwise gloss over) over the original retrospective reasoning-preservation framing, with a "human implementation at key code points with scaffolding" sub-pattern as an alternative form of the same animating intent; two new Validated entries (investigator-subagent — cognitive-separation value, not just labor division; and implementation-plans-with-file:line-specificity — encodes the planner's reading rather than asking the implementor to re-discover).
+- `docs/notes/engineering-patterns.md` — CS-specific patterns extracted across Tiers 1–4 (boundary-inventory, synthetic-stand-ins, wrapped-vs-flat-forward-compat, Pattern-A-vs-Pattern-2, empirical-investigation-before-design). New in Tier 4 Piece 3; trimmed in `2b0feec` (closing-paragraph metadata-restating openers removed from boundary-inventory and wrapped-vs-flat entries — structure unchanged at 3 Validated + 2 Developing).
+- `docs/notes/pinned-questions.md` — deliberately deferred substantive questions, currently covering (1) composing nnPU + α + γ + ALUM across a four-layer framing, (2) extension to multi-class heads, (3) `ClassifierPreprocessor` train/predict shape — config-vs-call-mode design smell, with a candidate `for_training` / `for_prediction` method-split refactor sketched, and (4) "scope-creep correction via revert" as a candidate process pattern — captures the n=1 observation from the 2026-05-13 lessons-docs revision session (commits `0188f39 → 4143c3a`) without prematurely promoting to process-patterns.md. Question 4 new in `2b0feec`.
 
 ## Key References (cited in code and memo)
 
