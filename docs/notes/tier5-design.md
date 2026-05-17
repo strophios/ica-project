@@ -65,15 +65,38 @@ New module `src/diagnostics/`:
 
 ```
 src/diagnostics/
-├── trackers.py       # concrete per-step Metric subclasses
-├── periodic.py       # PeriodicDiagnostic base + concrete subclass(es)
-├── callback.py       # DiagnosticsCallback (consumes periodic diagnostics)
-└── factory.py        # build_trackers(...) -> DiagnosticBundle
+├── trackers.py              # concrete per-step Metric subclasses
+├── distribution_metrics.py  # per-head prediction-distribution Metrics + factory
+└── factory.py               # build_trackers(...) -> DiagnosticBundle
 ```
 
-**Class hierarchy is deliberately flat.** Concrete per-step trackers inherit directly from `keras.metrics.Metric`. No abstract `DiagnosticTracker` layer; no aggregation sub-base layer. Aggregation strategy lives inside each concrete class (either by inheriting from `keras.metrics.Mean` when that fits, or by holding its own `tf.Variable`s for max-style or last-value accumulation). Categories are enforced by **registration** in the factory's output dict, not by inheritance — `train_step` dispatches based on dict keys, not `isinstance` checks.
+> **Superseded (Tier 5 Phase 5 planning, 2026-05-16).** The original design
+> introduced `periodic.py` (`PeriodicDiagnostic` base) and `callback.py`
+> (`DiagnosticsCallback`) to run `PredictionDistributionDiagnostic` on a fixed
+> reference batch at epoch / every-N-batch boundaries. Implementation-planning
+> analysis found this subsystem largely redundant with the validation step
+> and prone to a metric-pollution problem (the endpoint model's forward pass
+> mutates head metric state because `ClassificationHead.call` is targets-gated,
+> not training-gated). The genuinely valuable signal — output-distribution
+> shape (`sigmoid(logits)` mean/std/frac_above_0.5) — is obtained more cheaply
+> and correctly as **per-head distribution `keras.metrics.Metric`s** that ride
+> the existing validated `ClassificationHead.metric_objs` path (updated in
+> `head.call`, surfaced via `Layer.metrics` → `Model.metrics`, computed for
+> both the train and val phases per epoch with zero extra forward passes and
+> no pollution). The `PeriodicDiagnostic`/`DiagnosticsCallback`/reference-batch
+> machinery and the `every_n_batches` mode are **not built**. The only thing
+> lost is *sub-epoch* prediction-distribution trajectory, which is already
+> covered for the collapse failure mode by the per-step `correction_triggered`
+> and grad-norm trackers. `DiagnosticBundle["periodic"]` remains as a
+> documented, permanently-empty forward-compat slot (a future ALUM-era
+> periodic diagnostic could repopulate it). The sections below describing
+> `PeriodicDiagnostic`, `DiagnosticsCallback`, the periodic flow, and the
+> reference-batch config fields are retained for decision history but are
+> **not the implemented design**; see `docs/notes/tier5-implementation-plan/phase_05.md`.
 
-`PeriodicDiagnostic` is a separate base class, not a `Metric` subclass. It defines `run(model, reference_batch) -> dict[str, float]` and is invoked by `DiagnosticsCallback` at epoch boundaries (or every N batches per config). Its API surface differs from per-step trackers because what it does is different — separate forward pass on a fixed reference batch, not a byproduct of a training step.
+**Class hierarchy is deliberately flat.** Concrete per-step trackers inherit directly from `keras.metrics.Metric`. No abstract `DiagnosticTracker` layer; no aggregation sub-base layer. Aggregation strategy lives inside each concrete class (either by inheriting from `keras.metrics.Mean` when that fits, or by holding its own `tf.Variable`s for max-style or last-value accumulation). Categories are enforced by **registration** in the factory's output dict, not by inheritance — `train_step` dispatches based on dict keys, not `isinstance` checks. The per-head prediction-distribution metrics (the supersession above) are *not* per-step trackers — they are ordinary `keras.metrics.Metric`s with the standard `update_state(y_true, y_pred)` signature, passed into the head's `metrics=` list alongside `make_cca_metrics()`.
+
+~~`PeriodicDiagnostic` is a separate base class~~ *(superseded — see note above)*. Original intent, retained for history: a separate base class, not a `Metric` subclass, defining `run(model, reference_batch) -> dict[str, float]`, invoked by `DiagnosticsCallback` at epoch boundaries (or every N batches per config) via a separate forward pass on a fixed reference batch.
 
 ### Concrete tracker catalog
 
@@ -112,7 +135,7 @@ def call(
     ...
 ```
 
-With `return_intermediates=True`, returns `(loss, {"positive_risk": ..., "negative_risk": ..., "correction_triggered": ...})`. The three components are already explicit `ops.sum()` calls in the existing implementation (per Tier 3 codebase investigation); exposing them is plumbing, not refactoring.
+With `return_intermediates=True`, returns `(loss, {"positive_risk": ..., "negative_risk": ..., "correction_triggered": ...})`. **Correction (Tier 5 Phase 3 codebase investigation):** `positive_risk` (loss.py:159) and `negative_risk` (loss.py:160-163) are already explicit named `ops.sum()` intermediates — exposing those is pure plumbing. `correction_triggered` is *not* a pre-existing variable: the nnPU non-negativity correction is implicit in the return expressions (`ops.maximum(negative_risk, 0)` in the no-clawback path, the `ops.cond` predicate in the clawback path). It must be newly computed as a per-batch 0/1 indicator, path-dependent: `ops.cast(negative_risk < 0, "float32")` (no-clawback) or `ops.cast(negative_risk < -nn_beta, "float32")` (clawback). A `LossComponentTracker` mean-aggregates this into the "correction rate" the DoD refers to. Adding this indicator does not alter the loss scalar — the loss is computed by the identical expression regardless of `return_intermediates`, so bit-identity between the two paths is structural.
 
 **`ClassificationHead`** gains a `last_components: dict | None` attribute populated during `call()` when diagnostics are enabled. Plain Python attribute, not a `tf.Variable`. Read by `train_step` immediately after the forward pass via head references registered on `LayerLRModel`.
 
@@ -189,6 +212,15 @@ Gradients are observed **after** `tape.gradient` and **before** multiplier scali
 - Inference models built by `build_inference_model` (Pattern 2) do not wire trackers. Diagnostics are training-only.
 - Tracker state vars are `Metric` state, not `Layer` state, so they're not written to `.weights.h5` by `save_weights`. Loading weights into a fresh model leaves trackers initialized at zero — fine, because tracker state is per-epoch and gets reset at the start of training.
 
+### Diagnostics vs. head metrics
+
+The diagnostic trackers introduced here are deliberately separate from the per-head quality metrics `ClassificationHead` already carries (`make_cca_metrics()` → `BinaryAccuracy`, `Precision`, `Recall`, PR-AUC). The two answer different questions and hook in at different points:
+
+- **Head metrics** answer "is the model good?" They consume `y_true`/`y_pred`, update inside `ClassificationHead.call()` during the forward pass, are surfaced via the head's own metrics list, and run in both `train_step` and `test_step`.
+- **Diagnostic trackers** answer "is training healthy?" They consume gradients, loss-component intermediates, and target balance; update in `LayerLRModel.train_step` *after* `tape.gradient`; are surfaced via the `LayerLRModel.metrics` override plus `DiagnosticsCallback`; and run in `train_step` only (no gradients at eval).
+
+The separation is partly forced and partly chosen. **Forced:** gradient-norm and overflow trackers need the gradient tensors, which do not exist until `tape.gradient` runs in `train_step` — they physically cannot live in `head.call()`. **Chosen:** `BatchLabelBalanceTracker` and `LossComponentTracker` *could* technically update inside the head (they need only `y` and the FLPU intermediates, both available in `call()`), but the design routes all diagnostics through the single `train_step` → `DiagnosticBundle` path for uniformity — one dispatch site, one `DiagnosticsConfig`, one callback — rather than splitting the diagnostic surface across two hook points. This is the same animating principle as the loss-component side-channel (`head.last_components`): components are computed where the loss is invoked but *harvested* uniformly at the dispatch site, mirroring how Keras's own `Layer.losses` works. The two surfaces never share state: head metrics live in `Layer.metrics`; diagnostic trackers live in the `DiagnosticBundle` registered on `LayerLRModel`.
+
 ## Existing Patterns
 
 Tier 5 builds on patterns established across Tiers 2–4 and codified in `docs/notes/engineering-patterns.md` / `docs/notes/process-patterns.md`.
@@ -263,7 +295,16 @@ Eight phases. Phases 1–6 deliver code with in-phase tests. Phases 7–8 are em
 
 **Done when:** Regression test passes (existing train_step behavior unchanged when no trackers); dispatch tests pass; `LayerLRModel`'s 13 existing tests still pass.
 
-### Phase 5: Periodic diagnostic + callback
+### Phase 5: Prediction-distribution metrics *(superseded design — was: Periodic diagnostic + callback)*
+
+> **Superseded (2026-05-16).** See the supersession note under "Diagnostic
+> instrumentation: module layout." Phase 5 as implemented creates
+> `src/diagnostics/distribution_metrics.py` (per-head `keras.metrics.Metric`s
+> for `sigmoid(logits)` mean/std/frac_above_0.5 + a `make_distribution_metrics`
+> factory) wired into the head's `metrics=` list in Phase 6 — no
+> `PeriodicDiagnostic`, no `DiagnosticsCallback`, no reference batch, no
+> `every_n_batches`. Authoritative plan: `docs/notes/tier5-implementation-plan/phase_05.md`.
+> The original goal/components below are retained for decision history only.
 
 **Goal:** Implement `PeriodicDiagnostic` base, `PredictionDistributionDiagnostic`, and `DiagnosticsCallback`.
 
