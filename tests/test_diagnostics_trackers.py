@@ -145,3 +145,59 @@ class TestPerGroupGradNormSparse:
             _group_fn_by_first_path_segment,
         )
         assert float(t.result()) == pytest.approx(3.5, rel=1e-5)
+
+
+from hypothesis import given, settings
+from hypothesis import strategies as st
+
+# Realistic positive gradient norms.
+norm_lists = st.lists(
+    st.floats(min_value=0.0, max_value=1e3, allow_nan=False, allow_infinity=False),
+    min_size=1,
+    max_size=10,
+)
+
+
+def _build_grads_with_norms(norms):
+    """Trainable vars + 1-D gradients all in group 'head' with the given norms."""
+    variables = [
+        tf.Variable(tf.zeros([1]), name=f"head/w{i}") for i in range(len(norms))
+    ]
+    gradients = [tf.constant([n]) for n in norms]
+    return variables, gradients
+
+
+class TestPerGroupGradNormProperties:
+    @given(norm_lists)
+    @settings(max_examples=50, deadline=None)
+    def test_mean_equals_sum_div_count(self, norms):
+        variables, gradients = _build_grads_with_norms(norms)
+        t = PerGroupGradNormTracker(group_name="head", aggregation="mean")
+        t.update_state(gradients, variables, _group_fn_by_first_path_segment)
+        expected = sum(norms) / len(norms)
+        assert float(t.result()) == pytest.approx(expected, rel=1e-4, abs=1e-5)
+
+    @given(norm_lists)
+    @settings(max_examples=50, deadline=None)
+    def test_permutation_invariance_within_group(self, norms):
+        va, ga = _build_grads_with_norms(norms)
+        vb, gb = _build_grads_with_norms(list(reversed(norms)))
+        ta = PerGroupGradNormTracker(group_name="head", aggregation="mean")
+        tb = PerGroupGradNormTracker(group_name="head", aggregation="mean")
+        ta.update_state(ga, va, _group_fn_by_first_path_segment)
+        tb.update_state(gb, vb, _group_fn_by_first_path_segment)
+        assert float(ta.result()) == pytest.approx(float(tb.result()), rel=1e-5)
+
+    @given(st.lists(norm_lists, min_size=1, max_size=5))
+    @settings(max_examples=30, deadline=None)
+    def test_max_monotone_non_decreasing(self, norm_sequences):
+        var = tf.Variable(tf.zeros([1]), name="head/w0")
+        t = PerGroupGradNormTracker(group_name="head", aggregation="max")
+        prev = 0.0
+        for norms in norm_sequences:
+            t.update_state(
+                [tf.constant([norms[0]])], [var], _group_fn_by_first_path_segment
+            )
+            current = float(t.result())
+            assert current >= prev
+            prev = current
