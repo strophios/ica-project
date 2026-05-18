@@ -271,7 +271,19 @@ class LayerLRModel(keras.Model):
         # gradients (before per-variable multiplier scaling) plus loss
         # components and targets. No-op when diagnostics aren't configured.
         if self._diagnostic_trackers is not None:
-            self._dispatch_diagnostics(gradients, y)
+            # In endpoint mode, targets are part of x (a dict with keys
+            # like "cca_targets"). Extract them for diagnostic dispatch.
+            # In standard mode, y is the targets dict.
+            targets_for_dispatch = y
+            if y is None and isinstance(x, dict):
+                # Endpoint mode: extract {head}_targets from x into a
+                # {head}: value dict for batch-target tracker consumption.
+                targets_for_dispatch = {}
+                for k, v in x.items():
+                    if k.endswith("_targets"):
+                        head_name = k[:-8]  # Remove "_targets" suffix
+                        targets_for_dispatch[head_name] = v
+            self._dispatch_diagnostics(gradients, targets_for_dispatch)
         # Scale each gradient by its variable's multiplier. Two
         # subtleties handled here:
         #
