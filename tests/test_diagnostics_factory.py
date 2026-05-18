@@ -4,6 +4,7 @@
 
 from __future__ import annotations
 
+import numpy as np
 import pytest
 import tensorflow as tf
 import keras as _keras
@@ -139,6 +140,26 @@ class _LossWithIntermediates(_keras.losses.Loss):
 class _LossWithoutIntermediates(_keras.losses.Loss):
     def call(self, y_true, y_pred):
         return tf.constant(0.0)
+
+
+class TestFLPUComponentKeysSync:
+    def test_flpu_component_keys_in_sync_with_loss_intermediates(self):
+        # Drift guard: factory.py deliberately duplicates the component keys
+        # ("positive_risk", "negative_risk", "correction_triggered") rather
+        # than importing from loss.py (preserves the "factory as functional
+        # core does not import the production machinery" invariant). This test
+        # recovers drift-prevention at the test boundary.
+        from src.diagnostics.factory import _FLPU_COMPONENT_KEYS
+        from src.loss_functions.loss import FLPULoss
+
+        loss = FLPULoss(prior=0.1)
+        # Build a minimal valid batch: 1 positive, 1 unlabeled
+        y_true = np.array([1.0, 0.0], dtype="float32")
+        y_pred = np.array([0.5, -0.5], dtype="float32").reshape(-1, 1)
+
+        _, components = loss.call(y_true, y_pred, return_intermediates=True)
+
+        assert set(components.keys()) == set(_FLPU_COMPONENT_KEYS)
 
 
 class TestBuildTrackersLossComponentGuard:

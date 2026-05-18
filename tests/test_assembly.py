@@ -796,3 +796,35 @@ class TestEndpointDiagnosticsWiring:
         )
         assert not hasattr(inf, "_diagnostic_trackers") or \
             getattr(inf, "_diagnostic_trackers", None) is None
+
+    def test_diagnostics_requires_dict_key_equals_head_name(self, fresh_backbone):
+        """When diagnostics is enabled, dict key must equal head.name.
+        Mismatched keys raise ValueError at build time, preventing later
+        KeyError in _dispatch_diagnostics runtime lookup."""
+        head_with_name = ClassificationHead(
+            hidden_dim=HIDDEN_DIM,
+            loss_fn=FLPULoss(prior=0.1),
+            name="cca",
+        )
+        # Deliberately mismatch: dict key is "wrong_key" but head.name is "cca"
+        with pytest.raises(ValueError, match="dict key.*!= head.name"):
+            build_endpoint_model(
+                backbone=fresh_backbone,
+                heads={"wrong_key": head_with_name},
+                seq_length=SEQ_LEN,
+                diagnostics=DiagnosticsConfig(),
+            )
+
+    def test_diagnostics_matched_key_and_name_succeeds(self, fresh_backbone, fresh_head):
+        """With diagnostics enabled and matched key==name, build succeeds.
+        This is the happy path; the mismatch test above confirms the guard
+        catches drift."""
+        model = build_endpoint_model(
+            backbone=fresh_backbone,
+            heads={"cca": fresh_head},
+            seq_length=SEQ_LEN,
+            diagnostics=DiagnosticsConfig(),
+        )
+        # Confirm the model was built and diagnostics were wired
+        assert model._diagnostic_trackers is not None
+        assert "cca" in model._head_refs_by_name

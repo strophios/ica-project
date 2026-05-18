@@ -147,6 +147,19 @@ def build_endpoint_model(
             f"duplicates: {duplicates}"
         )
 
+    # When diagnostics is enabled, assert that dict keys match head.name.
+    # _dispatch_diagnostics relies on _head_refs_by_name[tracker.head_name]
+    # keyed by head.name, and tracker.head_name derives from the heads-dict
+    # key. These must remain equal for diagnostic head-ref lookup to work.
+    if diagnostics is not None:
+        for k, h in heads.items():
+            if k != h.name:
+                raise ValueError(
+                    f"build_endpoint_model: heads dict key {k!r} != "
+                    f"head.name {h.name!r}; diagnostic head-ref lookup "
+                    f"requires them equal"
+                )
+
     if freeze_encoder:
         backbone.trainable = False
 
