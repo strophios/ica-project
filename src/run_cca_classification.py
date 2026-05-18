@@ -36,6 +36,7 @@ import math
 import src.config as config
 import src.cca_config as cca_config
 from src.cca_metrics import make_cca_metrics
+from src.diagnostics.distribution_metrics import make_distribution_metrics
 import src.data_setup.data
 from src.preproc.preprocessor import ClassifierPreprocessor
 from src.model_setup.backbone import load_dapt_backbone
@@ -263,8 +264,10 @@ cca_head = ClassificationHead(
         prior=_cca_head_config.loss.prior,
         kiryo_clawback=_cca_head_config.loss.kiryo_clawback,
     ),
-    metrics=make_cca_metrics(),
+    metrics=make_cca_metrics()
+    + make_distribution_metrics(run_config.diagnostics),
     name=_cca_head_config.name,
+    expose_loss_components=run_config.diagnostics.enable_loss_components,
 )
 
 # Pattern A: build train + inference models sharing the head and
@@ -277,6 +280,7 @@ cca_classifier = build_endpoint_model(
     heads={_cca_head_config.name: cca_head},
     seq_length=run_config.seq_length,
     freeze_encoder=True,
+    diagnostics=run_config.diagnostics,
 )
 cca_inference = build_inference_model(
     backbone=backbone,
