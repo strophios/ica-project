@@ -401,6 +401,13 @@ class TestExposeLossComponentsFlagOn:
         second = {k: float(v) for k, v in head.last_components.items()}
         assert head.last_components is not None
         assert first.keys() == second.keys()
+        # The test's actual contract: last_components reflects the LATEST
+        # call, not stale state from the first. The inverted-target batch
+        # repartitions positive/unlabeled, so FLPU's risk components must
+        # differ — fail loudly if last_components were stale.
+        assert first != second, (
+            f"last_components appears stale across calls: {first} == {second}"
+        )
 
     def test_inference_call_leaves_last_components_untouched(self):
         head = self._head()
