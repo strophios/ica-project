@@ -342,6 +342,19 @@ inf_model_2 = build_inference_model(
 # and src/model_setup/backbone.py — pinned by Tier 3 Piece 2.
 inf_model_2.load_weights(str(weights_path), skip_mismatch=False)
 
+# Reloaded endpoint model: trackers exist but are at init (Metric state
+# is not persisted in .weights.h5).
+reloaded_endpoint = build_endpoint_model(
+    backbone=backbone_2,
+    heads={_cca_head_config_2.name: cca_head_2},
+    seq_length=run_config_2.seq_length,
+    freeze_encoder=True,
+    diagnostics=run_config_2.diagnostics,
+)
+for _t in reloaded_endpoint._diagnostic_trackers["per_step"]["gradient"]:
+    assert float(_t.result()) == 0.0, f"{_t.name} not reinitialized after load"
+print("[OK] diagnostic trackers reinitialized cleanly after load")
+
 
 # ---------------------------------------------------------------------------
 # Predict (both models, compare)
