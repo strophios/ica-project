@@ -36,7 +36,13 @@ import tensorflow as tf
 
 from src.model_setup.layer_lr_model import LayerLRModel
 from src.model_setup.heads import ClassificationHead
-from src.diagnostics.trackers import PerGroupGradNormTracker, GradientFiniteTracker
+from src.diagnostics.trackers import (
+    PerGroupGradNormTracker,
+    GradientFiniteTracker,
+    LossComponentTracker,
+    BatchLabelBalanceTracker,
+)
+from src.loss_functions.loss import FLPULoss
 
 
 # -----------------------------------------------------------------------------
@@ -624,3 +630,83 @@ class TestGradientDiagnosticDispatch:
         y = rng.randint(0, 2, size=(BATCH, 1)).astype(np.float32)
         model.fit(x, y, epochs=1, batch_size=BATCH, verbose=0)
         assert float(tracker.result()) == 0.0  # finite grads under float32
+
+
+class TestLossComponentBatchTargetDispatch:
+    def test_loss_component_trackers_populated_from_last_components(self):
+        # Build an endpoint LayerLRModel with a single CCA head exposing
+        # loss components (mirror TestWithEndpointLoss setup). Note: batch-target
+        # tracker requires y to be a dict of form {head_name: targets}, which only
+        # works in models where targets are fed separately (not packed into x).
+        # Here we omit the batch_target tracker and focus on loss_component.
+        head = ClassificationHead(
+            hidden_dim=INPUT_DIM,
+            loss_fn=FLPULoss(prior=0.1),
+            name="cca",
+            expose_loss_components=True,
+        )
+        # Inputs: features tensor (what the head expects) plus targets
+        # tensor for the endpoint loss routing.
+        features_input = keras.Input(shape=(INPUT_DIM,), name="features")
+        cca_targets_input = keras.Input(shape=(1,), name="cca_targets")
+
+        # Call head with targets to register add_loss.
+        logits = head(features_input, targets=cca_targets_input)
+
+        lc = LossComponentTracker("cca", "positive_risk", "mean")
+        bundle = {
+            "per_step": {
+                "gradient": [],
+                "loss_component": [lc],
+                "batch_target": [],
+            },
+            "periodic": [],
+        }
+        model = LayerLRModel(
+            inputs={"features": features_input, "cca_targets": cca_targets_input},
+            outputs={"cca": logits},
+            diagnostic_trackers=bundle,
+            diagnostic_head_refs=[head],
+        )
+        model.compile(optimizer=keras.optimizers.SGD(0.01))
+
+        # Train one epoch on synthetic data.
+        rng = np.random.RandomState(42)
+        features = rng.randn(BATCH, INPUT_DIM).astype(np.float32)
+        cca_targets = rng.randint(0, 2, size=(BATCH, 1)).astype(np.float32)
+        model.fit(
+            x={"features": features, "cca_targets": cca_targets},
+            epochs=1,
+            batch_size=BATCH,
+            verbose=0,
+        )
+
+        # Tracker should be populated after one epoch with loss component.
+        assert np.isfinite(float(lc.result()))
+
+    def test_head_ref_lookup_by_name(self):
+        head = ClassificationHead(
+            hidden_dim=INPUT_DIM,
+            loss_fn=FLPULoss(prior=0.1),
+            name="cca",
+            expose_loss_components=True,
+        )
+        features_input = keras.Input(shape=(INPUT_DIM,), name="features")
+        cca_targets_input = keras.Input(shape=(1,), name="cca_targets")
+        logits = head(features_input, targets=cca_targets_input)
+
+        bundle = {
+            "per_step": {
+                "gradient": [],
+                "loss_component": [],
+                "batch_target": [],
+            },
+            "periodic": [],
+        }
+        model = LayerLRModel(
+            inputs={"features": features_input, "cca_targets": cca_targets_input},
+            outputs={"cca": logits},
+            diagnostic_trackers=bundle,
+            diagnostic_head_refs=[head],
+        )
+        assert model._head_refs_by_name == {"cca": head}
