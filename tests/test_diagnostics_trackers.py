@@ -4,13 +4,15 @@
 
 from __future__ import annotations
 
-import numpy as np
+import keras
+import numpy as np  # noqa: F401  # used by BatchLabelBalanceTracker property tests (Phase 1 Task 6)
 import pytest
 import tensorflow as tf
 from hypothesis import given, settings
 from hypothesis import strategies as st
 
 from src.diagnostics.trackers import PerGroupGradNormTracker
+from src.model_setup.assembly import _default_group_fn
 
 
 def _group_fn_by_first_path_segment(var):
@@ -226,16 +228,11 @@ class TestPerGroupGradNormProductionGroupFn:
 
     def test_composes_with_real_default_group_fn(self):
         """Production grouping: real Keras layers expose group via .path."""
-        import keras
-
-        from src.model_setup.assembly import _default_group_fn
-
         # Build two real Keras Dense layers with distinct group names.
         layer_cca = keras.layers.Dense(8, name="cca")
         layer_other = keras.layers.Dense(8, name="other")
 
         # Build them on sample inputs so they have trainable variables.
-        sample_input = tf.constant([[1.0, 2.0, 3.0]])
         layer_cca.build((None, 3))
         layer_other.build((None, 3))
 
