@@ -265,3 +265,81 @@ class TestPerGroupGradNormProductionGroupFn:
         )
         tracker_missing.update_state(grads, variables, _default_group_fn)
         assert float(tracker_missing.result()) == 0.0
+
+
+# Task 4: GradientFiniteTracker
+from src.diagnostics.trackers import (
+    GradientFiniteTracker,
+    LossComponentTracker,
+    BatchLabelBalanceTracker,
+)
+
+
+class TestGradientFiniteTracker:
+    def test_name(self):
+        assert GradientFiniteTracker().name == "grad_overflow_rate"
+
+    def test_all_finite_rate_zero(self):
+        t = GradientFiniteTracker()
+        t.update_state([tf.constant([1.0, 2.0]), tf.constant([3.0])], None, None)
+        assert float(t.result()) == 0.0
+
+    def test_nan_increments_rate(self):
+        t = GradientFiniteTracker()
+        t.update_state([tf.constant([float("nan"), 1.0])], None, None)
+        assert float(t.result()) == pytest.approx(1.0)
+
+    def test_inf_increments_rate(self):
+        t = GradientFiniteTracker()
+        t.update_state([tf.constant([float("inf"), 1.0])], None, None)
+        assert float(t.result()) == pytest.approx(1.0)
+
+    def test_mixed_steps_average_correctly(self):
+        t = GradientFiniteTracker()
+        t.update_state([tf.constant([1.0])], None, None)             # finite
+        t.update_state([tf.constant([float("nan")])], None, None)    # overflow
+        t.update_state([tf.constant([1.0])], None, None)             # finite
+        t.update_state([tf.constant([1.0])], None, None)             # finite
+        assert float(t.result()) == pytest.approx(0.25, rel=1e-5)
+
+    def test_ignores_none_gradients(self):
+        t = GradientFiniteTracker()
+        t.update_state([None, tf.constant([1.0])], None, None)
+        assert float(t.result()) == 0.0
+
+    def test_handles_indexed_slices(self):
+        t = GradientFiniteTracker()
+        slices = tf.IndexedSlices(
+            values=tf.constant([[float("nan")]]),
+            indices=tf.constant([0]),
+            dense_shape=[3, 1],
+        )
+        t.update_state([slices], None, None)
+        assert float(t.result()) == pytest.approx(1.0)
+
+    def test_reset_state(self):
+        t = GradientFiniteTracker()
+        t.update_state([tf.constant([float("nan")])], None, None)
+        t.reset_state()
+        assert float(t.result()) == 0.0
+
+
+class TestGradientFiniteProperties:
+    @given(st.lists(st.booleans(), min_size=1, max_size=20))
+    @settings(max_examples=50, deadline=None)
+    def test_rate_in_zero_one(self, overflow_per_step):
+        t = GradientFiniteTracker()
+        for is_overflow in overflow_per_step:
+            grad = tf.constant([float("nan")] if is_overflow else [1.0])
+            t.update_state([grad], None, None)
+        assert 0.0 <= float(t.result()) <= 1.0
+
+    @given(st.lists(st.booleans(), min_size=1, max_size=20))
+    @settings(max_examples=50, deadline=None)
+    def test_rate_matches_fraction(self, overflow_per_step):
+        t = GradientFiniteTracker()
+        for is_overflow in overflow_per_step:
+            grad = tf.constant([float("nan")] if is_overflow else [1.0])
+            t.update_state([grad], None, None)
+        expected = sum(overflow_per_step) / len(overflow_per_step)
+        assert float(t.result()) == pytest.approx(expected, rel=1e-5, abs=1e-6)

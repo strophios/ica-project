@@ -103,9 +103,51 @@ class PerGroupGradNormTracker(keras.metrics.Metric):
         self._running_max.assign(0.0)
 
 
+def _gradient_is_finite(grad: tf.Tensor | tf.IndexedSlices) -> tf.Tensor:
+    """True iff all elements of the gradient are finite."""
+    values = grad.values if isinstance(grad, tf.IndexedSlices) else grad
+    return tf.reduce_all(tf.math.is_finite(values))
+
+
 class GradientFiniteTracker(keras.metrics.Metric):
-    """Stub for Task 4."""
-    pass
+    """Rate at which a training step contains any non-finite gradient.
+
+    A step counts as 'overflow' if at least one non-None gradient contains
+    NaN or Inf. Under local float32 this is effectively a constant 0.0; under
+    mixed_float16 it is the active diagnostic that observes LossScaleOptimizer
+    dynamic-loss-scaling floor behavior (Tier 5 level-2 acceptance criterion).
+    """
+
+    def __init__(self, **kwargs):
+        super().__init__(name="grad_overflow_rate", **kwargs)
+        self._overflow_steps = self.add_variable(
+            shape=(), initializer="zeros", name="overflow_steps"
+        )
+        self._total_steps = self.add_variable(
+            shape=(), initializer="zeros", name="total_steps"
+        )
+
+    def update_state(self, gradients, variables=None, group_fn=None):
+        # variables/group_fn accepted for uniform gradient-category signature.
+        del variables, group_fn
+        any_nonfinite = tf.constant(False)
+        for grad in gradients:
+            if grad is None:
+                continue
+            any_nonfinite = tf.logical_or(
+                any_nonfinite, tf.logical_not(_gradient_is_finite(grad))
+            )
+        self._overflow_steps.assign_add(
+            tf.cast(any_nonfinite, self._overflow_steps.dtype)
+        )
+        self._total_steps.assign_add(1.0)
+
+    def result(self):
+        return tf.math.divide_no_nan(self._overflow_steps, self._total_steps)
+
+    def reset_state(self):
+        self._overflow_steps.assign(0.0)
+        self._total_steps.assign(0.0)
 
 
 class LossComponentTracker(keras.metrics.Metric):
