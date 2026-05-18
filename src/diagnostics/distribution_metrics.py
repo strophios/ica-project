@@ -105,7 +105,11 @@ class PredictionStdMetric(keras.metrics.Metric):
         mean = ops.divide_no_nan(self._sum, self._count)
         mean_sq = ops.divide_no_nan(self._sum_sq, self._count)
         var = ops.maximum(mean_sq - mean * mean, 0.0)
-        return ops.sqrt(var)
+        # Cast to self.dtype for consistency with sibling metrics (PredictionMeanMetric
+        # and PredictionFracAboveMetric return float32). Accumulation+subtraction
+        # arithmetic stays in float64 for numerical precision; only the final result
+        # is cast back to the metric's declared dtype.
+        return ops.cast(ops.sqrt(var), self.dtype)
 
     def reset_state(self):
         self._sum.assign(0.0)

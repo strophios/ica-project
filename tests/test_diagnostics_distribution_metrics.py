@@ -98,12 +98,17 @@ class TestPredictionStdMetric:
         m.update_state(None, _logits(0.0, 0.0, 0.0))  # all 0.5
         assert float(m.result()) == pytest.approx(0.0, abs=1e-5)
 
-    def test_zero_std_large_constant_logits(self):
-        # Regression test for float32 catastrophic cancellation.
-        # Large constant logits → sigmoid ≈ 1.0 (exactly equal in float32).
-        # E[s²] ≈ E[s]² numerically, but the subtraction must not yield float32 noise.
+    def test_near_saturated_varied_logits_std_no_float32_noise(self):
+        # Regression test for float32 catastrophic cancellation in E[s²]-E[s]².
+        # Near-saturated but varied logits [15,16,17] trigger the 2^-12 cancellation
+        # in float32: pre-fix code yields std ≈ 2.44e-4 due to float32 accumulation,
+        # but the true std ≈ 1.5e-7 (numpy oracle in float64). Tolerance abs=1e-5
+        # fails on pre-fix (2.44e-4 >> 1e-5) but passes on float64-accumulation fix.
+        # This deterministically guards the Phase 7/8 std≈0 collapse signal against
+        # float64→float32 regression.
         m = PredictionStdMetric()
-        m.update_state(None, _logits(30.0, 30.0, 30.0, 30.0))
+        m.update_state(None, _logits(15.0, 16.0, 17.0))
+        # True std of sigmoid([15,16,17]) ≈ 1.5e-7 in float64.
         assert float(m.result()) == pytest.approx(0.0, abs=1e-5)
 
     def test_matches_numpy_population_std(self):
