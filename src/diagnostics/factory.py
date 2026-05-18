@@ -101,6 +101,12 @@ def build_trackers(
             name for name, head in heads.items()
             if _loss_exposes_intermediates(head.loss_fn)
         ]
+        # Deliberate deviation from the plan's literal `if not supporting:`.
+        # The `heads and` guard distinguishes "no heads to track" (a no-op,
+        # e.g. the gradient-only Task-4 test passes heads={}) from "heads
+        # present but none expose return_intermediates" (genuine
+        # misconfiguration -> raise). The literal spec would raise on empty
+        # heads, breaking Phase 2's own gradient-category tests.
         if heads and not supporting:
             raise ValueError(
                 "DiagnosticsConfig.enable_loss_components is True but no "
