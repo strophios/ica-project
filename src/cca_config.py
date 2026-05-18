@@ -461,6 +461,87 @@ class OptimizerConfig:
 
 
 # ---------------------------------------------------------------------------
+# Diagnostics config (Tier 5 Phase 2)
+# ---------------------------------------------------------------------------
+
+# Valid per-step gradient-norm aggregations a run may request. Deliberately
+# duplicates src.diagnostics.trackers._VALID_AGGREGATIONS rather than
+# importing it: cca_config describes runs declaratively and must not import
+# the machinery it configures (FLPULossConfig does not import FLPULoss,
+# OptimizerConfig does not import the optimizer, etc.). The two literals are
+# pinned equal by TestDiagnosticsAggregationConstantSync in
+# tests/test_cca_config.py — change both together.
+_VALID_GRADIENT_AGGREGATIONS = ("max", "mean")
+_VALID_SUMMARY_STATS = ("mean", "std", "frac_above_0.5")
+
+
+@dataclasses.dataclass(frozen=True)
+class DiagnosticsConfig:
+    """Tier 5 diagnostic instrumentation configuration.
+
+    Embedded as the (defaulted) last field of RunConfig. A pre-Tier-5
+    sidecar lacking the 'diagnostics' key reconstructs as DiagnosticsConfig()
+    (all enabled) via RunConfig's default_factory — see RunConfig._from_dict.
+
+    Group names are NOT stored here; they are derived from the model at
+    factory build time by walking trainable_variables with group_fn.
+    """
+
+    enable_gradient_norms: bool = True
+    enable_overflow_proxy: bool = True
+    enable_loss_components: bool = True
+    enable_batch_balance: bool = True
+    enable_prediction_distribution: bool = True
+    gradient_norm_aggregations: tuple[str, ...] = ("max", "mean")
+    prediction_summary_stats: tuple[str, ...] = ("mean", "std", "frac_above_0.5")
+
+    def __post_init__(self):
+        for field_name in (
+            "enable_gradient_norms",
+            "enable_overflow_proxy",
+            "enable_loss_components",
+            "enable_batch_balance",
+            "enable_prediction_distribution",
+        ):
+            value = getattr(self, field_name)
+            if not isinstance(value, bool):
+                raise ValueError(
+                    f"DiagnosticsConfig.{field_name} must be bool; "
+                    f"got {type(value).__name__}."
+                )
+
+        if (
+            not isinstance(self.gradient_norm_aggregations, tuple)
+            or len(self.gradient_norm_aggregations) == 0
+        ):
+            raise ValueError(
+                "DiagnosticsConfig.gradient_norm_aggregations must be a "
+                f"non-empty tuple; got {self.gradient_norm_aggregations!r}."
+            )
+        for agg in self.gradient_norm_aggregations:
+            if agg not in _VALID_GRADIENT_AGGREGATIONS:
+                raise ValueError(
+                    "DiagnosticsConfig.gradient_norm_aggregations entries "
+                    f"must be in {_VALID_GRADIENT_AGGREGATIONS}; got {agg!r}."
+                )
+
+        if (
+            not isinstance(self.prediction_summary_stats, tuple)
+            or len(self.prediction_summary_stats) == 0
+        ):
+            raise ValueError(
+                "DiagnosticsConfig.prediction_summary_stats must be a "
+                f"non-empty tuple; got {self.prediction_summary_stats!r}."
+            )
+        for stat in self.prediction_summary_stats:
+            if stat not in _VALID_SUMMARY_STATS:
+                raise ValueError(
+                    "DiagnosticsConfig.prediction_summary_stats entries must "
+                    f"be in {_VALID_SUMMARY_STATS}; got {stat!r}."
+                )
+
+
+# ---------------------------------------------------------------------------
 # Run config (the top-level container)
 # ---------------------------------------------------------------------------
 

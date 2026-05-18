@@ -771,3 +771,68 @@ class TestLRScheduleConfigJSONRoundTripWithResolved:
 
         reconstructed = RunConfig.from_json(sidecar)
         assert reconstructed.lr_schedule.resolved is None
+
+
+class TestDiagnosticsConfigValidation:
+    def test_default_constructs(self):
+        from src.cca_config import DiagnosticsConfig
+
+        c = DiagnosticsConfig()
+        assert c.enable_gradient_norms is True
+        assert c.enable_prediction_distribution is True
+        assert c.gradient_norm_aggregations == ("max", "mean")
+        assert c.prediction_summary_stats == ("mean", "std", "frac_above_0.5")
+
+    def test_non_bool_enable_raises(self):
+        from src.cca_config import DiagnosticsConfig
+
+        with pytest.raises(ValueError, match="enable_gradient_norms"):
+            DiagnosticsConfig(enable_gradient_norms=1)
+
+    def test_empty_gradient_aggregations_raises(self):
+        from src.cca_config import DiagnosticsConfig
+
+        with pytest.raises(ValueError, match="gradient_norm_aggregations"):
+            DiagnosticsConfig(gradient_norm_aggregations=())
+
+    def test_invalid_gradient_aggregation_value_raises(self):
+        from src.cca_config import DiagnosticsConfig
+
+        with pytest.raises(ValueError, match="gradient_norm_aggregations"):
+            DiagnosticsConfig(gradient_norm_aggregations=("median",))
+
+    def test_non_tuple_gradient_aggregations_raises(self):
+        from src.cca_config import DiagnosticsConfig
+
+        with pytest.raises(ValueError, match="gradient_norm_aggregations"):
+            DiagnosticsConfig(gradient_norm_aggregations=["max"])
+
+    def test_invalid_summary_stat_raises(self):
+        from src.cca_config import DiagnosticsConfig
+
+        with pytest.raises(ValueError, match="prediction_summary_stats"):
+            DiagnosticsConfig(prediction_summary_stats=("variance",))
+
+    def test_non_tuple_summary_stats_raises(self):
+        from src.cca_config import DiagnosticsConfig
+
+        with pytest.raises(ValueError, match="prediction_summary_stats"):
+            DiagnosticsConfig(prediction_summary_stats=["mean"])
+
+    def test_enable_prediction_distribution_false_ok(self):
+        from src.cca_config import DiagnosticsConfig
+
+        assert DiagnosticsConfig(enable_prediction_distribution=False).enable_prediction_distribution is False
+
+
+class TestDiagnosticsAggregationConstantSync:
+    def test_valid_aggregations_in_sync_with_trackers(self):
+        # Drift guard: cca_config deliberately duplicates the
+        # ("max","mean") literal rather than importing from
+        # diagnostics.trackers (preserves the "config does not import
+        # the machinery it configures" invariant). This test recovers
+        # drift-prevention at the test boundary.
+        from src.cca_config import _VALID_GRADIENT_AGGREGATIONS
+        from src.diagnostics.trackers import _VALID_AGGREGATIONS
+
+        assert _VALID_GRADIENT_AGGREGATIONS == _VALID_AGGREGATIONS
