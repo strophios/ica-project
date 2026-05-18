@@ -343,3 +343,101 @@ class TestGradientFiniteProperties:
             t.update_state([grad], None, None)
         expected = sum(overflow_per_step) / len(overflow_per_step)
         assert float(t.result()) == pytest.approx(expected, rel=1e-5, abs=1e-6)
+
+
+class TestLossComponentTrackerBasics:
+    def test_name_pattern(self):
+        t = LossComponentTracker(
+            head_name="cca", component_key="positive_risk", aggregation="mean"
+        )
+        assert t.name == "cca/positive_risk/mean"
+
+    def test_invalid_aggregation_raises(self):
+        with pytest.raises(ValueError, match="aggregation"):
+            LossComponentTracker(
+                head_name="cca", component_key="positive_risk", aggregation="median"
+            )
+
+    def test_empty_head_name_raises(self):
+        with pytest.raises(ValueError, match="head_name"):
+            LossComponentTracker(
+                head_name="", component_key="positive_risk", aggregation="mean"
+            )
+
+    def test_empty_key_raises(self):
+        with pytest.raises(ValueError, match="component_key"):
+            LossComponentTracker(head_name="cca", component_key="", aggregation="mean")
+
+    def test_update_mean_aggregation(self):
+        t = LossComponentTracker("cca", "positive_risk", "mean")
+        t.update_state({"positive_risk": tf.constant(0.4), "negative_risk": tf.constant(0.1)})
+        t.update_state({"positive_risk": tf.constant(0.6), "negative_risk": tf.constant(0.2)})
+        assert float(t.result()) == pytest.approx(0.5, rel=1e-5)
+
+    def test_update_max_aggregation(self):
+        t = LossComponentTracker("cca", "correction_triggered", "max")
+        t.update_state({"correction_triggered": tf.constant(0.0)})
+        t.update_state({"correction_triggered": tf.constant(1.0)})
+        t.update_state({"correction_triggered": tf.constant(0.5)})
+        assert float(t.result()) == pytest.approx(1.0)
+
+    def test_missing_key_raises(self):
+        # Defense-in-depth Layer 2 (business): an absent key signals a
+        # tracker/loss mismatch the factory should have prevented.
+        t = LossComponentTracker("cca", "ghost", "mean")
+        with pytest.raises(KeyError, match="ghost"):
+            t.update_state({"positive_risk": tf.constant(0.4)})
+
+    def test_reset_state(self):
+        t = LossComponentTracker("cca", "positive_risk", "mean")
+        t.update_state({"positive_risk": tf.constant(0.4)})
+        t.reset_state()
+        assert float(t.result()) == 0.0
+
+
+class TestLossComponentTrackerCrossHead:
+    def test_same_key_different_heads_independent(self):
+        t_cca = LossComponentTracker("cca", "positive_risk", "mean")
+        t_immig = LossComponentTracker("immig", "positive_risk", "mean")
+        t_cca.update_state({"positive_risk": tf.constant(0.1)})
+        t_immig.update_state({"positive_risk": tf.constant(0.9)})
+        assert float(t_cca.result()) == pytest.approx(0.1)
+        assert float(t_immig.result()) == pytest.approx(0.9)
+
+    def test_different_keys_independent(self):
+        t_pos = LossComponentTracker("cca", "positive_risk", "mean")
+        t_neg = LossComponentTracker("cca", "negative_risk", "mean")
+        components = {
+            "positive_risk": tf.constant(0.3),
+            "negative_risk": tf.constant(0.7),
+        }
+        t_pos.update_state(components)
+        t_neg.update_state(components)
+        assert float(t_pos.result()) == pytest.approx(0.3)
+        assert float(t_neg.result()) == pytest.approx(0.7)
+
+
+class TestLossComponentTrackerProperties:
+    _scalar_lists = st.lists(
+        st.floats(min_value=-1e3, max_value=1e3, allow_nan=False, allow_infinity=False),
+        min_size=1,
+        max_size=20,
+    )
+
+    @given(_scalar_lists)
+    @settings(max_examples=50, deadline=None)
+    def test_mean_equals_sample_mean(self, values):
+        t = LossComponentTracker("cca", "k", "mean")
+        for v in values:
+            t.update_state({"k": tf.constant(v)})
+        expected = sum(values) / len(values)
+        assert float(t.result()) == pytest.approx(expected, rel=1e-4, abs=1e-4)
+
+    @given(_scalar_lists)
+    @settings(max_examples=50, deadline=None)
+    def test_max_equals_sample_max(self, values):
+        t = LossComponentTracker("cca", "k", "max")
+        for v in values:
+            t.update_state({"k": tf.constant(v)})
+        # running_max starts at 0.0, so the tracked max is max(0.0, max(values))
+        assert float(t.result()) == pytest.approx(max(0.0, max(values)), rel=1e-4, abs=1e-4)

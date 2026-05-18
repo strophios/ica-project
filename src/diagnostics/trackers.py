@@ -151,8 +151,57 @@ class GradientFiniteTracker(keras.metrics.Metric):
 
 
 class LossComponentTracker(keras.metrics.Metric):
-    """Stub for Task 5."""
-    pass
+    """Aggregated scalar loss-component value across steps.
+
+    Reads components_dict[component_key] per update. Raises KeyError if absent
+    (Layer-2 mismatch signal — the factory should have ensured the tracker
+    subscribes only to keys the loss emits). aggregation='mean' is the running
+    mean of the scalar; 'max' is the running max (running_max starts at 0.0).
+    """
+
+    def __init__(
+        self, head_name: str, component_key: str, aggregation: str, **kwargs
+    ):
+        if not head_name:
+            raise ValueError("head_name must be a non-empty string")
+        if not component_key:
+            raise ValueError("component_key must be a non-empty string")
+        if aggregation not in _VALID_AGGREGATIONS:
+            raise ValueError(
+                f"aggregation must be one of {_VALID_AGGREGATIONS}, got {aggregation!r}"
+            )
+        super().__init__(name=f"{head_name}/{component_key}/{aggregation}", **kwargs)
+        self.head_name = head_name
+        self.component_key = component_key
+        self.aggregation = aggregation
+        self._total = self.add_variable(shape=(), initializer="zeros", name="total")
+        self._count = self.add_variable(shape=(), initializer="zeros", name="count")
+        self._running_max = self.add_variable(
+            shape=(), initializer="zeros", name="running_max"
+        )
+
+    def update_state(self, components_dict):
+        if self.component_key not in components_dict:
+            raise KeyError(
+                f"LossComponentTracker {self.name!r} expects key "
+                f"{self.component_key!r}; got keys {list(components_dict.keys())}"
+            )
+        value = tf.cast(components_dict[self.component_key], self._total.dtype)
+        if self.aggregation == "mean":
+            self._total.assign_add(value)
+            self._count.assign_add(1.0)
+        else:
+            self._running_max.assign(tf.maximum(self._running_max, value))
+
+    def result(self):
+        if self.aggregation == "mean":
+            return tf.math.divide_no_nan(self._total, self._count)
+        return self._running_max
+
+    def reset_state(self):
+        self._total.assign(0.0)
+        self._count.assign(0.0)
+        self._running_max.assign(0.0)
 
 
 class BatchLabelBalanceTracker(keras.metrics.Metric):
