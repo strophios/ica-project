@@ -205,5 +205,32 @@ class LossComponentTracker(keras.metrics.Metric):
 
 
 class BatchLabelBalanceTracker(keras.metrics.Metric):
-    """Stub for Task 6."""
-    pass
+    """Running mean of mean(y[head_name]) per batch — the positive-class
+    fraction. Raises KeyError if the head's targets are absent from the y dict
+    (Layer-2 mismatch signal).
+    """
+
+    def __init__(self, head_name: str, **kwargs):
+        if not head_name:
+            raise ValueError("head_name must be a non-empty string")
+        super().__init__(name=f"{head_name}/positive_fraction", **kwargs)
+        self.head_name = head_name
+        self._total = self.add_variable(shape=(), initializer="zeros", name="total")
+        self._count = self.add_variable(shape=(), initializer="zeros", name="count")
+
+    def update_state(self, y):
+        if self.head_name not in y:
+            raise KeyError(
+                f"BatchLabelBalanceTracker {self.name!r} expects key "
+                f"{self.head_name!r}; got keys {list(y.keys())}"
+            )
+        targets = tf.cast(y[self.head_name], self._total.dtype)
+        self._total.assign_add(tf.reduce_mean(targets))
+        self._count.assign_add(1.0)
+
+    def result(self):
+        return tf.math.divide_no_nan(self._total, self._count)
+
+    def reset_state(self):
+        self._total.assign(0.0)
+        self._count.assign(0.0)

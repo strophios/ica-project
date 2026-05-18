@@ -11,7 +11,12 @@ import tensorflow as tf
 from hypothesis import given, settings
 from hypothesis import strategies as st
 
-from src.diagnostics.trackers import PerGroupGradNormTracker
+from src.diagnostics.trackers import (
+    BatchLabelBalanceTracker,
+    GradientFiniteTracker,
+    LossComponentTracker,
+    PerGroupGradNormTracker,
+)
 from src.model_setup.assembly import _default_group_fn
 
 
@@ -267,14 +272,6 @@ class TestPerGroupGradNormProductionGroupFn:
         assert float(tracker_missing.result()) == 0.0
 
 
-# Task 4: GradientFiniteTracker
-from src.diagnostics.trackers import (
-    GradientFiniteTracker,
-    LossComponentTracker,
-    BatchLabelBalanceTracker,
-)
-
-
 class TestGradientFiniteTracker:
     def test_name(self):
         assert GradientFiniteTracker().name == "grad_overflow_rate"
@@ -441,3 +438,71 @@ class TestLossComponentTrackerProperties:
             t.update_state({"k": tf.constant(v)})
         # running_max starts at 0.0, so the tracked max is max(0.0, max(values))
         assert float(t.result()) == pytest.approx(max(0.0, max(values)), rel=1e-4, abs=1e-4)
+
+
+class TestBatchLabelBalanceTracker:
+    def test_name(self):
+        assert BatchLabelBalanceTracker(head_name="cca").name == "cca/positive_fraction"
+
+    def test_empty_head_name_raises(self):
+        with pytest.raises(ValueError, match="head_name"):
+            BatchLabelBalanceTracker(head_name="")
+
+    def test_balanced_batch(self):
+        t = BatchLabelBalanceTracker(head_name="cca")
+        t.update_state({"cca": tf.constant([1.0, 0.0, 1.0, 0.0])})
+        assert float(t.result()) == pytest.approx(0.5)
+
+    def test_all_positive_batch(self):
+        t = BatchLabelBalanceTracker(head_name="cca")
+        t.update_state({"cca": tf.constant([1.0, 1.0, 1.0])})
+        assert float(t.result()) == pytest.approx(1.0)
+
+    def test_all_negative_batch(self):
+        t = BatchLabelBalanceTracker(head_name="cca")
+        t.update_state({"cca": tf.constant([0.0, 0.0])})
+        assert float(t.result()) == pytest.approx(0.0)
+
+    def test_running_mean_across_batches(self):
+        t = BatchLabelBalanceTracker(head_name="cca")
+        t.update_state({"cca": tf.constant([1.0, 1.0, 0.0, 0.0])})  # 0.5
+        t.update_state({"cca": tf.constant([1.0, 1.0, 1.0, 1.0])})  # 1.0
+        assert float(t.result()) == pytest.approx(0.75, rel=1e-5)
+
+    def test_missing_head_key_raises(self):
+        t = BatchLabelBalanceTracker(head_name="cca")
+        with pytest.raises(KeyError, match="cca"):
+            t.update_state({"immig": tf.constant([1.0, 0.0])})
+
+    def test_accepts_int_targets(self):
+        t = BatchLabelBalanceTracker(head_name="cca")
+        t.update_state({"cca": tf.constant([1, 0, 1, 1], dtype=tf.int32)})
+        assert float(t.result()) == pytest.approx(0.75)
+
+    def test_reset_state(self):
+        t = BatchLabelBalanceTracker(head_name="cca")
+        t.update_state({"cca": tf.constant([1.0, 1.0])})
+        t.reset_state()
+        assert float(t.result()) == 0.0
+
+
+class TestBatchLabelBalanceProperties:
+    _label_lists = st.lists(
+        st.integers(min_value=0, max_value=1), min_size=1, max_size=64
+    )
+
+    @given(_label_lists)
+    @settings(max_examples=50, deadline=None)
+    def test_positive_fraction_in_unit_interval(self, labels):
+        t = BatchLabelBalanceTracker(head_name="cca")
+        t.update_state({"cca": tf.constant(labels, dtype=tf.float32)})
+        assert 0.0 <= float(t.result()) <= 1.0
+
+    @given(_label_lists)
+    @settings(max_examples=50, deadline=None)
+    def test_matches_numpy_mean(self, labels):
+        t = BatchLabelBalanceTracker(head_name="cca")
+        t.update_state({"cca": tf.constant(labels, dtype=tf.float32)})
+        assert float(t.result()) == pytest.approx(
+            float(np.mean(labels)), rel=1e-5, abs=1e-6
+        )
