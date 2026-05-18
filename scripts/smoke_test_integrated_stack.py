@@ -51,6 +51,7 @@ re-run after Tier 3/4 changes or library upgrades to verify the
 integration still composes.
 """
 
+import csv as _csv
 import dataclasses
 import tempfile
 from pathlib import Path
@@ -66,6 +67,8 @@ from src.preproc.preprocessor import ClassifierPreprocessor
 from src.model_setup.heads import ClassificationHead
 from src.model_setup.assembly import build_endpoint_model, build_inference_model
 from src.loss_functions.loss import FLPULoss
+from src.cca_metrics import make_cca_metrics
+from src.diagnostics.distribution_metrics import make_distribution_metrics
 
 
 # ---------------------------------------------------------------------------
@@ -233,17 +236,17 @@ cca_head = ClassificationHead(
         prior=_cca_head_config.loss.prior,
         kiryo_clawback=_cca_head_config.loss.kiryo_clawback,
     ),
-    metrics=[
-        keras.metrics.BinaryAccuracy(threshold=0.0),
-        keras.metrics.Precision(thresholds=0.0, name="precision"),
-    ],
+    metrics=make_cca_metrics()
+    + make_distribution_metrics(run_config.diagnostics),
     name=_cca_head_config.name,
+    expose_loss_components=run_config.diagnostics.enable_loss_components,
 )
 train_model = build_endpoint_model(
     backbone=backbone,
     heads={_cca_head_config.name: cca_head},
     seq_length=run_config.seq_length,
     freeze_encoder=False,  # exercise the backbone-trains-too path
+    diagnostics=run_config.diagnostics,
 )
 inf_model = build_inference_model(
     backbone=backbone,
@@ -257,12 +260,14 @@ inf_model = build_inference_model(
 # ---------------------------------------------------------------------------
 
 print("[5/8] Compiling + fitting (1 epoch, 4 steps)...")
+csv_path = tmp_dir / "smoke_metrics.csv"
 train_model.compile(optimizer=keras.optimizers.AdamW(learning_rate=1e-3))
 train_model.fit(
     training_set,
     epochs=1,
     steps_per_epoch=4,
     verbose=1,
+    callbacks=[keras.callbacks.CSVLogger(str(csv_path))],
 )
 
 
@@ -357,6 +362,24 @@ def _extract(p):
 
 preds_in_process = _extract(inf_model.predict(test_set, batch_size=BATCH_SIZE, verbose=0))
 preds_after_load = _extract(inf_model_2.predict(test_set, batch_size=BATCH_SIZE, verbose=0))
+
+
+# ---------------------------------------------------------------------------
+# Verify diagnostic CSV columns
+# ---------------------------------------------------------------------------
+
+with open(csv_path, newline="") as f:
+    header = next(_csv.reader(f))
+# Per-step trackers (via LayerLRModel.metrics property, Phase 4):
+assert any(h.startswith("grad_norm/cca/") for h in header), header
+assert "grad_overflow_rate" in header, header
+assert any(h.startswith("cca/") and h.endswith("/mean") for h in header), header
+assert "cca/positive_fraction" in header, header
+# Per-head distribution metrics (via head metric_objs, Phase 5):
+assert "cca_pred_dist/mean" in header, header
+assert "cca_pred_dist/std" in header, header
+assert "cca_pred_dist/frac_above_0.5" in header, header
+print("[OK] diagnostic CSV columns present:", sorted(header))
 
 
 # ---------------------------------------------------------------------------
