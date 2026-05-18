@@ -45,10 +45,14 @@ Example
     model.fit(...)
 """
 
-from typing import Callable, Optional
+from typing import TYPE_CHECKING, Callable, Optional
 
 import keras
 import tensorflow as tf
+
+if TYPE_CHECKING:
+    from src.diagnostics.factory import DiagnosticBundle
+    from src.model_setup.heads import ClassificationHead
 
 
 class LayerLRModel(keras.Model):
@@ -94,6 +98,8 @@ class LayerLRModel(keras.Model):
         *args,
         group_fn: Optional[Callable[[tf.Variable], str]] = None,
         multipliers: Optional[dict] = None,
+        diagnostic_trackers: "Optional[DiagnosticBundle]" = None,
+        diagnostic_head_refs: "Optional[list[ClassificationHead]]" = None,
         **kwargs,
     ):
         super().__init__(*args, **kwargs)
@@ -104,6 +110,20 @@ class LayerLRModel(keras.Model):
             group_fn = lambda v: "default"  # noqa: E731
         self.group_fn = group_fn
         self.multipliers = dict(multipliers) if multipliers is not None else {}
+        self._diagnostic_trackers = diagnostic_trackers
+        self._head_refs_by_name = {
+            h.name: h for h in (diagnostic_head_refs or [])
+        }
+
+    @property
+    def metrics(self):
+        base = super().metrics
+        if self._diagnostic_trackers is None:
+            return base
+        extra = []
+        for category in self._diagnostic_trackers["per_step"].values():
+            extra.extend(category)
+        return base + extra
 
     def get_multiplier(self, variable) -> float:
         """Return the LR multiplier for a given trainable variable.
@@ -123,6 +143,23 @@ class LayerLRModel(keras.Model):
         multiplier takes effect on the next `train_step` call.
         """
         self.multipliers[group_name] = value
+
+    def _dispatch_diagnostics(self, gradients, y):
+        """Dispatch gradient/loss-component/batch-target observations to trackers.
+
+        Called from train_step with raw (pre-scaling) gradients and targets,
+        so trackers observe what was computed, not what was applied.
+        """
+        per_step = self._diagnostic_trackers["per_step"]
+        for tracker in per_step["gradient"]:
+            tracker.update_state(
+                gradients, self.trainable_variables, self.group_fn
+            )
+        for tracker in per_step["loss_component"]:
+            head = self._head_refs_by_name[tracker.head_name]
+            tracker.update_state(head.last_components)
+        for tracker in per_step["batch_target"]:
+            tracker.update_state(y)
 
     def train_step(self, data):
         """One training step with per-variable LR multipliers applied.
@@ -230,6 +267,11 @@ class LayerLRModel(keras.Model):
                 loss = self.optimizer.scale_loss(loss)
 
         gradients = tape.gradient(loss, self.trainable_variables)
+        # Tier 5: read-only diagnostic observation of the COMPUTED
+        # gradients (before per-variable multiplier scaling) plus loss
+        # components and targets. No-op when diagnostics aren't configured.
+        if self._diagnostic_trackers is not None:
+            self._dispatch_diagnostics(gradients, y)
         # Scale each gradient by its variable's multiplier. Two
         # subtleties handled here:
         #

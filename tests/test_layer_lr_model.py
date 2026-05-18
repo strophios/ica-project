@@ -498,3 +498,45 @@ class TestLossTracking:
             "may be receiving a transformed/wrong value rather than the "
             "raw compute_loss result."
         )
+
+
+class TestDiagnosticsNoOpRegression:
+    """With diagnostic_trackers=None (the default every existing call site
+    uses), LayerLRModel must behave exactly as before Tier 5 Phase 4."""
+
+    def test_default_init_has_none_trackers(self):
+        model = _tiny_model()
+        assert model._diagnostic_trackers is None
+        assert model._head_refs_by_name == {}
+
+    def test_metrics_property_unchanged_when_none(self):
+        model = _tiny_model()
+        model.compile(
+            optimizer=keras.optimizers.SGD(0.01),
+            loss=keras.losses.BinaryCrossentropy(from_logits=True),
+        )
+        # Build metrics by running one step.
+        rng = np.random.RandomState(0)
+        x = rng.randn(BATCH, INPUT_DIM).astype(np.float32)
+        y = rng.randint(0, 2, size=(BATCH, 1)).astype(np.float32)
+        model.fit(x, y, epochs=1, batch_size=BATCH, verbose=0)
+        # No extra metrics beyond what stock Keras exposes (loss tracker).
+        names = [m.name for m in model.metrics]
+        assert "loss" in names
+        assert not any(n.startswith("grad_norm/") for n in names)
+        assert not any(n.startswith("grad_overflow") for n in names)
+
+    def test_fit_history_records_nonzero_loss_no_trackers(self):
+        # Mirror of the Tier-2 regression, asserted explicitly under the
+        # Phase-4 change with trackers absent.
+        model = _tiny_model()
+        model.compile(
+            optimizer=keras.optimizers.SGD(0.01),
+            loss=keras.losses.BinaryCrossentropy(from_logits=True),
+        )
+        rng = np.random.RandomState(42)
+        x = rng.randn(BATCH, INPUT_DIM).astype(np.float32)
+        y = rng.randint(0, 2, size=(BATCH, 1)).astype(np.float32)
+        history = model.fit(x, y, epochs=1, batch_size=BATCH, verbose=0)
+        assert np.isfinite(history.history["loss"][0])
+        assert history.history["loss"][0] > 0
