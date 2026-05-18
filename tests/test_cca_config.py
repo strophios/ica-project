@@ -885,3 +885,19 @@ class TestDiagnosticsConfigFromDict:
 
         # All fields defaulted → empty payload reconstructs the default.
         assert DiagnosticsConfig._from_dict({}) == DiagnosticsConfig()
+
+    def test_from_dict_does_not_bypass_validation_on_coerced_gradient_norms(self):
+        from src.cca_config import DiagnosticsConfig
+
+        # Coerced list payload with invalid entry must still fail validation.
+        payload = {"gradient_norm_aggregations": ["median"]}
+        with pytest.raises(ValueError, match="gradient_norm_aggregations"):
+            DiagnosticsConfig._from_dict(payload)
+
+    def test_from_dict_does_not_bypass_validation_on_coerced_prediction_stats(self):
+        from src.cca_config import DiagnosticsConfig
+
+        # Coerced list payload with invalid entry must still fail validation.
+        payload = {"prediction_summary_stats": ["variance"]}
+        with pytest.raises(ValueError, match="prediction_summary_stats"):
+            DiagnosticsConfig._from_dict(payload)
