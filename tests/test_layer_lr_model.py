@@ -36,6 +36,7 @@ import tensorflow as tf
 
 from src.model_setup.layer_lr_model import LayerLRModel
 from src.model_setup.heads import ClassificationHead
+from src.diagnostics.trackers import PerGroupGradNormTracker, GradientFiniteTracker
 
 
 # -----------------------------------------------------------------------------
@@ -540,3 +541,86 @@ class TestDiagnosticsNoOpRegression:
         history = model.fit(x, y, epochs=1, batch_size=BATCH, verbose=0)
         assert np.isfinite(history.history["loss"][0])
         assert history.history["loss"][0] > 0
+
+
+class TestGradientDiagnosticDispatch:
+    def _bundle(self, trackers):
+        return {
+            "per_step": {
+                "gradient": trackers,
+                "loss_component": [],
+                "batch_target": [],
+            },
+            "periodic": [],
+        }
+
+    def test_grad_norm_tracker_sees_raw_unscaled_gradient(self):
+        # The design's load-bearing invariant (lines 165-176): trackers
+        # observe the COMPUTED gradient, BEFORE per-variable multiplier
+        # scaling. Differential test (no fragile closed-form re-derivation):
+        # two models with IDENTICAL initial weights and the SAME batch, one
+        # with multiplier 1.0 and one with 10.0 on the tracked "lower"
+        # group, each with its own grad-norm tracker. The gradient computed
+        # by tape.gradient is identical in both (multiplier is applied
+        # AFTER). So if trackers observe the raw gradient (correct), both
+        # report the SAME norm. If they observed multiplier*grad (the bug
+        # this guards), the 10.0-model's tracker would be ~10x the other.
+        group_fn = lambda v: v.path.split("/")[0]
+        rng = np.random.RandomState(1)
+        x = rng.randn(BATCH, INPUT_DIM).astype(np.float32)
+        y = rng.randint(0, 2, size=(BATCH, 1)).astype(np.float32)
+
+        tracker_1 = PerGroupGradNormTracker(group_name="lower", aggregation="mean")
+        tracker_10 = PerGroupGradNormTracker(group_name="lower", aggregation="mean")
+        base_1 = _tiny_model(group_fn=group_fn)
+        base_10 = _tiny_model(group_fn=group_fn)
+        model_1 = LayerLRModel(
+            inputs=base_1.inputs, outputs=base_1.outputs, group_fn=group_fn,
+            multipliers={"lower": 1.0},
+            diagnostic_trackers=self._bundle([tracker_1]),
+        )
+        model_10 = LayerLRModel(
+            inputs=base_10.inputs, outputs=base_10.outputs, group_fn=group_fn,
+            multipliers={"lower": 10.0},
+            diagnostic_trackers=self._bundle([tracker_10]),
+        )
+        # Force identical initial weights so the computed gradient is
+        # identical across both models for the same batch.
+        model_10.set_weights(model_1.get_weights())
+        for m in (model_1, model_10):
+            m.compile(
+                optimizer=keras.optimizers.SGD(0.0),  # no update; weights stay equal
+                loss=keras.losses.BinaryCrossentropy(from_logits=True),
+            )
+        model_1.fit(x, y, epochs=1, batch_size=BATCH, verbose=0)
+        model_10.fit(x, y, epochs=1, batch_size=BATCH, verbose=0)
+
+        v1 = float(tracker_1.result())
+        v10 = float(tracker_10.result())
+        assert v1 > 0.0  # sanity: a gradient was actually observed
+        # Correct (pre-scaling) behavior: equal regardless of multiplier.
+        assert v10 == pytest.approx(v1, rel=1e-4), (
+            f"grad-norm tracker is multiplier-sensitive: v1={v1}, v10={v10} "
+            "— it is observing multiplier*grad (post-scaling), violating the "
+            "design's pre-scaling invariant."
+        )
+        # Explicitly reject the specific failure mode.
+        assert v10 != pytest.approx(10.0 * v1, rel=1e-3)
+
+    def test_overflow_tracker_zero_under_float32(self):
+        tracker = GradientFiniteTracker()
+        base = _tiny_model()
+        model = LayerLRModel(
+            inputs=base.inputs,
+            outputs=base.outputs,
+            diagnostic_trackers=self._bundle([tracker]),
+        )
+        model.compile(
+            optimizer=keras.optimizers.SGD(0.01),
+            loss=keras.losses.BinaryCrossentropy(from_logits=True),
+        )
+        rng = np.random.RandomState(2)
+        x = rng.randn(BATCH, INPUT_DIM).astype(np.float32)
+        y = rng.randint(0, 2, size=(BATCH, 1)).astype(np.float32)
+        model.fit(x, y, epochs=1, batch_size=BATCH, verbose=0)
+        assert float(tracker.result()) == 0.0  # finite grads under float32
