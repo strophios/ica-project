@@ -683,6 +683,100 @@ class TestLossComponentBatchTargetDispatch:
         # Tracker should be populated after one epoch with loss component.
         assert np.isfinite(float(lc.result()))
 
+    def test_batch_target_tracker_works_in_endpoint_mode(self):
+        """Regression test for commit 4e5cce1 (Tier 5 Phase 6).
+
+        This test guards the fix for a critical integration bug:
+        in endpoint mode, targets are packed into x as {head}_targets
+        keys and Keras yields y=None. The original _dispatch_diagnostics
+        call received y=None, causing BatchLabelBalanceTracker.update_state(None)
+        to fail with TypeError (cannot check 'key in None').
+
+        The fix (commit 4e5cce1) extracts {head}_targets from x into
+        a targets_for_dispatch dict when y is None and x is a dict,
+        then passes targets_for_dispatch to _dispatch_diagnostics.
+
+        This test:
+        1. Builds an endpoint LayerLRModel with a BatchLabelBalanceTracker.
+        2. Fits on synthetic data with a known positive-class fraction.
+        3. Asserts the tracker was populated with a sensible value.
+
+        Regression to the pre-fix behavior (y=None → no extraction) is caught
+        because the tracker.update_state(None) call will raise TypeError.
+        """
+        from src.diagnostics.trackers import BatchLabelBalanceTracker
+
+        head = ClassificationHead(
+            hidden_dim=INPUT_DIM,
+            loss_fn=FLPULoss(prior=0.1),
+            name="cca",
+            expose_loss_components=False,
+        )
+        features_input = keras.Input(shape=(INPUT_DIM,), name="features")
+        cca_targets_input = keras.Input(shape=(1,), name="cca_targets")
+
+        logits = head(features_input, targets=cca_targets_input)
+
+        # Use BatchLabelBalanceTracker — the tracker that was broken
+        # in endpoint mode before the fix (it needs y as a dict).
+        batch_tracker = BatchLabelBalanceTracker("cca")
+        bundle = {
+            "per_step": {
+                "gradient": [],
+                "loss_component": [],
+                "batch_target": [batch_tracker],
+            },
+            "periodic": [],
+        }
+        model = LayerLRModel(
+            inputs={"features": features_input, "cca_targets": cca_targets_input},
+            outputs={"cca": logits},
+            diagnostic_trackers=bundle,
+            diagnostic_head_refs=[head],
+        )
+        model.compile(optimizer=keras.optimizers.SGD(0.01))
+
+        # Synthetic data: 12 positives, 4 negatives → 0.75 positive fraction
+        rng = np.random.RandomState(99)
+        features = rng.randn(BATCH, INPUT_DIM).astype(np.float32)
+        # Deliberately create a batch with known positive-class fraction:
+        # 12 ones (positive) + 4 zeros (negative) = 16 total
+        targets = np.zeros((BATCH, 1), dtype=np.float32)
+        targets[:12] = 1.0  # First 12 are positive
+        rng.shuffle(targets)  # Shuffle to avoid trivial patterns
+
+        model.fit(
+            x={"features": features, "cca_targets": targets},
+            epochs=1,
+            batch_size=BATCH,
+            verbose=0,
+        )
+
+        # Tracker should be populated and should reflect the known
+        # positive fraction (0.75 ± small tolerance for floating point).
+        tracker_result = float(batch_tracker.result())
+        assert np.isfinite(tracker_result), (
+            "BatchLabelBalanceTracker.result() is non-finite — indicates "
+            "tracker was never populated or encountered NaN. The y=None "
+            "endpoint-mode extraction may be broken."
+        )
+        assert 0.0 <= tracker_result <= 1.0, (
+            f"Tracker result {tracker_result} is outside [0, 1] — indicates "
+            "an invalid positive-fraction computation."
+        )
+        assert tracker_result > 0.0, (
+            "Tracker result is exactly 0.0 — indicates the tracker never "
+            "received any positive samples, or the extraction failed silently."
+        )
+        # The expected fraction is 0.75 (12 positives out of 16). Allow ±0.05
+        # tolerance to account for batching and randomness.
+        expected = 0.75
+        assert abs(tracker_result - expected) < 0.05, (
+            f"Tracker result {tracker_result} deviates from expected "
+            f"{expected} by more than 0.05. Either the targets weren't "
+            "propagated correctly, or the positive-fraction computation is wrong."
+        )
+
     def test_head_ref_lookup_by_name(self):
         head = ClassificationHead(
             hidden_dim=INPUT_DIM,
