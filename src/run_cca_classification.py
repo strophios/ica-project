@@ -337,12 +337,19 @@ config.CCA_CLASSIFIER_DIR.mkdir(exist_ok=True)
 config.CCA_LOGS_DIR.mkdir(exist_ok=True)
 
 _run_stamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+
+# CSVLogger needs the per-run-stamp directory to exist.
+(config.CCA_LOGS_DIR / _run_stamp).mkdir(parents=True, exist_ok=True)
+
 callbacks_list = [
     keras.callbacks.ModelCheckpoint(
         filepath=str(config.CCA_CLASSIFIER_DIR / f"{_run_stamp}_checkpoint.weights.h5"),
         monitor="val_loss",
         save_best_only=True,
         save_weights_only=True,
+    ),
+    keras.callbacks.CSVLogger(
+        str(config.CCA_LOGS_DIR / _run_stamp / "metrics.csv")
     ),
     keras.callbacks.TensorBoard(
         log_dir=str(config.CCA_LOGS_DIR / _run_stamp),
