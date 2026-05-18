@@ -563,3 +563,81 @@ class TestReturnIntermediates:
             y_true, y_pred, prior=0.1, focal_gamma=2.0
         )
         np.testing.assert_allclose(_scalar(loss(y_true, y_pred)), expected, rtol=1e-4)
+
+
+# -----------------------------------------------------------------------------
+# Loss-component numerical correctness (contract + semantics)
+# -----------------------------------------------------------------------------
+
+class TestLossComponentCorrectness:
+    """Verifies that the return_intermediates components match the loss scalar
+    and exhibit the expected semantics (e.g., correction_triggered is binary
+    and fires at the right threshold)."""
+
+    def test_no_clawback_loss_equals_pos_plus_clamped_neg(self):
+        # Ties components to the already-numpy-verified scalar without
+        # reimplementing the component math.
+        loss = FLPULoss(prior=0.1)
+        y_true, y_pred = _batch(
+            positive_logits=[2.0, 1.0, -1.0],
+            unlabeled_logits=[-3.0, -1.0, 0.0, 1.0],
+        )
+        scalar, c = loss.call(y_true, y_pred, return_intermediates=True)
+        recombined = float(c["positive_risk"]) + max(float(c["negative_risk"]), 0.0)
+        np.testing.assert_allclose(float(scalar), recombined, rtol=1e-5)
+
+    def test_correction_triggered_is_binary(self):
+        loss = FLPULoss(prior=0.1)
+        y_true, y_pred = _batch(
+            positive_logits=[2.0, 1.0],
+            unlabeled_logits=[-3.0, 0.0, 1.0],
+        )
+        _, c = loss.call(y_true, y_pred, return_intermediates=True)
+        assert float(c["correction_triggered"]) in (0.0, 1.0)
+
+    def test_correction_fires_iff_negative_risk_below_zero_no_clawback(self):
+        loss = FLPULoss(prior=0.1)
+        y_true, y_pred = _batch(
+            positive_logits=[5.0, 5.0],
+            unlabeled_logits=[-5.0, -5.0, -5.0],
+        )
+        scalar, c = loss.call(y_true, y_pred, return_intermediates=True)
+        neg = float(c["negative_risk"])
+        fired = float(c["correction_triggered"])
+        if neg < 0.0:
+            assert fired == 1.0
+            np.testing.assert_allclose(float(scalar), float(c["positive_risk"]), rtol=1e-5)
+        else:
+            assert fired == 0.0
+            np.testing.assert_allclose(
+                float(scalar),
+                float(c["positive_risk"]) + neg,
+                rtol=1e-5,
+            )
+
+    def test_clawback_path_correction_semantics(self):
+        loss = FLPULoss(prior=0.1, kiryo_clawback=True, nn_beta=0.0, nn_gamma=1.0)
+        y_true, y_pred = _batch(
+            positive_logits=[5.0, 5.0],
+            unlabeled_logits=[-5.0, -5.0, -5.0],
+        )
+        scalar, c = loss.call(y_true, y_pred, return_intermediates=True)
+        neg = float(c["negative_risk"])
+        fired = float(c["correction_triggered"])
+        if neg < -0.0:
+            assert fired == 1.0
+            np.testing.assert_allclose(float(scalar), -1.0 * neg, rtol=1e-5)
+        else:
+            assert fired == 0.0
+            np.testing.assert_allclose(
+                float(scalar), float(c["positive_risk"]) + neg, rtol=1e-5
+            )
+
+    def test_positive_risk_non_negative(self):
+        loss = FLPULoss(prior=0.1)
+        y_true, y_pred = _batch(
+            positive_logits=[2.0, -1.0, 0.5],
+            unlabeled_logits=[-3.0, 1.0],
+        )
+        _, c = loss.call(y_true, y_pred, return_intermediates=True)
+        assert float(c["positive_risk"]) >= 0.0
