@@ -73,4 +73,8 @@ def build_trackers(
     if config.enable_overflow_proxy:
         per_step["gradient"].append(GradientFiniteTracker())
 
+    if config.enable_batch_balance:
+        for head_name in heads:
+            per_step["batch_target"].append(BatchLabelBalanceTracker(head_name))
+
     return DiagnosticBundle(per_step=per_step, periodic=periodic)

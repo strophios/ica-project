@@ -90,3 +90,41 @@ class TestBuildTrackersGradientCategory:
         names = [t.name for t in bundle["per_step"]["gradient"]]
         assert "grad_overflow_rate" not in names
         assert any(n.startswith("grad_norm/") for n in names)
+
+
+class TestBuildTrackersBatchTarget:
+    def test_one_balance_tracker_per_head(self):
+        heads = {"cca": _StubHead(None), "immig": _StubHead(None)}
+        bundle = build_trackers(
+            DiagnosticsConfig(enable_loss_components=False),
+            group_fn=_group_fn,
+            heads=heads,
+            trainable_variables=_vars("cca/w"),
+        )
+        names = sorted(t.name for t in bundle["per_step"]["batch_target"])
+        assert names == ["cca/positive_fraction", "immig/positive_fraction"]
+
+    def test_disable_batch_balance(self):
+        heads = {"cca": _StubHead(None)}
+        bundle = build_trackers(
+            DiagnosticsConfig(enable_batch_balance=False, enable_loss_components=False),
+            group_fn=_group_fn,
+            heads=heads,
+            trainable_variables=_vars("cca/w"),
+        )
+        assert bundle["per_step"]["batch_target"] == []
+
+    def test_periodic_empty_regardless_of_enable_flag(self):
+        # periodic is a permanently-empty forward-compat slot. The factory
+        # never populates it; enable_prediction_distribution gates the
+        # per-head distribution metrics (Phase 5), which ride the head
+        # metric path, NOT this bundle.
+        heads = {"cca": _StubHead(None)}
+        bundle = build_trackers(
+            DiagnosticsConfig(enable_prediction_distribution=True,
+                              enable_loss_components=False),
+            group_fn=_group_fn,
+            heads=heads,
+            trainable_variables=_vars("cca/w"),
+        )
+        assert bundle["periodic"] == []
