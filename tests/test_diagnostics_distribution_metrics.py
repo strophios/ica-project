@@ -11,10 +11,12 @@ import tensorflow as tf
 from hypothesis import given, settings
 from hypothesis import strategies as st
 
+from src.cca_config import DiagnosticsConfig
 from src.diagnostics.distribution_metrics import (
     PredictionFracAboveMetric,
     PredictionMeanMetric,
     PredictionStdMetric,
+    make_distribution_metrics,
 )
 
 
@@ -146,3 +148,34 @@ class TestDistributionMetricProperties:
         r = float(m.result())
         assert r >= 0.0
         assert r == pytest.approx(float(np.std(_sigmoid(logits))), rel=1e-3, abs=1e-4)
+
+
+class TestMakeDistributionMetrics:
+    def test_default_config_builds_all_three_in_order(self):
+        metrics = make_distribution_metrics(DiagnosticsConfig())
+        assert [m.name for m in metrics] == [
+            "pred_dist/mean", "pred_dist/std", "pred_dist/frac_above_0.5"
+        ]
+
+    def test_disabled_returns_empty(self):
+        metrics = make_distribution_metrics(
+            DiagnosticsConfig(enable_prediction_distribution=False)
+        )
+        assert metrics == []
+
+    def test_subset_and_order_preserved(self):
+        cfg = DiagnosticsConfig(prediction_summary_stats=("frac_above_0.5", "mean"))
+        metrics = make_distribution_metrics(cfg)
+        assert [m.name for m in metrics] == [
+            "pred_dist/frac_above_0.5", "pred_dist/mean"
+        ]
+
+    def test_fresh_instances_each_call(self):
+        cfg = DiagnosticsConfig()
+        a = make_distribution_metrics(cfg)
+        b = make_distribution_metrics(cfg)
+        assert all(x is not y for x, y in zip(a, b))
+
+    def test_instances_are_metric_subclasses(self):
+        for m in make_distribution_metrics(DiagnosticsConfig()):
+            assert isinstance(m, keras.metrics.Metric)
