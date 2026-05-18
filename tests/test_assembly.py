@@ -45,6 +45,7 @@ from src.model_setup.assembly import (
     build_inference_model,
 )
 from src.loss_functions.loss import FLPULoss
+from src.cca_config import DiagnosticsConfig
 
 
 SEQ_LEN = 4
@@ -700,3 +701,98 @@ class TestPatternTwoSerialization:
             inf_model_wrong.load_weights(
                 str(weights_path), skip_mismatch=False,
             )
+
+
+# -----------------------------------------------------------------------------
+# Tier 5 diagnostics wiring (Phase 6)
+# -----------------------------------------------------------------------------
+
+class TestEndpointDiagnosticsWiring:
+    """Tier 5 Phase 6 diagnostics wiring tests.
+
+    Tests that build_endpoint_model correctly wires the diagnostics
+    parameter to LayerLRModel, with constituent-variable gather
+    placed AFTER the freeze_encoder block to ensure frozen encoders
+    build no encoder-group trackers.
+
+    Note on fresh_head fixture: it uses FLPULoss(prior=0.1), which
+    has return_intermediates support since Phase 3, so
+    DiagnosticsConfig().enable_loss_components=True works without
+    guard clauses.
+    """
+
+    def test_diagnostics_none_is_backcompat(self, fresh_backbone, fresh_head):
+        """With diagnostics=None (default), model._diagnostic_trackers
+        is None (backward compatible, no diagnostic wiring)."""
+        model = build_endpoint_model(
+            backbone=fresh_backbone, heads={"cca": fresh_head}, seq_length=SEQ_LEN
+        )
+        assert model._diagnostic_trackers is None
+        assert model._head_refs_by_name == {}
+
+    def test_diagnostics_wires_bundle_and_head_refs(self, fresh_backbone, fresh_head):
+        """With diagnostics=DiagnosticsConfig(), the model wires the
+        diagnostic trackers bundle and head refs."""
+        model = build_endpoint_model(
+            backbone=fresh_backbone,
+            heads={"cca": fresh_head},
+            seq_length=SEQ_LEN,
+            freeze_encoder=True,
+            diagnostics=DiagnosticsConfig(),
+        )
+        assert model._diagnostic_trackers is not None
+        assert set(model._diagnostic_trackers["per_step"].keys()) == {
+            "gradient", "loss_component", "batch_target"
+        }
+        assert model._diagnostic_trackers["periodic"] == []
+        assert "cca" in model._head_refs_by_name
+
+    def test_frozen_encoder_no_backbone_grad_tracker(self, fresh_backbone, fresh_head):
+        """USER-FLAGGED INVARIANT: the constituent-var gather must run AFTER
+        the freeze_encoder block. With freeze_encoder=True the only
+        trainable group is the head ("cca"); no backbone/encoder
+        grad-norm tracker may be built. If this fails, the gather was
+        placed before backbone.trainable=False.
+        """
+        model = build_endpoint_model(
+            backbone=fresh_backbone,
+            heads={"cca": fresh_head},
+            seq_length=SEQ_LEN,
+            freeze_encoder=True,
+            diagnostics=DiagnosticsConfig(),
+        )
+        grad_names = [
+            t.name for t in model._diagnostic_trackers["per_step"]["gradient"]
+        ]
+        assert any(n.startswith("grad_norm/cca/") for n in grad_names)
+        assert not any(
+            n.startswith("grad_norm/") and "/cca/" not in n for n in grad_names
+        ), f"unexpected non-cca grad-norm tracker(s): {grad_names}"
+
+    def test_unfrozen_encoder_includes_backbone_group(self, fresh_backbone, fresh_head):
+        """With freeze_encoder=False, the backbone's trainable variables
+        are included in the constituent-variable gather, so backbone-group
+        grad-norm trackers are built."""
+        model = build_endpoint_model(
+            backbone=fresh_backbone,
+            heads={"cca": fresh_head},
+            seq_length=SEQ_LEN,
+            freeze_encoder=False,
+            diagnostics=DiagnosticsConfig(),
+        )
+        grad_names = [
+            t.name for t in model._diagnostic_trackers["per_step"]["gradient"]
+        ]
+        # At least one non-cca (backbone) grad-norm group present.
+        assert any(
+            n.startswith("grad_norm/") and "/cca/" not in n for n in grad_names
+        )
+
+    def test_inference_model_unaffected(self, fresh_backbone, fresh_head):
+        """build_inference_model is unchanged; diagnostics parameter
+        not available and no trackers are wired."""
+        inf = build_inference_model(
+            backbone=fresh_backbone, heads={"cca": fresh_head}, seq_length=SEQ_LEN
+        )
+        assert not hasattr(inf, "_diagnostic_trackers") or \
+            getattr(inf, "_diagnostic_trackers", None) is None

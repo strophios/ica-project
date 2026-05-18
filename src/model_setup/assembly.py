@@ -49,6 +49,7 @@ from __future__ import annotations
 import keras
 
 from src.model_setup.layer_lr_model import LayerLRModel
+from src.diagnostics.factory import build_trackers
 
 
 def _default_group_fn(variable):
@@ -73,6 +74,7 @@ def build_endpoint_model(
     freeze_encoder=False,
     layer_multipliers=None,
     group_fn=None,
+    diagnostics=None,
 ):
     """
     Wire backbone + heads into a multi-input endpoint-mode training
@@ -171,11 +173,33 @@ def build_endpoint_model(
 
     all_inputs = {"token_ids": token_ids, "padding_mask": padding_mask, **target_inputs}
 
+    # Tier 5 diagnostics. The constituent-variable gather MUST happen here:
+    # after the head-call loop (so head/backbone variables are realized) AND
+    # after the freeze_encoder block above (so backbone.trainable is already
+    # False and frozen-encoder builds enumerate only head groups). build_trackers
+    # uses this list ONLY for group enumeration; train_step's runtime dispatch
+    # uses the model's own self.trainable_variables.
+    diagnostic_trackers = None
+    diagnostic_head_refs = None
+    if diagnostics is not None:
+        constituent_trainable = list(backbone.trainable_variables)
+        for _h in heads.values():
+            constituent_trainable.extend(_h.trainable_variables)
+        diagnostic_trackers = build_trackers(
+            diagnostics,
+            group_fn=group_fn or _default_group_fn,
+            heads=heads,
+            trainable_variables=constituent_trainable,
+        )
+        diagnostic_head_refs = list(heads.values())
+
     return LayerLRModel(
         inputs=all_inputs,
         outputs=outputs,
         group_fn=group_fn or _default_group_fn,
         multipliers=layer_multipliers or {},
+        diagnostic_trackers=diagnostic_trackers,
+        diagnostic_head_refs=diagnostic_head_refs,
     )
 
 
