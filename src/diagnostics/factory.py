@@ -35,6 +35,25 @@ _FLPU_COMPONENT_KEYS = ("positive_risk", "negative_risk", "correction_triggered"
 _FLPU_LOSS_COMPONENT_AGG = "mean"
 
 
+def _loss_exposes_intermediates(loss_fn) -> bool:
+    """True iff loss_fn.call accepts a `return_intermediates` parameter.
+
+    Phase-ordering: the real FLPULoss gains this parameter in Phase 3.
+    Phase 2 only ever sees synthetic stand-in losses; the factory meets
+    the real FLPULoss at Phase 6.
+    """
+    if loss_fn is None:
+        return False
+    call = getattr(loss_fn, "call", None)
+    if call is None:
+        return False
+    try:
+        sig = inspect.signature(call)
+    except (ValueError, TypeError):
+        return False
+    return "return_intermediates" in sig.parameters
+
+
 class DiagnosticBundle(TypedDict):
     per_step: dict[str, list[keras.metrics.Metric]]
     periodic: list  # permanently []; forward-compat slot, no current consumer
@@ -76,5 +95,30 @@ def build_trackers(
     if config.enable_batch_balance:
         for head_name in heads:
             per_step["batch_target"].append(BatchLabelBalanceTracker(head_name))
+
+    if config.enable_loss_components:
+        supporting = [
+            name for name, head in heads.items()
+            if _loss_exposes_intermediates(head.loss_fn)
+        ]
+        if heads and not supporting:
+            raise ValueError(
+                "DiagnosticsConfig.enable_loss_components is True but no "
+                "head's loss exposes `return_intermediates`; loss-component "
+                f"tracking would produce nothing. Heads: {sorted(heads)}."
+            )
+        for name in heads:
+            if name not in supporting:
+                warnings.warn(
+                    f"Head {name!r} loss does not expose "
+                    f"`return_intermediates`; skipping its loss-component "
+                    f"trackers.",
+                    stacklevel=2,
+                )
+                continue
+            for key in _FLPU_COMPONENT_KEYS:
+                per_step["loss_component"].append(
+                    LossComponentTracker(name, key, _FLPU_LOSS_COMPONENT_AGG)
+                )
 
     return DiagnosticBundle(per_step=per_step, periodic=periodic)

@@ -6,9 +6,10 @@ from __future__ import annotations
 
 import pytest
 import tensorflow as tf
+import keras as _keras
 
 from src.cca_config import DiagnosticsConfig
-from src.diagnostics.factory import DiagnosticBundle, build_trackers
+from src.diagnostics.factory import build_trackers
 
 
 def _group_fn(var):
@@ -128,3 +129,87 @@ class TestBuildTrackersBatchTarget:
             trainable_variables=_vars("cca/w"),
         )
         assert bundle["periodic"] == []
+
+
+class _LossWithIntermediates(_keras.losses.Loss):
+    def call(self, y_true, y_pred, return_intermediates=False):
+        return tf.constant(0.0)
+
+
+class _LossWithoutIntermediates(_keras.losses.Loss):
+    def call(self, y_true, y_pred):
+        return tf.constant(0.0)
+
+
+class TestBuildTrackersLossComponentGuard:
+    def test_all_heads_supporting_yield_three_trackers_each(self):
+        heads = {
+            "cca": _StubHead(_LossWithIntermediates()),
+            "immig": _StubHead(_LossWithIntermediates()),
+        }
+        bundle = build_trackers(
+            DiagnosticsConfig(),
+            group_fn=_group_fn,
+            heads=heads,
+            trainable_variables=_vars("cca/w"),
+        )
+        names = sorted(t.name for t in bundle["per_step"]["loss_component"])
+        assert names == [
+            "cca/correction_triggered/mean",
+            "cca/negative_risk/mean",
+            "cca/positive_risk/mean",
+            "immig/correction_triggered/mean",
+            "immig/negative_risk/mean",
+            "immig/positive_risk/mean",
+        ]
+
+    def test_zero_supporting_raises(self):
+        heads = {"cca": _StubHead(_LossWithoutIntermediates())}
+        with pytest.raises(ValueError, match="return_intermediates"):
+            build_trackers(
+                DiagnosticsConfig(),
+                group_fn=_group_fn,
+                heads=heads,
+                trainable_variables=_vars("cca/w"),
+            )
+
+    def test_loss_fn_none_treated_as_unsupported(self):
+        heads = {"cca": _StubHead(None)}
+        with pytest.raises(ValueError, match="return_intermediates"):
+            build_trackers(
+                DiagnosticsConfig(),
+                group_fn=_group_fn,
+                heads=heads,
+                trainable_variables=_vars("cca/w"),
+            )
+
+    def test_partial_support_warns_and_skips_unsupported(self):
+        heads = {
+            "cca": _StubHead(_LossWithIntermediates()),
+            "bce_head": _StubHead(_LossWithoutIntermediates()),
+        }
+        with pytest.warns(UserWarning, match="bce_head"):
+            bundle = build_trackers(
+                DiagnosticsConfig(),
+                group_fn=_group_fn,
+                heads=heads,
+                trainable_variables=_vars("cca/w"),
+            )
+        names = sorted(t.name for t in bundle["per_step"]["loss_component"])
+        assert names == [
+            "cca/correction_triggered/mean",
+            "cca/negative_risk/mean",
+            "cca/positive_risk/mean",
+        ]
+
+    def test_disable_loss_components_skips_guard_entirely(self):
+        # enable_loss_components=False → no guard, no raise even with
+        # zero supporting losses.
+        heads = {"cca": _StubHead(_LossWithoutIntermediates())}
+        bundle = build_trackers(
+            DiagnosticsConfig(enable_loss_components=False),
+            group_fn=_group_fn,
+            heads=heads,
+            trainable_variables=_vars("cca/w"),
+        )
+        assert bundle["per_step"]["loss_component"] == []
