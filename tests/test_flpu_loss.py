@@ -604,6 +604,11 @@ class TestLossComponentCorrectness:
         scalar, c = loss.call(y_true, y_pred, return_intermediates=True)
         neg = float(c["negative_risk"])
         fired = float(c["correction_triggered"])
+        # Precondition: these confident-correct inputs must drive
+        # negative_risk negative so the correction-firing branch is the one
+        # actually exercised. Fail loudly (rather than silently passing the
+        # else branch) if a future change makes the inputs no longer fire it.
+        assert neg < 0.0, f"expected negative_risk < 0 to exercise firing branch; got {neg}"
         if neg < 0.0:
             assert fired == 1.0
             np.testing.assert_allclose(float(scalar), float(c["positive_risk"]), rtol=1e-5)
@@ -624,6 +629,10 @@ class TestLossComponentCorrectness:
         scalar, c = loss.call(y_true, y_pred, return_intermediates=True)
         neg = float(c["negative_risk"])
         fired = float(c["correction_triggered"])
+        # Precondition: with nn_beta=0.0 the clawback predicate is
+        # negative_risk < 0; these inputs must satisfy it so the clawback
+        # firing branch is the one exercised. Fail loudly if not.
+        assert neg < -0.0, f"expected negative_risk < -nn_beta to exercise clawback branch; got {neg}"
         if neg < -0.0:
             assert fired == 1.0
             np.testing.assert_allclose(float(scalar), -1.0 * neg, rtol=1e-5)
