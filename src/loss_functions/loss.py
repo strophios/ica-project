@@ -119,7 +119,7 @@ class FLPULoss(keras.losses.Loss):
         self.unlabeled = 0
         self.min_count = 1.0
 
-    def call(self, y_true, y_pred):
+    def call(self, y_true, y_pred, return_intermediates=False):
         # Boolean masks per sub-population, cast to float for elementwise
         # multiplication. Reshape to 1-D so the masks line up with the
         # per-sample focal loss output (which is also 1-D under reduction="none").
@@ -166,14 +166,26 @@ class FLPULoss(keras.losses.Loss):
             # Standard nnPU: clip the negative risk at 0 to prevent the
             # bias-correction subtraction from going negative due to
             # overfitting on the positive samples.
-            return positive_risk + ops.maximum(negative_risk, 0)
+            loss = positive_risk + ops.maximum(negative_risk, 0)
+            correction_triggered = ops.cast(negative_risk < 0, "float32")
+        else:
+            # Kiryo "active recovery" branch: when the negative risk falls below
+            # -nn_beta, take a gradient-ascent step on the (negated) negative
+            # risk, scaled by nn_gamma, while ignoring the positive risk for
+            # this step. Intent: actively claw back from overfitting.
+            loss = ops.cond(
+                pred=negative_risk < -self.nn_beta,
+                true_fn=lambda: -self.nn_gamma * negative_risk,
+                false_fn=lambda: positive_risk + negative_risk,
+            )
+            correction_triggered = ops.cast(
+                negative_risk < -self.nn_beta, "float32"
+            )
 
-        # Kiryo "active recovery" branch: when the negative risk falls below
-        # -nn_beta, take a gradient-ascent step on the (negated) negative
-        # risk, scaled by nn_gamma, while ignoring the positive risk for
-        # this step. Intent: actively claw back from overfitting.
-        return ops.cond(
-            pred=negative_risk < -self.nn_beta,
-            true_fn=lambda: -self.nn_gamma * negative_risk,
-            false_fn=lambda: positive_risk + negative_risk,
-        )
+        if return_intermediates:
+            return loss, {
+                "positive_risk": positive_risk,
+                "negative_risk": negative_risk,
+                "correction_triggered": correction_triggered,
+            }
+        return loss

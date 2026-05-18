@@ -480,3 +480,86 @@ class TestProductionConfiguration:
             f"FLPU produced non-finite loss under float16 inputs: {out}. "
             f"mixed_float16 training would immediately NaN."
         )
+
+
+# -----------------------------------------------------------------------------
+# return_intermediates parameter: optional exposure of loss components
+# -----------------------------------------------------------------------------
+
+class TestReturnIntermediates:
+    """Tests for the optional return_intermediates parameter on FLPULoss.call.
+
+    When False (default), call returns a scalar loss (backward compatible).
+    When True, call returns (loss, components_dict) where components_dict
+    holds the intermediate tensors. The loss scalar must be identical between
+    paths (bit-identical by design, not coincidence)."""
+
+    def test_default_path_returns_scalar(self):
+        loss = FLPULoss(prior=0.1)
+        y_true, y_pred = _batch(
+            positive_logits=[2.0, 1.0, -1.0],
+            unlabeled_logits=[-3.0, -1.0, 0.0, 1.0],
+        )
+        out = loss.call(y_true, y_pred)
+        # scalar tensor, not a tuple
+        assert not isinstance(out, tuple)
+        assert float(out) == float(out)  # finite, indexable as scalar
+
+    def test_flag_path_returns_scalar_and_dict(self):
+        loss = FLPULoss(prior=0.1)
+        y_true, y_pred = _batch(
+            positive_logits=[2.0, 1.0, -1.0],
+            unlabeled_logits=[-3.0, -1.0, 0.0, 1.0],
+        )
+        out = loss.call(y_true, y_pred, return_intermediates=True)
+        assert isinstance(out, tuple) and len(out) == 2
+        scalar, comps = out
+        assert set(comps.keys()) == {
+            "positive_risk", "negative_risk", "correction_triggered"
+        }
+
+    def test_loss_scalar_bit_identical_between_paths(self):
+        # Design DoD: loss scalar is bit-identical with/without the flag.
+        loss = FLPULoss(prior=0.1)
+        y_true, y_pred = _batch(
+            positive_logits=[2.0, 1.0, -1.0],
+            unlabeled_logits=[-3.0, -1.0, 0.0, 1.0],
+        )
+        scalar_only = loss.call(y_true, y_pred)
+        scalar_with, _ = loss.call(y_true, y_pred, return_intermediates=True)
+        assert float(scalar_only) == float(scalar_with)  # exact equality
+
+    def test_loss_scalar_bit_identical_clawback_path(self):
+        loss = FLPULoss(prior=0.1, kiryo_clawback=True)
+        y_true, y_pred = _batch(
+            positive_logits=[2.0, 1.0, -1.0],
+            unlabeled_logits=[-3.0, -1.0, 0.0, 1.0],
+        )
+        scalar_only = loss.call(y_true, y_pred)
+        scalar_with, _ = loss.call(y_true, y_pred, return_intermediates=True)
+        assert float(scalar_only) == float(scalar_with)
+
+    def test_direct_call_equals_dunder_call(self):
+        # Pins the equivalence that justifies the flag-on head path using
+        # loss_fn.call(...) directly rather than loss_fn(...).
+        loss = FLPULoss(prior=0.1)
+        y_true, y_pred = _batch(
+            positive_logits=[2.0, 1.0, -1.0],
+            unlabeled_logits=[-3.0, -1.0, 0.0, 1.0],
+        )
+        via_dunder = float(loss(y_true, y_pred))
+        via_call = float(loss.call(y_true, y_pred))
+        np.testing.assert_allclose(via_dunder, via_call, rtol=1e-6)
+
+    def test_existing_dunder_call_path_unchanged(self):
+        # Back-compat: the __call__ path (used by all existing tests) still
+        # returns a finite scalar identical to pre-change behavior.
+        loss = FLPULoss(prior=0.1, focal_gamma=2.0)
+        y_true, y_pred = _batch(
+            positive_logits=[2.0, 1.0, -1.0],
+            unlabeled_logits=[-3.0, -1.0, 0.0, 1.0],
+        )
+        expected = _numpy_reference_flpu(
+            y_true, y_pred, prior=0.1, focal_gamma=2.0
+        )
+        np.testing.assert_allclose(_scalar(loss(y_true, y_pred)), expected, rtol=1e-4)
