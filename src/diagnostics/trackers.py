@@ -30,11 +30,16 @@ _VALID_AGGREGATIONS = ("max", "mean")
 def _norm_of_gradient(grad: tf.Tensor | tf.IndexedSlices) -> tf.Tensor:
     """L2 norm of a gradient, handling sparse IndexedSlices.
 
-    For IndexedSlices the unselected rows are implicitly zero, so the norm of
-    the dense-equivalent tensor equals the norm of the .values block.
+    Returns the L2 norm of the dense-equivalent gradient. For IndexedSlices,
+    duplicate indices are additively combined (as the optimizer applies them),
+    so the returned norm matches the magnitude the optimizer uses.
     """
     if isinstance(grad, tf.IndexedSlices):
-        return tf.norm(grad.values)
+        # IndexedSlices with duplicate indices: sum rows with same index before norm
+        summed = tf.math.unsorted_segment_sum(
+            grad.values, grad.indices, grad.dense_shape[0]
+        )
+        return tf.norm(summed)
     return tf.norm(grad)
 
 

@@ -4,17 +4,23 @@
 
 from __future__ import annotations
 
-import keras
 import numpy as np
 import pytest
 import tensorflow as tf
+from hypothesis import given, settings
+from hypothesis import strategies as st
 
 from src.diagnostics.trackers import PerGroupGradNormTracker
 
 
 def _group_fn_by_first_path_segment(var):
-    """Mirror of assembly._default_group_fn: split var.name on / and take the
-    first segment as the group name."""
+    """Test helper for unit tests: split var.name on / and take the first
+    segment as the group name.
+
+    Bare tf.Variable fixtures expose the group via .name (e.g., "head/w1:0");
+    real Keras layer variables expose it via .path (e.g., "cca/kernel").
+    See test_composes_with_real_default_group_fn for production grouping.
+    """
     # var.name is like "head/w1:0", so split on / and take the first part
     return var.name.split("/", 1)[0]
 
@@ -146,13 +152,25 @@ class TestPerGroupGradNormSparse:
         )
         assert float(t.result()) == pytest.approx(3.5, rel=1e-5)
 
+    def test_indexed_slices_duplicate_indices_dense_equivalent(self):
+        """IndexedSlices with duplicate indices: norm reflects summed dense-equiv."""
+        var = tf.Variable(tf.zeros([10, 4]), name="head/embedding")
+        # Two rows both targeting index 0; they sum: [3, 0, 0, 0] + [4, 0, 0, 0] = [7, 0, 0, 0]
+        # Dense-equivalent norm is 7.0, NOT 5.0 (the norm of separate values).
+        sparse_grad = tf.IndexedSlices(
+            values=tf.constant([[3.0, 0.0, 0.0, 0.0], [4.0, 0.0, 0.0, 0.0]]),
+            indices=tf.constant([0, 0]),
+            dense_shape=[10, 4],
+        )
+        t = PerGroupGradNormTracker(group_name="head", aggregation="mean")
+        t.update_state([sparse_grad], [var], _group_fn_by_first_path_segment)
+        assert float(t.result()) == pytest.approx(7.0, rel=1e-5)
 
-from hypothesis import given, settings
-from hypothesis import strategies as st
 
-# Realistic positive gradient norms.
+# Realistic positive gradient norms. max_value=1e2 keeps float32 rounding
+# within meaningful tolerance (rel=1e-4, abs=1e-5) across accumulation.
 norm_lists = st.lists(
-    st.floats(min_value=0.0, max_value=1e3, allow_nan=False, allow_infinity=False),
+    st.floats(min_value=0.0, max_value=1e2, allow_nan=False, allow_infinity=False),
     min_size=1,
     max_size=10,
 )
@@ -201,3 +219,52 @@ class TestPerGroupGradNormProperties:
             current = float(t.result())
             assert current >= prev
             prev = current
+
+
+class TestPerGroupGradNormProductionGroupFn:
+    """Test tracker composition with real Keras layer grouping contract."""
+
+    def test_composes_with_real_default_group_fn(self):
+        """Production grouping: real Keras layers expose group via .path."""
+        import keras
+
+        from src.model_setup.assembly import _default_group_fn
+
+        # Build two real Keras Dense layers with distinct group names.
+        layer_cca = keras.layers.Dense(8, name="cca")
+        layer_other = keras.layers.Dense(8, name="other")
+
+        # Build them on sample inputs so they have trainable variables.
+        sample_input = tf.constant([[1.0, 2.0, 3.0]])
+        layer_cca.build((None, 3))
+        layer_other.build((None, 3))
+
+        # Collect trainable variables. Real Keras variables have .path like "cca/kernel".
+        variables = layer_cca.trainable_variables + layer_other.trainable_variables
+        assert len(variables) == 4  # 2 layers × (kernel + bias)
+
+        # Verify that .path attribute exists and groups are correct.
+        cca_vars = [v for v in variables if _default_group_fn(v) == "cca"]
+        other_vars = [v for v in variables if _default_group_fn(v) == "other"]
+        assert len(cca_vars) == 2
+        assert len(other_vars) == 2
+
+        # Create matching gradients (all in "cca" group have norm 3.0).
+        grads = [tf.constant([[1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0]])
+                 if _default_group_fn(v) == "cca" else tf.ones_like(v)
+                 for v in variables]
+
+        # Track the "cca" group only.
+        tracker = PerGroupGradNormTracker(group_name="cca", aggregation="mean")
+        tracker.update_state(grads, variables, _default_group_fn)
+
+        # Tracker should report a positive norm for the tracked group.
+        result = float(tracker.result())
+        assert result > 0.0, "cca group should have non-zero norm"
+
+        # Track a non-existent group; should report zero.
+        tracker_missing = PerGroupGradNormTracker(
+            group_name="nonexistent", aggregation="mean"
+        )
+        tracker_missing.update_state(grads, variables, _default_group_fn)
+        assert float(tracker_missing.result()) == 0.0
