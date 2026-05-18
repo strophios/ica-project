@@ -367,3 +367,43 @@ class TestExposeLossComponents:
             expose_loss_components=True,
         )
         assert head.expose_loss_components is True
+
+
+class TestExposeLossComponentsFlagOn:
+    def _head(self):
+        return ClassificationHead(
+            hidden_dim=HIDDEN_DIM,
+            loss_fn=FLPULoss(prior=0.1),
+            name="h",
+            expose_loss_components=True,
+        )
+
+    def test_last_components_populated_after_call(self):
+        head = self._head()
+        _ = head(_dummy_features(), targets=_dummy_targets())
+        assert head.last_components is not None
+        assert set(head.last_components.keys()) == {
+            "positive_risk", "negative_risk", "correction_triggered"
+        }
+
+    def test_single_loss_registered(self):
+        head = self._head()
+        _ = head(_dummy_features(), targets=_dummy_targets())
+        assert len(head.losses) == 1  # single computation, single registration
+
+    def test_repeated_calls_update_to_latest(self):
+        head = self._head()
+        _ = head(_dummy_features(), targets=_dummy_targets())
+        first = {k: float(v) for k, v in head.last_components.items()}
+        # Different batch → different components.
+        other_targets = 1 - _dummy_targets()
+        _ = head(_dummy_features(), targets=other_targets)
+        second = {k: float(v) for k, v in head.last_components.items()}
+        assert head.last_components is not None
+        assert first.keys() == second.keys()
+
+    def test_inference_call_leaves_last_components_untouched(self):
+        head = self._head()
+        out = head(_dummy_features(), targets=None)  # inference
+        assert out.shape[-1] == 1
+        assert head.last_components is None  # never set without targets
