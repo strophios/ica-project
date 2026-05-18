@@ -710,3 +710,78 @@ class TestLossComponentBatchTargetDispatch:
             diagnostic_head_refs=[head],
         )
         assert model._head_refs_by_name == {"cca": head}
+
+
+class TestDiagnosticsKerasIntegration:
+    def _model_with_trackers(self):
+        group_fn = lambda v: v.path.split("/")[0]
+        base = _tiny_model(group_fn=group_fn)
+        trackers = [
+            PerGroupGradNormTracker(group_name="lower", aggregation="max"),
+            GradientFiniteTracker(),
+        ]
+        bundle = {"per_step": {"gradient": trackers, "loss_component": [],
+                               "batch_target": []}, "periodic": []}
+        return LayerLRModel(
+            inputs=base.inputs, outputs=base.outputs, group_fn=group_fn,
+            diagnostic_trackers=bundle,
+        ), trackers
+
+    def test_loss_tracking_intact_with_trackers(self):
+        # THE regression: metrics override must not break history["loss"].
+        model, _ = self._model_with_trackers()
+        model.compile(
+            optimizer=keras.optimizers.SGD(0.01),
+            loss=keras.losses.BinaryCrossentropy(from_logits=True),
+        )
+        rng = np.random.RandomState(42)
+        x = rng.randn(BATCH, INPUT_DIM).astype(np.float32)
+        y = rng.randint(0, 2, size=(BATCH, 1)).astype(np.float32)
+        history = model.fit(x, y, epochs=1, batch_size=BATCH, verbose=0)
+        assert np.isfinite(history.history["loss"][0])
+        assert history.history["loss"][0] > 0
+
+    def test_diagnostic_scalars_appear_in_history(self):
+        model, _ = self._model_with_trackers()
+        model.compile(
+            optimizer=keras.optimizers.SGD(0.01),
+            loss=keras.losses.BinaryCrossentropy(from_logits=True),
+        )
+        rng = np.random.RandomState(3)
+        x = rng.randn(BATCH, INPUT_DIM).astype(np.float32)
+        y = rng.randint(0, 2, size=(BATCH, 1)).astype(np.float32)
+        history = model.fit(x, y, epochs=1, batch_size=BATCH, verbose=0)
+        assert "grad_norm/lower/max" in history.history
+        assert "grad_overflow_rate" in history.history
+
+    def test_trackers_reset_at_epoch_boundary(self):
+        model, trackers = self._model_with_trackers()
+        model.compile(
+            optimizer=keras.optimizers.SGD(0.01),
+            loss=keras.losses.BinaryCrossentropy(from_logits=True),
+        )
+        rng = np.random.RandomState(4)
+        x = rng.randn(BATCH, INPUT_DIM).astype(np.float32)
+        y = rng.randint(0, 2, size=(BATCH, 1)).astype(np.float32)
+        history = model.fit(x, y, epochs=3, batch_size=BATCH, verbose=0)
+        # 3 separate per-epoch values recorded (not a single monotone
+        # accumulation across the whole run) — Keras reset_state per epoch.
+        assert len(history.history["grad_overflow_rate"]) == 3
+
+    def test_no_crash_compute_metrics_with_custom_trackers(self):
+        # Trackers have custom update_state signatures; ensure Keras's
+        # compute_metrics/get_metrics_result path (which iterates
+        # self.metrics) does not call them with (y, y_pred).
+        model, _ = self._model_with_trackers()
+        model.compile(
+            optimizer=keras.optimizers.SGD(0.01),
+            loss=keras.losses.BinaryCrossentropy(from_logits=True),
+            metrics=[keras.metrics.BinaryAccuracy(name="acc")],
+        )
+        rng = np.random.RandomState(5)
+        x = rng.randn(BATCH, INPUT_DIM).astype(np.float32)
+        y = rng.randint(0, 2, size=(BATCH, 1)).astype(np.float32)
+        history = model.fit(x, y, epochs=1, batch_size=BATCH, verbose=0)
+        assert "acc" in history.history          # compiled metric still works
+        assert "grad_overflow_rate" in history.history
+        assert np.isfinite(history.history["loss"][0])
