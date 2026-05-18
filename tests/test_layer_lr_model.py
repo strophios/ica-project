@@ -32,7 +32,6 @@ import numpy as np
 import pytest
 
 import keras  # noqa: F401
-import tensorflow as tf
 
 from src.model_setup.layer_lr_model import LayerLRModel
 from src.model_setup.heads import ClassificationHead
@@ -40,7 +39,6 @@ from src.diagnostics.trackers import (
     PerGroupGradNormTracker,
     GradientFiniteTracker,
     LossComponentTracker,
-    BatchLabelBalanceTracker,
 )
 from src.loss_functions.loss import FLPULoss
 
@@ -571,7 +569,8 @@ class TestGradientDiagnosticDispatch:
         # AFTER). So if trackers observe the raw gradient (correct), both
         # report the SAME norm. If they observed multiplier*grad (the bug
         # this guards), the 10.0-model's tracker would be ~10x the other.
-        group_fn = lambda v: v.path.split("/")[0]
+        def group_fn(v):
+            return v.path.split("/")[0]
         rng = np.random.RandomState(1)
         x = rng.randn(BATCH, INPUT_DIM).astype(np.float32)
         y = rng.randint(0, 2, size=(BATCH, 1)).astype(np.float32)
@@ -714,7 +713,8 @@ class TestLossComponentBatchTargetDispatch:
 
 class TestDiagnosticsKerasIntegration:
     def _model_with_trackers(self):
-        group_fn = lambda v: v.path.split("/")[0]
+        def group_fn(v):
+            return v.path.split("/")[0]
         base = _tiny_model(group_fn=group_fn)
         trackers = [
             PerGroupGradNormTracker(group_name="lower", aggregation="max"),
