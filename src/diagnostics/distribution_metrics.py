@@ -78,19 +78,28 @@ class PredictionFracAboveMetric(keras.metrics.Metric):
 
 class PredictionStdMetric(keras.metrics.Metric):
     """Population std (ddof=0) of sigmoid(logits) over all samples seen
-    since last reset: sqrt(max(E[s^2] - E[s]^2, 0))."""
+    since last reset: sqrt(max(E[s^2] - E[s]^2, 0)).
+
+    Accumulates state in float64 to avoid catastrophic cancellation in the
+    near-constant case (E[s^2] ≈ E[s]^2 when std ≈ 0). The subtraction
+    must have enough precision to correctly compute ~0 instead of float32 noise.
+    """
 
     def __init__(self, name="pred_dist/std", dtype=None):
         super().__init__(name=name, dtype=dtype)
-        self._sum = self.add_variable(shape=(), initializer="zeros", name="sum")
-        self._sum_sq = self.add_variable(shape=(), initializer="zeros", name="sum_sq")
-        self._count = self.add_variable(shape=(), initializer="zeros", name="count")
+        # Accumulate in float64 for numerical stability in E[s^2] - E[s]^2.
+        self._sum = self.add_variable(shape=(), initializer="zeros", name="sum", dtype="float64")
+        self._sum_sq = self.add_variable(shape=(), initializer="zeros", name="sum_sq", dtype="float64")
+        self._count = self.add_variable(shape=(), initializer="zeros", name="count", dtype="float64")
 
     def update_state(self, y_true, y_pred, sample_weight=None):
+        # Sigmoid in float32 for parity with PredictionMeanMetric/PredictionFracAboveMetric.
         s = ops.sigmoid(ops.cast(y_pred, "float32"))
-        self._sum.assign_add(ops.sum(s))
-        self._sum_sq.assign_add(ops.sum(s * s))
-        self._count.assign_add(ops.cast(ops.size(s), self._count.dtype))
+        # Cast to float64 for accumulation to preserve precision.
+        s_f64 = ops.cast(s, "float64")
+        self._sum.assign_add(ops.sum(s_f64))
+        self._sum_sq.assign_add(ops.sum(s_f64 * s_f64))
+        self._count.assign_add(ops.cast(ops.size(s), "float64"))
 
     def result(self):
         mean = ops.divide_no_nan(self._sum, self._count)

@@ -98,6 +98,14 @@ class TestPredictionStdMetric:
         m.update_state(None, _logits(0.0, 0.0, 0.0))  # all 0.5
         assert float(m.result()) == pytest.approx(0.0, abs=1e-5)
 
+    def test_zero_std_large_constant_logits(self):
+        # Regression test for float32 catastrophic cancellation.
+        # Large constant logits → sigmoid ≈ 1.0 (exactly equal in float32).
+        # E[s²] ≈ E[s]² numerically, but the subtraction must not yield float32 noise.
+        m = PredictionStdMetric()
+        m.update_state(None, _logits(30.0, 30.0, 30.0, 30.0))
+        assert float(m.result()) == pytest.approx(0.0, abs=1e-5)
+
     def test_matches_numpy_population_std(self):
         m = PredictionStdMetric()
         logits = [2.0, -1.0, 0.5, -3.0, 1.0]
