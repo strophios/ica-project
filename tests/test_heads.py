@@ -26,6 +26,7 @@ import pytest
 
 # Import keras before our head module so the backend gets initialized.
 import keras  # noqa: F401
+import tensorflow as tf
 
 from src.model_setup.heads import ClassificationHead
 from src.loss_functions.loss import FLPULoss
@@ -313,3 +314,56 @@ class TestMetrics:
         assert "immig_binary_accuracy" in immig_names
         assert "cca_precision" in cca_names
         assert "immig_precision" in immig_names
+
+
+# -----------------------------------------------------------------------------
+# Loss-component exposure
+# -----------------------------------------------------------------------------
+
+class _StubLossNoIntermediates(keras.losses.Loss):
+    def call(self, y_true, y_pred):
+        return tf.constant(0.0)
+
+
+class TestExposeLossComponents:
+    def test_flag_off_default_last_components_none(self):
+        head = ClassificationHead(
+            hidden_dim=HIDDEN_DIM, loss_fn=FLPULoss(prior=0.1), name="h"
+        )
+        _ = head(_dummy_features(), targets=_dummy_targets())
+        assert head.last_components is None
+        assert len(head.losses) == 1
+
+    def test_flag_off_behavior_matches_existing_endpoint_contract(self):
+        head = ClassificationHead(
+            hidden_dim=HIDDEN_DIM, loss_fn=FLPULoss(prior=0.1), name="h"
+        )
+        out = head(_dummy_features(), targets=_dummy_targets())
+        assert out.shape[-1] == 1
+        assert len(head.losses) == 1
+
+    def test_construction_guard_rejects_incapable_loss(self):
+        with pytest.raises(ValueError, match="return_intermediates"):
+            ClassificationHead(
+                hidden_dim=HIDDEN_DIM,
+                loss_fn=_StubLossNoIntermediates(),
+                name="h",
+                expose_loss_components=True,
+            )
+
+    def test_construction_guard_not_triggered_when_loss_none(self):
+        # loss_fn=None (standard mode): flag is inert, no raise.
+        head = ClassificationHead(
+            hidden_dim=HIDDEN_DIM, name="h", expose_loss_components=True
+        )
+        assert head.expose_loss_components is True
+        assert head.last_components is None
+
+    def test_construction_guard_passes_with_flpu(self):
+        head = ClassificationHead(
+            hidden_dim=HIDDEN_DIM,
+            loss_fn=FLPULoss(prior=0.1),
+            name="h",
+            expose_loss_components=True,
+        )
+        assert head.expose_loss_components is True

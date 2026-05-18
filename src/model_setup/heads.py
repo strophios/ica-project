@@ -33,6 +33,8 @@ Planned (not yet implemented):
     (see `docs/notes/tier2-design.md` Piece 1, "Open decision").
 """
 
+import inspect
+
 import keras
 
 
@@ -117,6 +119,7 @@ class ClassificationHead(keras.layers.Layer):
         metrics=None,
         *,
         name,
+        expose_loss_components=False,
     ):
         if name is None:
             raise ValueError(
@@ -129,6 +132,20 @@ class ClassificationHead(keras.layers.Layer):
         self.hidden_dim = hidden_dim
         self.dropout_rate = dropout
         self.loss_fn = loss_fn
+
+        self.expose_loss_components = expose_loss_components
+        self.last_components = None
+        if expose_loss_components and loss_fn is not None:
+            if "return_intermediates" not in inspect.signature(
+                loss_fn.call
+            ).parameters:
+                raise ValueError(
+                    f"ClassificationHead {name!r} was constructed with "
+                    f"expose_loss_components=True but its loss "
+                    f"{type(loss_fn).__name__} does not accept a "
+                    f"`return_intermediates` parameter. Loss-component "
+                    f"harvest requires an FLPU-style loss."
+                )
 
         # Per-head metrics. Each metric is renamed to be prefixed with
         # this head's name to avoid collisions when a multi-head model
@@ -201,7 +218,14 @@ class ClassificationHead(keras.layers.Layer):
         # for head-internal metrics.
         if targets is not None:
             if self.loss_fn is not None:
-                self.add_loss(self.loss_fn(targets, logits))
+                if self.expose_loss_components:
+                    loss, components = self.loss_fn.call(
+                        targets, logits, return_intermediates=True
+                    )
+                    self.last_components = components
+                    self.add_loss(loss)
+                else:
+                    self.add_loss(self.loss_fn(targets, logits))
             for metric in self.metric_objs:
                 metric.update_state(targets, logits)
         return logits
