@@ -540,6 +540,19 @@ class DiagnosticsConfig:
                     f"be in {_VALID_SUMMARY_STATS}; got {stat!r}."
                 )
 
+    @classmethod
+    def _from_dict(
+        cls, payload: dict, _source: str = "<dict>"
+    ) -> "DiagnosticsConfig":
+        kwargs = _filter_known_fields(cls, payload, _source=_source)
+        # dataclasses.asdict + json serializes tuples as arrays; they
+        # deserialize as lists. Coerce back so __post_init__'s tuple
+        # checks (and equality with default tuples) hold.
+        for tuple_field in ("gradient_norm_aggregations", "prediction_summary_stats"):
+            if tuple_field in kwargs and isinstance(kwargs[tuple_field], list):
+                kwargs[tuple_field] = tuple(kwargs[tuple_field])
+        return cls(**kwargs)
+
 
 # ---------------------------------------------------------------------------
 # Run config (the top-level container)

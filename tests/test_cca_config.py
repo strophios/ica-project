@@ -836,3 +836,52 @@ class TestDiagnosticsAggregationConstantSync:
         from src.diagnostics.trackers import _VALID_AGGREGATIONS
 
         assert _VALID_GRADIENT_AGGREGATIONS == _VALID_AGGREGATIONS
+
+
+class TestDiagnosticsConfigFromDict:
+    def test_roundtrip_default(self):
+        from src.cca_config import DiagnosticsConfig
+
+        original = DiagnosticsConfig()
+        payload = json.loads(json.dumps(dataclasses.asdict(original)))
+        reconstructed = DiagnosticsConfig._from_dict(payload)
+        assert reconstructed == original
+
+    def test_roundtrip_non_default(self):
+        from src.cca_config import DiagnosticsConfig
+
+        original = DiagnosticsConfig(
+            enable_overflow_proxy=False,
+            enable_prediction_distribution=False,
+            gradient_norm_aggregations=("mean",),
+            prediction_summary_stats=("mean", "std"),
+        )
+        payload = json.loads(json.dumps(dataclasses.asdict(original)))
+        reconstructed = DiagnosticsConfig._from_dict(payload)
+        assert reconstructed == original
+
+    def test_list_payload_coerced_to_tuple(self):
+        from src.cca_config import DiagnosticsConfig
+
+        # JSON arrays deserialize as lists; _from_dict must coerce.
+        payload = {
+            "gradient_norm_aggregations": ["max", "mean"],
+            "prediction_summary_stats": ["mean", "std", "frac_above_0.5"],
+        }
+        c = DiagnosticsConfig._from_dict(payload)
+        assert isinstance(c.gradient_norm_aggregations, tuple)
+        assert isinstance(c.prediction_summary_stats, tuple)
+        assert c.gradient_norm_aggregations == ("max", "mean")
+
+    def test_unknown_key_warns_and_ignored(self):
+        from src.cca_config import DiagnosticsConfig
+
+        with pytest.warns(UserWarning, match="Unknown field"):
+            c = DiagnosticsConfig._from_dict({"enable_gradient_norms": False, "bogus": 1})
+        assert c.enable_gradient_norms is False
+
+    def test_missing_keys_use_defaults(self):
+        from src.cca_config import DiagnosticsConfig
+
+        # All fields defaulted → empty payload reconstructs the default.
+        assert DiagnosticsConfig._from_dict({}) == DiagnosticsConfig()
