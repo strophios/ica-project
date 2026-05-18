@@ -276,13 +276,16 @@ class LayerLRModel(keras.Model):
             # In standard mode, y is the targets dict.
             targets_for_dispatch = y
             if y is None and isinstance(x, dict):
-                # Endpoint mode: extract {head}_targets from x into a
-                # {head}: value dict for batch-target tracker consumption.
+                # Endpoint mode: targets are packed into x as Keras Inputs named
+                # f"{head_name}_targets" (see assembly.build_endpoint_model). Map ONLY
+                # keys for actually-configured heads (defense-in-depth: structurally
+                # correct rather than relying on no other input key ending in
+                # "_targets").
                 targets_for_dispatch = {}
-                for k, v in x.items():
-                    if k.endswith("_targets"):
-                        head_name = k[:-8]  # Remove "_targets" suffix
-                        targets_for_dispatch[head_name] = v
+                for head_name in self._head_refs_by_name:
+                    target_key = f"{head_name}_targets"
+                    if target_key in x:
+                        targets_for_dispatch[head_name] = x[target_key]
             self._dispatch_diagnostics(gradients, targets_for_dispatch)
         # Scale each gradient by its variable's multiplier. Two
         # subtleties handled here:
