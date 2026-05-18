@@ -414,3 +414,65 @@ class TestExposeLossComponentsFlagOn:
         out = head(_dummy_features(), targets=None)  # inference
         assert out.shape[-1] == 1
         assert head.last_components is None  # never set without targets
+
+
+class TestDistributionMetricsIntegration:
+    def _metrics(self):
+        from src.cca_config import DiagnosticsConfig
+        from src.diagnostics.distribution_metrics import make_distribution_metrics
+        return make_distribution_metrics(DiagnosticsConfig())
+
+    def test_head_clones_distribution_metrics_with_prefix(self):
+        head = ClassificationHead(
+            hidden_dim=HIDDEN_DIM,
+            loss_fn=FLPULoss(prior=0.1),
+            name="cca",
+            metrics=self._metrics(),
+        )
+        names = {m.name for m in head.metric_objs}
+        assert "cca_pred_dist/mean" in names
+        assert "cca_pred_dist/std" in names
+        assert "cca_pred_dist/frac_above_0.5" in names
+
+    def test_distribution_metrics_update_during_call(self):
+        head = ClassificationHead(
+            hidden_dim=HIDDEN_DIM,
+            loss_fn=FLPULoss(prior=0.1),
+            name="cca",
+            metrics=self._metrics(),
+        )
+        _ = head(_dummy_features(), targets=_dummy_targets())
+        by_name = {m.name: m for m in head.metric_objs}
+        mean_v = float(by_name["cca_pred_dist/mean"].result())
+        frac_v = float(by_name["cca_pred_dist/frac_above_0.5"].result())
+        std_v = float(by_name["cca_pred_dist/std"].result())
+        assert 0.0 <= mean_v <= 1.0
+        assert 0.0 <= frac_v <= 1.0
+        assert std_v >= 0.0
+
+    def test_distribution_metrics_coexist_with_cca_metrics(self):
+        from src.cca_metrics import make_cca_metrics
+        combined = make_cca_metrics() + self._metrics()
+        head = ClassificationHead(
+            hidden_dim=HIDDEN_DIM,
+            loss_fn=FLPULoss(prior=0.1),
+            name="cca",
+            metrics=combined,
+        )
+        names = {m.name for m in head.metric_objs}
+        # quality metrics + distribution metrics both present, prefixed
+        assert "cca_precision" in names
+        assert "cca_pred_dist/mean" in names
+
+    def test_no_distribution_metrics_when_disabled(self):
+        from src.cca_config import DiagnosticsConfig
+        from src.diagnostics.distribution_metrics import make_distribution_metrics
+        head = ClassificationHead(
+            hidden_dim=HIDDEN_DIM,
+            loss_fn=FLPULoss(prior=0.1),
+            name="cca",
+            metrics=make_distribution_metrics(
+                DiagnosticsConfig(enable_prediction_distribution=False)
+            ),
+        )
+        assert not any("pred_dist" in m.name for m in head.metric_objs)
