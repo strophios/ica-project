@@ -680,7 +680,7 @@ class RunConfig:
             )
         if not isinstance(self.diagnostics, DiagnosticsConfig):
             raise ValueError(
-                f"RunConfig.diagnostics must be a DiagnosticsConfig instance; "
+                f"RunConfig.diagnostics must be a DiagnosticsConfig; "
                 f"got {type(self.diagnostics).__name__}."
             )
 
