@@ -589,6 +589,9 @@ class RunConfig:
     ratio_batch: RatioBatchConfig
     lr_schedule: LRScheduleConfig
     optimizer: OptimizerConfig
+    diagnostics: DiagnosticsConfig = dataclasses.field(
+        default_factory=DiagnosticsConfig
+    )
 
     def __post_init__(self):
         # --- Self-consistency: own fields ---------------------------------
@@ -674,6 +677,11 @@ class RunConfig:
             raise ValueError(
                 f"RunConfig.optimizer must be a OptimizerConfig; "
                 f"got {type(self.optimizer).__name__}."
+            )
+        if not isinstance(self.diagnostics, DiagnosticsConfig):
+            raise ValueError(
+                f"RunConfig.diagnostics must be a DiagnosticsConfig instance; "
+                f"got {type(self.diagnostics).__name__}."
             )
 
     # ----------------------------------------------------------------------
@@ -841,6 +849,18 @@ class RunConfig:
         # Replace nested-dataclass slots with reconstructed instances.
         kwargs["heads"] = heads
         kwargs.update(sub_configs)
+
+        # diagnostics is optional (back-compat): absent or null → let the
+        # RunConfig default_factory produce DiagnosticsConfig(); present
+        # dict → reconstruct. Distinct from the strict sub-config loop
+        # above, which raises on missing keys.
+        diag_payload = payload.get("diagnostics")
+        if diag_payload is not None:
+            kwargs["diagnostics"] = DiagnosticsConfig._from_dict(
+                diag_payload, _source=f"{_source}.diagnostics"
+            )
+        else:
+            kwargs.pop("diagnostics", None)  # ensure default_factory fires
 
         return cls(**kwargs)
 

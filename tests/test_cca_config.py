@@ -901,3 +901,52 @@ class TestDiagnosticsConfigFromDict:
         payload = {"prediction_summary_stats": ["variance"]}
         with pytest.raises(ValueError, match="prediction_summary_stats"):
             DiagnosticsConfig._from_dict(payload)
+
+
+class TestRunConfigDiagnosticsIntegration:
+    def test_default_factory_fires_when_constructed_without_diagnostics(self):
+        from src.cca_config import DEFAULT_CCA_CONFIG, DiagnosticsConfig
+
+        # DEFAULT_CCA_CONFIG does not pass diagnostics → default fires.
+        assert DEFAULT_CCA_CONFIG.diagnostics == DiagnosticsConfig()
+
+    def test_back_compat_sidecar_missing_diagnostics_key(self, tmp_path):
+        from src.cca_config import DEFAULT_CCA_CONFIG, DiagnosticsConfig, RunConfig
+
+        payload = dataclasses.asdict(DEFAULT_CCA_CONFIG)
+        payload.pop("diagnostics", None)  # simulate pre-Tier-5 sidecar
+        sidecar = tmp_path / "old.config.json"
+        with open(sidecar, "w") as f:
+            json.dump(payload, f)
+        reconstructed = RunConfig.from_json(sidecar)
+        assert reconstructed.diagnostics == DiagnosticsConfig()
+
+    def test_present_diagnostics_key_roundtrips(self, tmp_path):
+        from src.cca_config import DEFAULT_CCA_CONFIG, DiagnosticsConfig, RunConfig
+
+        custom = dataclasses.replace(
+            DEFAULT_CCA_CONFIG,
+            diagnostics=DiagnosticsConfig(enable_overflow_proxy=False,
+                                          gradient_norm_aggregations=("mean",)),
+        )
+        sidecar = tmp_path / "new.config.json"
+        custom.to_json(sidecar)
+        reconstructed = RunConfig.from_json(sidecar)
+        assert reconstructed.diagnostics == custom.diagnostics
+
+    def test_type_defense_rejects_non_diagnosticsconfig(self):
+        from src.cca_config import DEFAULT_CCA_CONFIG
+
+        with pytest.raises(ValueError, match="diagnostics"):
+            dataclasses.replace(DEFAULT_CCA_CONFIG, diagnostics={"enable_gradient_norms": True})
+
+    def test_null_diagnostics_in_payload_uses_default(self, tmp_path):
+        from src.cca_config import DEFAULT_CCA_CONFIG, DiagnosticsConfig, RunConfig
+
+        payload = dataclasses.asdict(DEFAULT_CCA_CONFIG)
+        payload["diagnostics"] = None  # explicit null
+        sidecar = tmp_path / "null.config.json"
+        with open(sidecar, "w") as f:
+            json.dump(payload, f)
+        reconstructed = RunConfig.from_json(sidecar)
+        assert reconstructed.diagnostics == DiagnosticsConfig()
