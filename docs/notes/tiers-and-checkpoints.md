@@ -1,6 +1,6 @@
 # Audit and Refactor: Tiers, Checkpoints, and Process
 
-*Last updated: 2026-05-14 (Tier 4 complete: hygiene + I4 LR resolution + lessons docs. Cross-phase review done; post-Tier-4 lessons-docs revision pass also done. 220 tests passing.).*
+*Last updated: 2026-06-04 (Tier 5 subagent-executable portion complete: diagnostic instrumentation + empirical-run runbooks. Phases 1–6 + Phase 7 Tasks 1–2 + Phase 8 Task 1 committed; Phase 7 Tasks 3–5 and Phase 8 Tasks 2–4 are HUMAN-OPERATED and not yet performed. 374 tests passing.).*
 
 This doc exists so that a new session — whether picked up by you after
 weeks away, by a fresh LLM collaborator, or by someone else entirely —
@@ -28,8 +28,9 @@ combined ICA head, possibly with ALUM, possibly with per-layer LRs and
 partial encoder unfreezing). The audit is the runway for that future
 work; the refactor is the runway after that.
 
-The work is organized into four tiers, each with a checkpoint at its end
-before proceeding:
+The audit/refactor work was organized into four tiers, each with a
+checkpoint at its end before proceeding (a fifth tier, post-audit
+diagnostic instrumentation, was added later):
 
 - **Tier 1 — Substantive correctness.** Math, semantics, test
   infrastructure. Get what's already in the repo actually right.
@@ -40,6 +41,11 @@ before proceeding:
   harden error-handling boundaries.
 - **Tier 4 — Hygiene.** Scratch files, dead code, scratch imports,
   naming. Low-severity but cumulative; worth the sweep.
+- **Tier 5 — Diagnostic instrumentation + empirical stress test.**
+  Post-audit, not part of the original four-tier plan: permanent
+  observability for the deferred training runs, plus the
+  human-operated runbooks for those runs. Added once the foundation
+  was solid.
 
 Each tier ends in an adversarial review checkpoint. The checkpoint's
 intent is to catch things we've rationalized past; the review's success
@@ -90,6 +96,40 @@ history; the substantive findings are addressed in `8685c47`.
   - **Cross-phase review done** (commit `76d569a`). Final cross-phase review across the whole Tier 4 closeout surfaced one Minor: `src/test_script.py`'s post-Piece-1 docstring misattributed the file's content as using the Tier 2 abstractions when in fact lines 1-185 use pre-Tier-2 inline shape (raw `keras_hub.models.Backbone.from_preset`, ad-hoc `EndpointLayer`, plain `keras.Model`). Closeout commit rewrote the docstring to accurately describe the file's actual shape and direct readers to the production scripts for examples of the Tier 2 abstractions in use.
   - **CLAUDE.md update done** (commit `f536153`, via project-claude-librarian subagent). 8 targeted edits: freshness date, test count, per-file test counts, M4a/M4b contracts, new `ResolvedSteps` API, Piece-by-piece status, residual deferrals. Replaced an earlier scope-creep CLAUDE.md attempt (`0188f39`) that was reverted (`4143c3a`) because of factual errors — Question 4 in `pinned-questions.md` captures the workflow observation that came out of that.
   - **Post-Tier-4 lessons-docs revision pass done** (commits `2b0feec` + `9b50c8a` + `e3f601f`). A read-through identified substance gaps in the original rapid-implementation drafts of the Piece 3 lessons docs. The Pedagogical-pattern entry was structurally correct but analytically thin — missed the actual *pedagogical* point (the user learns by being made to engage with substance dialogically, not just by having reasoning preserved for retrospective reading). Revision rewrote the entry, added a sub-pattern (human implementation at key code points with scaffolding), and added two new Validated entries to `process-patterns.md` (Investigator-subagent pattern; Implementation plans with file:line specificity). Four metadata-restating closing paragraphs across both lessons docs were trimmed. A new Question 4 in `pinned-questions.md` captured the n=1 "scope-creep correction via revert" observation. A new boundary condition was added to the Skill-orchestrated entry (substantive-prose work breaks the skill chain's TDD-equivalent forcing function). CLAUDE.md refreshed via the librarian. Suite still 220.
+
+**Tier 5 — Empirical Stress Test + Diagnostic Instrumentation.
+Subagent-executable portion complete** (range `10f6e01..b893644`,
+46 commits, suite 220 → 374). Permanent diagnostic instrumentation
+across 8 planned phases. Phases 1–6 + Phase 7 Tasks 1–2 + Phase 8
+Task 1 are committed, reviewed, and tested. Design reasoning (incl.
+the periodic-subsystem supersession note) in
+`docs/notes/tier5-design.md`; per-phase landing summary in the
+dedicated "Tier 5" section below.
+
+  - **Done (committed):** new `src/diagnostics/` module —
+    `trackers.py` (four per-step `keras.metrics.Metric` subclasses:
+    `PerGroupGradNormTracker`, `GradientFiniteTracker`,
+    `LossComponentTracker`, `BatchLabelBalanceTracker`), `factory.py`
+    (`build_trackers` → `DiagnosticBundle`), `distribution_metrics.py`
+    (per-head prediction-distribution metrics riding the head's
+    `metrics=` path). New `DiagnosticsConfig` sub-config on `RunConfig`
+    (10th field, back-compat default_factory). New contract surfaces:
+    `FLPULoss.call(return_intermediates=)`,
+    `ClassificationHead(expose_loss_components=)`,
+    `LayerLRModel(diagnostic_trackers=, diagnostic_head_refs=)` +
+    `metrics` override, `build_endpoint_model(diagnostics=)`.
+    `run_cca_classification.py` refactored to importable
+    `main(run_config=None, max_steps=None)` + `__main__` guard, plus a
+    `CSVLogger`. `scripts/tier5_short_run.py` (reproducible short run)
+    and `scripts/tier5_cluster.sbatch` (parameterized SLURM template).
+  - **NOT done — HUMAN-OPERATED, handed off:** Phase 7 Tasks 3–5
+    (level-1 short + level-2 full **real-data** runs on local
+    `cca_set/`, then create `docs/notes/tier5-stress-test-notes.md`)
+    and Phase 8 Tasks 2–4 (short + full **cluster** `mixed_float16`
+    runs on Explorer, then the level-3 π=0.03-vs-0.02 research
+    handoff). The empirical runs have **not** been performed;
+    `tier5-stress-test-notes.md` does not yet exist. Runbooks:
+    `docs/notes/tier5-implementation-plan/phase_07.md`, `phase_08.md`.
 
 **Whole-project final review:** Line 43 of this doc anticipated "a final adversarial pass over the whole" after Tier 4. What actually happened: each tier received its own cumulative adversarial review (Tier 1's at `8685c47`, Tier 2's at `079deff`, Tier 3's at `987a8c0`, Tier 4's at `76d569a`). A single whole-project review covering Tier 1+2+3+4 cumulatively was not run. Whether the per-tier reviews collectively suffice, or whether a single end-state pass is still worth doing, is a decision point for a future session.
 
@@ -469,6 +509,73 @@ candidate follow-up if the file's pedagogical / sandbox value
 justifies the work; not a current priority since the production
 stack is covered by `run_cca_classification.py`,
 `eval_cca_classifier.py`, and the integrated smoke test.
+
+# Tier 5: Empirical Stress Test + Diagnostic Instrumentation
+
+**Subagent-executable portion done.** Intent: make the deferred
+empirical training runs *observable* before running them — permanent
+diagnostic instrumentation (gradient norms, overflow rate, FLPU loss
+components, batch label balance, prediction-distribution collapse
+signals) plus the operator runbooks for the runs themselves. Range
+`10f6e01..b893644` (46 commits); suite 220 → 374. Design reasoning and
+the full implementation plan: `docs/notes/tier5-design.md` and
+`docs/notes/tier5-implementation-plan/phase_01.md … phase_08.md`.
+
+**Phases, with status markers:**
+
+1. **[DONE] Tracker module foundation.** `src/diagnostics/trackers.py`
+   — `PerGroupGradNormTracker`, `GradientFiniteTracker`,
+   `LossComponentTracker`, `BatchLabelBalanceTracker`. `hypothesis`
+   added as a dev dependency for property-based tracker tests.
+2. **[DONE] Config and factory.** Frozen `DiagnosticsConfig` sub-config
+   on `RunConfig` (back-compat default_factory: missing/`null` → all
+   enabled); `src/diagnostics/factory.py` `build_trackers →
+   DiagnosticBundle`. Aggregation-constant duplication between config
+   and trackers is pinned equal by `TestDiagnosticsAggregationConstantSync`.
+3. **[DONE] Loss-component harvest path.**
+   `FLPULoss.call(return_intermediates=True)` →
+   `(loss, {positive_risk, negative_risk, correction_triggered})`; the
+   loss scalar is bit-identical between the two flag paths.
+   `ClassificationHead(expose_loss_components=True)` stashes the
+   components dict on `last_components` for the train-step dispatch.
+4. **[DONE] Train-step integration.** `LayerLRModel` gains
+   `diagnostic_trackers` + `diagnostic_head_refs`, a `metrics` property
+   override, and `_dispatch_diagnostics` observing **pre-scaling** grads
+   + loss components + batch targets each step. Strict no-op
+   (byte-identical to pre-Tier-5) when `diagnostic_trackers is None`.
+5. **[DONE — original design superseded] Prediction-distribution
+   metrics.** `src/diagnostics/distribution_metrics.py`
+   (`PredictionMeanMetric`, `PredictionStdMetric` [float64 accumulation],
+   `PredictionFracAboveMetric`) ride the head's `metrics=` path, NOT the
+   originally-designed periodic-callback/reference-batch path. The
+   `DiagnosticBundle["periodic"]` slot is a permanently-empty
+   forward-compat stub with no current consumer. Supersession note in
+   `tier5-design.md` and the `distribution_metrics.py` header.
+6. **[DONE] Assembly wiring + smoke test.**
+   `build_endpoint_model(diagnostics=)` gathers trainable variables
+   (placed **after** the `freeze_encoder` block, so a frozen encoder
+   yields no spurious backbone grad tracker) and builds the bundle.
+   `run_cca_classification.py` wires distribution metrics +
+   `expose_loss_components` + `diagnostics` + a `CSVLogger`.
+7. **[Tasks 1–2 DONE; Tasks 3–5 HUMAN-OPERATED] Local stress test.**
+   Done: `run_cca_classification.py` → importable `main()`;
+   `scripts/tier5_short_run.py` (1-epoch / 200-step capped run). NOT
+   done: the level-1 short + level-2 full **real-data** runs on
+   `cca_set/`, and the resulting `docs/notes/tier5-stress-test-notes.md`.
+   Runbook: `docs/notes/tier5-implementation-plan/phase_07.md`.
+8. **[Task 1 DONE; Tasks 2–4 HUMAN-OPERATED] Cluster stress test.**
+   Done: `scripts/tier5_cluster.sbatch` parameterized SLURM template
+   (`short`/`full` mode arg, `<PLACEHOLDER_*>` operator fields). NOT
+   done: the short + full cluster `mixed_float16` runs on Explorer and
+   the level-3 π=0.03-vs-0.02 research handoff. Runbook:
+   `docs/notes/tier5-implementation-plan/phase_08.md`.
+
+**Cross-phase boundary inventory (final-review Minors, commit
+`b893644`).** Post-range closeout: an `FLPULoss`-component-keys sync
+test pinning the loss-intermediate key set against its consumers, and a
+`build_endpoint_model` `key == head.name` guard. These are the Tier 5
+instances of the boundary-inventory pattern (validate the same
+invariant at both the producing and consuming site).
 
 # How to pick up mid-work
 
