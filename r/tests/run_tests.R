@@ -6,6 +6,7 @@ if (!file.exists("r/dateline/gazetteers")) {
   stop("run_tests.R must be executed from the project root directory")
 }
 source("r/dateline/resolve_dateline.R")
+source("r/dateline/label_policy.R")
 # Load gazetteers and make available to tests via parent environment
 gz <- load_gazetteers("r/dateline/gazetteers")
 testthat::test_dir("r/tests/testthat", stop_on_failure = TRUE)

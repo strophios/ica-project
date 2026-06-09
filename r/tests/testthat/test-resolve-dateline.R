@@ -56,3 +56,22 @@ test_that("AC2.3 (R half) strip removes exactly the dateline span", {
   bi2 <- extract_dateline_block(lead2)
   expect_equal(strip_dateline(lead2, bi2), "The mayor spoke.")
 })
+
+test_that("AC1.7 desk backfill when no dateline", {
+  # Use a real DSK_NON_US value (e.g. 'Foreign Desk') and a real DSK_US value.
+  expect_false(classify_label(NA, desk_section_signal("Foreign Desk", NA))$us_label)
+  expect_equal(classify_label(NA, desk_section_signal("Foreign Desk", NA))$label_source, "heuristic")
+  expect_true(classify_label(NA, desk_section_signal("National Desk", NA))$us_label)
+})
+test_that("AC1.8 dateline/desk conflict -> null/conflict", {
+  res <- classify_label(TRUE, FALSE)
+  expect_true(is.na(res$us_label)); expect_equal(res$label_source, "conflict")
+})
+test_that("AC1.9 unresolved -> null", {
+  res <- classify_label(NA, NA)
+  expect_true(is.na(res$us_label)); expect_true(is.na(res$label_source))
+})
+test_that("dateline wins when desk agrees or is silent", {
+  expect_true(classify_label(TRUE, NA)$us_label)
+  expect_equal(classify_label(TRUE, TRUE)$label_source, "dateline")
+})
