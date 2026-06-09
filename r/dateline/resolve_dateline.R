@@ -36,10 +36,18 @@ is_date_field <- function(field) {
   grepl(.DATE_RE, trimws(tolower(field)))
 }
 
+# Does a field look like a weekday? Matches "Monday", "Sat.", "Saturday", etc.
+.WEEKDAY_RE <- "^(mon|tue|wed|thu|fri|sat|sun)[a-z.]*$"
+is_weekday_field <- function(field) {
+  grepl(.WEEKDAY_RE, trimws(tolower(field)))
+}
+
 # Isolate the leading ALL-CAPS place block before the dateline delimiter.
 # Handles a leading "Special to The New York Times" credit and trailing "(AP)" wire tag.
 # Returns list(found, block, match_len) where match_len is the number of leading
 # characters of `lead` consumed by block + delimiter (for exact stripping).
+# STRICT: the caps block must be genuinely all-caps (city part [A-Z][A-Z.' -]*[A-Z.],
+# optionally followed by 1-2 comma-separated mixed-case fields like "Wash.", "Portugal", "Jan. 1").
 extract_dateline_block <- function(lead) {
   empty <- list(found = FALSE, block = NA_character_, match_len = 0L)
   if (is.na(lead) || !nzchar(lead)) return(empty)
@@ -55,35 +63,39 @@ extract_dateline_block <- function(lead) {
     work <- substr(work, consumed + 1L, nchar(work))
   }
 
-  # Dateline = block starting with CAPS, optionally with comma (structure: CITY or CITY, STATE/COUNTRY, DATE),
-  # then a delimiter: em dash, "--", or spaced hyphen.
-  # Pattern: starts with optional space, capital letter, zero or more comma-separated fields, then dash.
-  # Real LDC data uses spaced hyphen " - " (validated against real corpus).
-  # Examples: "CHICAGO —", " MEXICO CITY, Jan. 1 - ", " LONDON, Jan. 7 - ", "VANCOUVER, Wash., June 1 — "
-  # Key constraints:
-  #   - Starts with capital letter (rules out most body text)
-  #   - Handles both bare cities (CHICAGO) and qualified (CITY, STATE, DATE)
-  #   - Multiple commas allowed (for date fields)
-  #   - Total block length: <80 chars (real datelines are 20-40 chars)
-  # Strategy: Match capital letter, optionally followed by (non-comma content, comma) repeating, then dash.
-  dl_re <- "^\\s*([A-Z](?:[^,]*[,])*[^,]{0,50})\\s*(-|—)\\s"
+  # Dateline block: all-caps city (uppercase words/periods/apostrophes/spaces/hyphens,
+  # ending with uppercase letter or period to avoid matching emphasis-caps ledes),
+  # optionally followed by 1-2 comma-separated fields of 2-20 mixed-case chars
+  # ([A-Za-z. 0-9], covering "Wash.", "N.Y.", "Portugal", "July 30"),
+  # then delimiter (em dash, --, or spaced hyphen).
+  # Strategy: strictly enforce all-caps and proper termination on leading field,
+  # allow 1-2 optional fields, then dash.
+  dl_re <- "^\\s*([A-Z][A-Z.' -]*[A-Z.])(?:,\\s*([A-Za-z. 0-9]{2,20}))?(?:,\\s*([A-Za-z. 0-9]{2,20}))?\\s*(-|--|—)\\s"
   m2 <- regexpr(dl_re, work, perl = TRUE)
   if (m2 != 1L) return(empty)
 
   full_match <- regmatches(work, m2)
   block <- sub(dl_re, "\\1", full_match, perl = TRUE)
+  # If there are 1-2 qualifier/date fields, append them to the block.
+  q1 <- sub(dl_re, "\\2", full_match, perl = TRUE)
+  q2 <- sub(dl_re, "\\3", full_match, perl = TRUE)
+  if (nzchar(q1)) block <- paste0(block, ", ", q1)
+  if (nzchar(q2)) block <- paste0(block, ", ", q2)
+
   # Remove a trailing wire tag like "(AP)" from the block.
   block <- trimws(sub("\\(AP\\)\\s*$", "", block))
   match_len <- offset + attr(m2, "match.length")
   list(found = TRUE, block = block, match_len = as.integer(match_len))
 }
 
-# Split a caps block into non-date fields (city + optional qualifier).
+# Split a caps block into non-date, non-weekday fields (city + optional qualifier).
 parse_dateline_fields <- function(block) {
   if (is.na(block) || !nzchar(block)) return(character(0))
   fields <- trimws(strsplit(block, ",", fixed = TRUE)[[1]])
   fields <- fields[nzchar(fields)]
-  fields[!vapply(fields, is_date_field, logical(1))]
+  is_date <- vapply(fields, is_date_field, logical(1))
+  is_weekday <- vapply(fields, is_weekday_field, logical(1))
+  fields[!is_date & !is_weekday]
 }
 
 # Resolve fields -> list(is_us = TRUE|FALSE|NA, place).
@@ -105,18 +117,82 @@ resolve_place <- function(fields, gz) {
   list(is_us = NA, place = city)
 }
 
+# Resolve a structured dateline FIELD (from NITF <dateline> metadata, no delimiter).
+# "PASADENA, Calif., Dec. 31" -> list(is_us=TRUE, place="PASADENA, Calif.");
+# "ZAGREB, Croatia" -> list(is_us=FALSE, place="ZAGREB, Croatia");
+# "HAMILTON, New Zealand, Saturday, Jan. 1" -> list(is_us=NA, place=...);
+# NA/empty -> list(is_us=NA, place=NA_character_).
+# Strategy: split on commas, drop date + weekday fields, then resolve through resolve_place.
+resolve_dateline_field <- function(dateline, gz) {
+  if (is.na(dateline) || !nzchar(trimws(dateline))) {
+    return(list(is_us = NA, place = NA_character_))
+  }
+
+  # Parse comma-separated fields and drop dates/weekdays
+  fields <- trimws(strsplit(dateline, ",", fixed = TRUE)[[1]])
+  fields <- fields[nzchar(fields)]
+  is_date <- vapply(fields, is_date_field, logical(1))
+  is_weekday <- vapply(fields, is_weekday_field, logical(1))
+  fields <- fields[!is_date & !is_weekday]
+
+  # Resolve through the standard place logic
+  resolve_place(fields, gz)
+}
+
 # Remove the matched dateline span (block + delimiter) from the lead -> stripped_text.
+# Returns NA if lead is NA; otherwise returns stripped text or original lead if no match.
 strip_dateline <- function(lead, block_info) {
   if (is.na(lead)) return(NA_character_)
   if (!isTRUE(block_info$found) || block_info$match_len <= 0L) return(lead)
   trimws(substr(lead, block_info$match_len + 1L, nchar(lead)))
 }
 
-# Convenience: full dateline resolution for one lead -> list(is_us, place, block_info).
+# Conditional-strip: decide whether a matched block is a REAL dateline or false positive.
+# A block is a real dateline if it contains a date field, a recognized state/country qualifier,
+# or is a bare AP-list city. Emphasis-caps ledes and bare unrecognized qualifiers -> not stripped.
+# Returns list(is_us, place, should_strip) where should_strip indicates whether to strip
+# the block from the lead (for stripped_text). If should_strip=FALSE, stripped text = original lead.
+should_strip_dateline_block <- function(block, fields_after_parse, resolve_result, gz) {
+  if (is.na(block) || !nzchar(block)) return(FALSE)
+
+  # Check if the original block (before field filtering) contains a date field
+  all_fields <- trimws(strsplit(block, ",", fixed = TRUE)[[1]])
+  has_date <- any(vapply(all_fields, is_date_field, logical(1)))
+  if (has_date) return(TRUE)
+
+  # Check if we resolved to a US/not-US (not NA)
+  if (!is.na(resolve_result$is_us)) return(TRUE)
+
+  # Check if it's a bare AP-list city (1 field, resolved to US or foreign)
+  if (length(fields_after_parse) == 1) {
+    cn <- normalize_token(fields_after_parse[1])
+    is_ap_us <- !is.na(cn) && cn %in% gz$us_cities
+    is_ap_foreign <- !is.na(cn) && cn %in% gz$foreign_cities
+    if (is_ap_us || is_ap_foreign) return(TRUE)
+  }
+
+  # Otherwise, it's a false positive (emphasis-caps lede or bare unrecognized token)
+  FALSE
+}
+
+# Convenience: full dateline resolution for one lead -> list(is_us, place, block_info, should_strip).
+# The text-channel is CONDITIONAL: blocks are treated as datelines only if they have
+# a date field, a recognized qualifier, or are bare AP-list cities.
 resolve_dateline <- function(lead, gz) {
   bi <- extract_dateline_block(lead)
-  if (!isTRUE(bi$found)) return(list(is_us = NA, place = NA_character_, block_info = bi))
+  if (!isTRUE(bi$found)) {
+    return(list(is_us = NA, place = NA_character_, block_info = bi, should_strip = FALSE))
+  }
+
   fields <- parse_dateline_fields(bi$block)
   rp <- resolve_place(fields, gz)
-  list(is_us = rp$is_us, place = rp$place, block_info = bi)
+
+  # Decide whether to actually treat this as a dateline (and strip it)
+  should_strip <- should_strip_dateline_block(bi$block, fields, rp, gz)
+
+  # If we're not stripping, return NA for the signal (text channel hygiene only)
+  final_is_us <- if (should_strip) rp$is_us else NA
+  final_place <- if (should_strip) rp$place else NA_character_
+
+  list(is_us = final_is_us, place = final_place, block_info = bi, should_strip = should_strip)
 }
