@@ -625,10 +625,21 @@ git commit -m "feat(us-filter): build derived LDC labeled parquet (1987-2007)"
 
 ---
 
+## Execution deviation note (2026-06-09, agreed with user)
+
+**Empirical finding:** the LDC parquet at `00_explorer/ldc_corpus/` does NOT contain datelines in `lead_paragraph`/`full_text` (~0.02% embedded tail only, e.g. `"WASHINGTON, March 2 - ..."`). The dateline is a separate NITF element (`/nitf/body/body.head/dateline`) that the parquet-feeding CSV pipeline (`LDC2008T19/data/scripts/01_all_to_csv.R`) never extracted. The parallel rds pipeline (`01_all_to_rds.R:35`) DID extract it: `LDC2008T19/data/parsed_to_rds/{1987..2007}.rds` each carry a `dateline` column with 27–40% non-NA coverage (e.g. 2000: 17,939/64,068). Values are clean structured fields: `"PASADENA, Calif., Dec. 31"`, `"ZAGREB, Croatia"`, `"HAMILTON, New Zealand, Saturday, Jan. 1"`.
+
+**Revised approach (replaces text-extraction as the primary label channel):**
+1. **Label channel = rds join.** `build_labels.R` reads per-year rds (select `id`, `dateline`, dedup by id), left-joins onto the LDC parquet by `id`, and resolves the dateline **field** via a new pure entry point `resolve_dateline_field(dateline_str, gz)` — same field-splitting / date-dropping / structure-first resolution core (AC1 logic unchanged), plus weekday-token filtering (`"Saturday"`).
+2. **Text channel = hygiene only.** The lead-text extractor remains solely to catch the embedded tail and keep `stripped_text` leakage-proof. Its regex must be strict (all-caps city block; optional short mixed-case qualifier/date fields) and stripping is **conditional**: a block is treated as a dateline only if it has a date field, a recognized state/country qualifier, or is a bare AP-list city. Emphasis-caps ledes (`"PILOBOLUS - that dance troupe..."`) must never strip. (The first implementation's loosened regex falsely matched ~33k rows and corrupted their `stripped_text`; this is the corrective.)
+3. Output schema, desk fusion policy, and config constants are unchanged.
+
+Phase 3's no-residue guard must mirror the conditional text-channel semantics (its detector is the text channel's Python port; the rds field never reaches model-input text).
+
 ## Phase 1 Done When
 
-- The resolver testthat suite passes on the canonical collision set (`Rscript r/tests/run_tests.R` → 0 failures).
-- The derived labeled parquet exists over LDC 1987–2007 with a sane `label_source` breakdown (dateline-dominant; conflict/null minorities).
+- The resolver testthat suite passes on the canonical collision set (`Rscript r/tests/run_tests.R` → 0 failures), including field-channel and conditional-strip tests.
+- The derived labeled parquet exists over LDC 1987–2007 with a sane `label_source` breakdown (dateline-dominant per the rds join — expect roughly 27–40% dateline-labeled; conflict/null minorities).
 - `src/config.py` exposes `US_FILTER_DIR` / `US_FILTER_LABELED_PARQUET`.
 
 Covers **us-filter.AC1**.
