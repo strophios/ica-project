@@ -55,18 +55,18 @@ extract_dateline_block <- function(lead) {
     work <- substr(work, consumed + 1L, nchar(work))
   }
 
-  # Dateline = block starting with CAPS, containing AT LEAST ONE COMMA (structure: CITY, STATE/COUNTRY),
-  # then optional date field(s), then a delimiter: em dash, "--", or spaced hyphen.
-  # Pattern: starts with optional space, opening CAPS word(s), comma, then qualifier/date, then dash.
+  # Dateline = block starting with CAPS, optionally with comma (structure: CITY or CITY, STATE/COUNTRY, DATE),
+  # then a delimiter: em dash, "--", or spaced hyphen.
+  # Pattern: starts with optional space, capital letter, zero or more comma-separated fields, then dash.
   # Real LDC data uses spaced hyphen " - " (validated against real corpus).
-  # Examples: " MEXICO CITY, Jan. 1 - ", " LONDON, Jan. 7 - ", "VANCOUVER, Wash. — "
+  # Examples: "CHICAGO —", " MEXICO CITY, Jan. 1 - ", " LONDON, Jan. 7 - ", "VANCOUVER, Wash., June 1 — "
   # Key constraints:
   #   - Starts with capital letter (rules out most body text)
-  #   - Contains exactly one comma in the captured block
-  #   - After comma: short content (<50 chars) — likely a qualifier or date
+  #   - Handles both bare cities (CHICAGO) and qualified (CITY, STATE, DATE)
+  #   - Multiple commas allowed (for date fields)
   #   - Total block length: <80 chars (real datelines are 20-40 chars)
-  # Note: this accepts some false positives (titles with commas) but false negatives on real datelines is worse.
-  dl_re <- "^\\s*([A-Z][^,]*?[,][^,]{0,50})\\s*(-|—)\\s"
+  # Strategy: Match capital letter, optionally followed by (non-comma content, comma) repeating, then dash.
+  dl_re <- "^\\s*([A-Z](?:[^,]*[,])*[^,]{0,50})\\s*(-|—)\\s"
   m2 <- regexpr(dl_re, work, perl = TRUE)
   if (m2 != 1L) return(empty)
 
