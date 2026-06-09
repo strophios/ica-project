@@ -107,6 +107,10 @@ CCA_LOGS_DIR: Path = PROJECT_ROOT / "cca_logs"
 LU_CLASSIFIER_MODEL: Path = PROJECT_ROOT / "lu_classifier.keras"
 LU_PREDS_DIR: Path = CCA_SET_DIR / "lu"
 
+# US/not-US pre-filter artifacts
+US_FILTER_DIR: Path = PROJECT_ROOT / "us_filter"
+US_FILTER_LABELED_PARQUET: Path = US_FILTER_DIR / "ldc_labeled.parquet"
+
 
 # ---------------------------------------------------------------------------
 # Compute / precision
