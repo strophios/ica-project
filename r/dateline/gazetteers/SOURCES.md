@@ -17,7 +17,7 @@ These cities can appear bare (e.g., `CHICAGO —`) without a state qualifier in 
 Cities: Atlanta, Baltimore, Boston, Chicago, Cincinnati, Cleveland, Dallas, Denver, Detroit, Honolulu, Houston, Indianapolis, Las Vegas, Los Angeles, Miami, Milwaukee, Minneapolis, New Orleans, New York, Oklahoma City, Philadelphia, Phoenix, Pittsburgh, St. Louis, Salt Lake City, San Antonio, San Diego, San Francisco, Seattle, Washington.
 
 ### `ap_foreign_cities.csv`
-Curated list of ~48 major foreign cities recognized as AP-stylebook standalone dateline cities.
+Curated list of 49 major foreign cities recognized as AP-stylebook standalone dateline cities.
 These cities can appear bare (e.g., `LONDON —`) without a country qualifier in dateline context.
 
 Source: AP Stylebook dateline conventions for major international news hubs.
