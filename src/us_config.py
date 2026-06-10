@@ -1,4 +1,4 @@
-# pattern: Functional Core
+# pattern: Mixed (pure config dataclasses; to_json/from_json are the sidecar I/O seam)
 """US/not-US run configuration.
 
 Parallel to cca_config.RunConfig but with NO FLPU/prior/nnPU coupling: the US
@@ -22,8 +22,11 @@ from src.cca_config import (
     LRScheduleConfig,
     OptimizerConfig,
     DiagnosticsConfig,
-    config_path_for_weights,
 )
+
+# Re-exported so UsRunConfig's module surface mirrors RunConfig's (consumers
+# import the sidecar-path helper from the same module as the config they use).
+from src.cca_config import config_path_for_weights as config_path_for_weights
 
 
 @dataclasses.dataclass(frozen=True)
