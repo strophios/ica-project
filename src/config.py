@@ -112,6 +112,10 @@ LU_PREDS_DIR: Path = CCA_SET_DIR / "lu"
 # US/not-US pre-filter artifacts
 US_FILTER_DIR: Path = PROJECT_ROOT / "us_filter"
 US_FILTER_LABELED_PARQUET: Path = US_FILTER_DIR / "ldc_labeled.parquet"
+US_FILTER_SET_DIR: Path = US_FILTER_DIR / "us_set"
+US_FILTER_CLASSIFIER_DIR: Path = US_FILTER_DIR / "classifier"
+US_FILTER_CLASSIFIER_WEIGHTS: Path = US_FILTER_DIR / "us_classifier.weights.h5"
+US_FILTER_LOGS_DIR: Path = US_FILTER_DIR / "logs"
 
 
 # ---------------------------------------------------------------------------
