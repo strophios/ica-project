@@ -165,6 +165,12 @@ Expected: all tests pass.
 
 ---
 
+## Execution deviation note (2026-06-10, follows from the Phase 1 deviation)
+
+Phase 1's revision (see phase_01.md "Execution deviation note") made text-channel stripping **conditional**: the R extractor strips a caps-block prefix only when it (i) contains a date field, (ii) has a qualifier resolving against states/countries, or (iii) is a bare AP-list city. Emphasis-caps ledes (`"PILOBOLUS - that dance troupe..."` — ~1,400 rows in the real LDC corpus) are deliberately NOT stripped.
+
+Consequence for Task 2: the Python guard must port the **would-strip decision**, not the bare prefix pattern given in the original spec above (which would false-alarm on every unstripped emphasis-caps lede and fail AC2.1 on real data). Concretely, `has_dateline_prefix` (rename or keep; keep the public name) must mirror `r/dateline/resolve_dateline.R`'s current logic: strict all-caps city block + optional short mixed-case comma fields + delimiter, optional credit prefix, then the three-way conditional (date field | recognized state/country qualifier | bare AP-30/AP-foreign city). This requires the gazetteers; load them from the in-repo `r/dateline/gazetteers/*.csv` (single thin I/O helper, default path derived from the repo layout, results passed into the pure detector — keep the Functional Core honest). The boundary-inventory pairing note must name the conditional semantics explicitly. Tests gain cases: `"PILOBOLUS - that dance troupe specializing in mad scrambles"` → False (not residue); `"LISBON, Portugal — Officials said."` → True; `"WASHINGTON, March 2 - A girl from Westmont"` → True (spaced-hyphen real form); `"MEMORY, memory - is there ever enough of it?"` → False.
+
 ## Phase 3 Done When
 
 - `data_from_parquet` builds `headline_with_lead` from `stripped_text` when called with `lead_column="stripped_text"`, and the default path is unchanged (existing tests pass).
