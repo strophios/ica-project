@@ -207,9 +207,8 @@ class TestHeadlineWithLeadConcatenation:
 class TestLeadColumnParameterization:
     """Tests for the lead_column parameter in `data_from_parquet`.
 
-    The function now accepts a `lead_column` parameter (keyword-only,
-    default "lead_paragraph") to enable assembly from alternate lead sources
-    like `stripped_text`.
+    The function now accepts a `lead_column` parameter (keyword, default 'lead_paragraph')
+    to enable assembly from alternate lead sources like `stripped_text`.
     """
 
     def test_default_lead_column_is_lead_paragraph(self, tmp_path):

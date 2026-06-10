@@ -1,4 +1,4 @@
-# pattern: Functional Core
+# pattern: Mixed (pure detector core + thin cached gazetteer I/O loader)
 """No-residue dateline guard.
 
 `has_dateline_prefix` is a Python port of the *conditional-strip detection* half

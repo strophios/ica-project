@@ -28,9 +28,7 @@ class TestHasDatelinePrefix:
 
     def test_none_returns_false(self):
         """None (if somehow passed) should not crash; return False."""
-        # Actually, the function expects str and will fail on None, which is fine.
-        # The test verifies it's only called on strings.
-        assert has_dateline_prefix("") is False
+        assert has_dateline_prefix(None) is False
 
     def test_simple_dateline_with_em_dash(self):
         """WASHINGTON, July 30 — text → True (date field triggers strip)."""
@@ -113,6 +111,18 @@ class TestAssertNoDatelineResidue:
             "",
         ]
         # Should not raise
+        assert_no_dateline_residue(texts)
+
+    def test_none_and_empty_in_iterable_do_not_raise(self):
+        """None and empty strings in the iterable do not raise (Phase-4 runtime safety)."""
+        texts = [
+            None,
+            "",
+            "Clean text without dateline",
+            "",
+            None,
+        ]
+        # Should not raise—None and empty strings are safe
         assert_no_dateline_residue(texts)
 
     def test_one_dateline_raises(self):
