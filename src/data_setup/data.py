@@ -2,11 +2,13 @@ import polars as pl
 import tensorflow as tf
 
 
-def data_from_parquet(project_root, db_folder="ldc_corpus", addl_columns=None):
+def data_from_parquet(
+    project_root, db_folder="ldc_corpus", addl_columns=None, lead_column="lead_paragraph"
+):
     ldc_pq = pl.scan_parquet(
         f"{project_root}/{db_folder}/**/*.parquet", hive_partitioning=True
     )
-    cols_to_select = ["id", "headline", "lead_paragraph"]
+    cols_to_select = ["id", "headline", lead_column]
     if addl_columns is not None:
         [cols_to_select.append(x) for x in addl_columns]
 
@@ -18,17 +20,17 @@ def data_from_parquet(project_root, db_folder="ldc_corpus", addl_columns=None):
     # the string concatenation below, which would otherwise raise on None.
     ldc_data = ldc_data.with_columns(
         pl.col("headline").fill_null(""),
-        pl.col("lead_paragraph").fill_null(""),
+        pl.col(lead_column).fill_null(""),
     )
     ldc_data = ldc_data.with_columns(
         pl.when(pl.col.headline == "NA")
         .then(pl.lit(""))
         .otherwise(pl.col.headline)
         .alias("headline"),
-        pl.when(pl.col.lead_paragraph == "NA")
+        pl.when(pl.col(lead_column) == "NA")
         .then(pl.lit(""))
-        .otherwise(pl.col.lead_paragraph)
-        .alias("lead_paragraph"),
+        .otherwise(pl.col(lead_column))
+        .alias(lead_column),
     )
     # joining the headlines and leads, including the RoBERTa separator token (which I'm fairly certain does not
     # get spaces on either side; at least not added ones)
@@ -37,7 +39,7 @@ def data_from_parquet(project_root, db_folder="ldc_corpus", addl_columns=None):
     headline_lead = [
         x + "</s>" + y
         for x, y in zip(
-            ldc_data.get_column("headline"), ldc_data.get_column("lead_paragraph")
+            ldc_data.get_column("headline"), ldc_data.get_column(lead_column)
         )
     ]
     ldc_data = ldc_data.with_columns(
