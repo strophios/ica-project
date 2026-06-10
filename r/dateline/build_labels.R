@@ -49,6 +49,9 @@ us_label <- logical(n); label_source <- character(n)
 dateline_place <- character(n); stripped_text <- character(n); raw_text <- df$lead_paragraph
 
 # Row-wise resolution: use RDS channel (primary) or text channel (fallback)
+# NOTE: This is an intentional one-shot batch script (full corpus in memory, 1.16M-row loop).
+# It is not a hot path and does not require optimization. The row-wise loop is kept for
+# clarity and simplicity over the full dataset load in a single session.
 cat("Resolving datelines row-wise...\n")
 for (i in seq_len(n)) {
   # Try structured RDS channel first
