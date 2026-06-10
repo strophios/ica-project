@@ -142,6 +142,37 @@ def create_classifier_data(dataset, separate_labels=False):
         return {"train": ldc_train, "val": ldc_val, "test": ldc_test}
 
 
+def create_us_filter_data(dataset):
+    """Stratified 90/5/5 train/val/test split for the US filter (PN task).
+
+    Drops rows with null `us_label` (unresolved/conflict), then splits the
+    `us_label=True` and `us_label=False` groups separately (seed=200) and
+    concatenates, so class proportions are stable across splits. Returns
+    {"train":..., "val":..., "test":...} polars DataFrames.
+    """
+    data = dataset.filter(pl.col("us_label").is_not_null())
+    assert data["id"].n_unique() == data.shape[0], (
+        f"`id` not unique: {data.shape[0]} rows, {data['id'].n_unique()} ids"
+    )
+
+    def _split(group):
+        train = group.sample(fraction=0.9, seed=200)
+        rest = group.filter(pl.col("id").is_in(train["id"].implode()).not_())
+        test = rest.sample(fraction=0.5, seed=200)
+        val = rest.filter(pl.col("id").is_in(test["id"].implode()).not_())
+        return train, val, test
+
+    pos = data.filter(pl.col("us_label"))
+    neg = data.filter(pl.col("us_label").not_())
+    p_tr, p_va, p_te = _split(pos)
+    n_tr, n_va, n_te = _split(neg)
+    return {
+        "train": pl.concat([p_tr, n_tr]),
+        "val": pl.concat([p_va, n_va]),
+        "test": pl.concat([p_te, n_te]),
+    }
+
+
 def dataset_create(
     shuffle_buffer,
     batch_size,
