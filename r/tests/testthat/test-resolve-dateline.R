@@ -185,3 +185,30 @@ test_that("Weekday field regex: genuine weekdays accepted, ambiguous names rejec
   expect_false(is_weekday_field("FRISCO"))
   expect_false(is_weekday_field("SUNDERLAND"))
 })
+
+test_that("REGRESSION FIX: AP abbreviations Sept., Tues., Thurs. now match", {
+  # AP style uses 4-letter "Sept." not 3-letter "Sep."
+  expect_true(is_date_field("Sept. 28"))
+  expect_true(is_date_field("Sept. 5"))
+  # AP style uses "Tues." and "Thurs." not "Tue." and "Thu."
+  expect_true(is_weekday_field("Tues."))
+  expect_true(is_weekday_field("Thurs."))
+  expect_true(is_weekday_field("Tuesday"))
+  expect_true(is_weekday_field("Thursday"))
+})
+
+test_that("REGRESSION FIX: other month abbreviations still work", {
+  # Oct., March, May, etc.
+  expect_true(is_date_field("Oct. 9"))
+  expect_true(is_date_field("March 2"))
+  expect_true(is_date_field("May 1"))
+})
+
+test_that("REGRESSION FIX: end-to-end dateline with Sept. resolves correctly", {
+  # WASHINGTON, Sept. 28 should resolve to US (DC known on AP list)
+  expect_true(resolve_field("WASHINGTON, Sept. 28"))
+  # ATLANTA, Sept. 3 should resolve to US (Georgia city on AP list)
+  expect_true(resolve_field("ATLANTA, Sept. 3"))
+  # PARIS, Sept. 5 should resolve to FALSE (PARIS bare -> foreign, not US)
+  expect_false(resolve_field("PARIS, Sept. 5"))
+})

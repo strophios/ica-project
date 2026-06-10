@@ -30,20 +30,24 @@ load_gazetteers <- function(dir) {
   )
 }
 
-# Does a field look like a date field? Matches "July 30", "Jul. 30", "June 1", "Jan 5".
-# STRICT: anchored to complete month name (full or 3-letter abbrev + optional period),
+# Does a field look like a date field? Matches "July 30", "Jul. 30", "June 1", "Jan 5", "Sept. 28", "Sept 28".
+# STRICT: anchored to complete month name (full or AP abbreviation + optional period),
 # optionally followed by whitespace + day number (1-2 digits). This prevents false matches
 # on city names beginning with a month prefix (JUNEAU, AUGUSTA, MARQUETTE).
-.DATE_RE <- "^(january|february|march|april|may|june|july|august|september|october|november|december|jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)\\.?\\s*[0-9]{1,2}$"
+# NOTE: AP uses 4-letter "sept" not 3-letter "sep"; also "mar"/"march", "apr"/"april", etc.
+# Full names are case-insensitive: january, february, march, april, may, june, july, august, september, october, november, december
+# AP abbreviations (with or without period): jan, feb, mar, apr, may, jun, jul, aug, sept, oct, nov, dec
+.DATE_RE <- "^(january|february|march|april|may|june|july|august|september|october|november|december|jan|feb|mar|apr|may|jun|jul|aug|sept|oct|nov|dec)\\.?\\s*[0-9]{1,2}$"
 is_date_field <- function(field) {
   grepl(.DATE_RE, trimws(tolower(field)))
 }
 
-# Does a field look like a weekday? Matches "Monday", "Sat.", "Saturday", etc.
-# STRICT: anchored to complete weekday names (full or standard 3-letter abbreviations).
+# Does a field look like a weekday? Matches "Monday", "Sat.", "Saturday", "Tues.", "Thurs.", etc.
+# STRICT: anchored to complete weekday names (full or AP abbreviations + optional period).
 # This prevents false matches on city names beginning with a weekday prefix
 # (MONTGOMERY, SUNNYVALE, FRISCO, SUNDERLAND).
-.WEEKDAY_RE <- "^(monday|tuesday|wednesday|thursday|friday|saturday|sunday|mon|tue|wed|thu|fri|sat|sun)\\.?$"
+# NOTE: AP uses "tues" and "thurs" (not the 3-letter "tue" and "thu"); also full names: monday, tuesday, wednesday, thursday, friday, saturday, sunday
+.WEEKDAY_RE <- "^(monday|tuesday|wednesday|thursday|friday|saturday|sunday|mon|tues|wed|thurs|fri|sat|sun)\\.?$"
 is_weekday_field <- function(field) {
   grepl(.WEEKDAY_RE, trimws(tolower(field)))
 }
