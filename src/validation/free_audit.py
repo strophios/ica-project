@@ -13,54 +13,6 @@ except ImportError:
     pl = None  # type: ignore
 
 
-# === Simple US heuristic (desk/section based) ===
-# Simplified from nyt_location_checking.R us_assign()
-DESK_US = {
-    "National Desk",
-    "Metropolitan Desk",
-    "Connecticut Weekly Desk",
-    "Westchester Weekly Desk",
-    "Long Island Weekly Desk",
-    "New York Region",
-    "New Jersey Weekly Desk",
-    "The City Weekly Desk",
-}
-
-SECTION_US = {
-    "U.S.",
-    "New York",
-    "New York and Region",
-    "Washington",
-}
-
-DESK_NON_US = {"Foreign Desk"}
-SECTION_NON_US = {"World"}
-
-
-def simple_us_assign(dsk: str | None, online_sections: str | None) -> bool:
-    """Simple US assignment from desk and section (simplified us_assign from R).
-
-    Returns True if any US desk/section indicator is present.
-    """
-    if dsk:
-        dsk_lower = dsk.lower()
-        if dsk_lower in {d.lower() for d in DESK_US}:
-            return True
-        if dsk_lower in {d.lower() for d in DESK_NON_US}:
-            return False
-
-    if online_sections:
-        sections = [s.strip() for s in online_sections.split(";")]
-        sections_lower = [s.lower() for s in sections]
-        if any(s in sections_lower for s in {d.lower() for d in SECTION_US}):
-            return True
-        if any(s in sections_lower for s in {d.lower() for d in SECTION_NON_US}):
-            return False
-
-    # Default: assume US if no non-US indicator
-    return False
-
-
 def _norm(s: str | None) -> str:
     """Normalize text: lowercase, alphanumeric+space only.
 
@@ -128,8 +80,11 @@ CAVEAT_STR = (
 def audit_matched_parquet(matched_path: Path | str) -> None:
     """Read matched parquet and report AC6.1, AC6.2, and AC6.5 metrics.
 
+    The parquet is produced by r/audit/api_ldc_join.py and contains ldc_heuristic_us
+    computed from API-side desk/section descriptors for the matched articles.
+
     Args:
-        matched_path: Path to api_ldc_matched.parquet.
+        matched_path: Path to api_ldc_matched.parquet (from api_ldc_join.py).
     """
     if pl is None:
         print("Error: polars not available", file=sys.stderr)
@@ -145,25 +100,32 @@ def audit_matched_parquet(matched_path: Path | str) -> None:
 
     print("=== Free Heuristic Audit Report (AC6.1, AC6.2, AC6.5) ===\n")
 
-    # Compute heuristic labels from desk/section (AC6.1 uses simple_us_assign)
-    heuristic_labels = [
-        simple_us_assign(row["ldc_dsk"], row["ldc_online_sections"])
-        for row in df.iter_rows(named=True)
-    ]
-
     # AC6.1: error rate (heuristic vs dateline labels)
+    # ldc_heuristic_us is the R-computed heuristic from API-side descriptors
     error_rate = heuristic_error_rate(
-        heuristic_labels,
+        df["ldc_heuristic_us"].to_list(),
         df["ldc_us_label"].to_list(),
     )
     print(f"AC6.1 Heuristic Error Rate (vs dateline labels): {error_rate:.4f}")
 
     # AC6.2: lead similarity
-    sim = lead_similarity(
-        df["ldc_stripped_text"].to_list(),
-        df["api_lead"].to_list(),
-    )
-    print(f"AC6.2 Mean Lead Similarity (LDC stripped vs API lead): {sim:.4f}")
+    # Compute over a deterministic random sample if the full set is very large
+    full_sim_list = list(zip(df["ldc_stripped_text"].to_list(), df["api_lead"].to_list()))
+    if len(full_sim_list) > 20000:
+        # Use deterministic sample (seed 200) for performance
+        import random
+        random.seed(200)
+        sample_list = random.sample(full_sim_list, min(20000, len(full_sim_list)))
+        stripped_texts = [s for s, _ in sample_list]
+        api_leads = [a for _, a in sample_list]
+        sim = lead_similarity(stripped_texts, api_leads)
+        print(f"AC6.2 Mean Lead Similarity (LDC stripped vs API lead, {len(sample_list)} sample, seed=200): {sim:.4f}")
+    else:
+        sim = lead_similarity(
+            df["ldc_stripped_text"].to_list(),
+            df["api_lead"].to_list(),
+        )
+        print(f"AC6.2 Mean Lead Similarity (LDC stripped vs API lead, full set): {sim:.4f}")
 
     # Report counts
     print(f"\nMatched pairs: {len(df)}")
