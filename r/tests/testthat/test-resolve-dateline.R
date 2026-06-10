@@ -137,3 +137,51 @@ test_that("dateline wins when desk agrees or is silent", {
   expect_true(classify_label(TRUE, NA)$us_label)
   expect_equal(classify_label(TRUE, TRUE)$label_source, "dateline")
 })
+
+test_that("REGRESSION: city names with month prefixes not dropped as date fields", {
+  # JUNEAU, Alaska: "JUNEAU" should resolve, not be dropped as a false "Jun" date field
+  expect_true(resolve_field("JUNEAU, Alaska"))
+  # AUGUSTA, Georgia: not dropped as "Aug"
+  expect_true(resolve_field("AUGUSTA, Georgia"))
+  # MARQUETTE, Michigan: not dropped as "Mar"
+  expect_true(resolve_field("MARQUETTE, Michigan"))
+})
+
+test_that("REGRESSION: city names with weekday prefixes not dropped as weekday fields", {
+  # MONTGOMERY, Ala.: "MONTGOMERY" should resolve, not be dropped as a false "Mon" weekday
+  expect_true(resolve_field("MONTGOMERY, Ala."))
+  # SUNNYVALE, Calif.: not dropped as "Sun"
+  expect_true(resolve_field("SUNNYVALE, Calif."))
+  # MONTREAL, Canada: MONTREAL is in ap_foreign_cities; not dropped as "Mon"
+  # (with unrecognized "Quebec" it would be NA, but with "Canada" it resolves false)
+  expect_false(resolve_field("MONTREAL, Canada"))
+  # FRISCO, Texas: "Fri" is only 3 chars, and our regex now requires anchored full/abbrev form
+  expect_true(resolve_field("FRISCO, Texas"))
+  # SUNDERLAND, Mass.: "Sun" is only 3 chars, anchored
+  expect_true(resolve_field("SUNDERLAND, Mass."))
+})
+
+test_that("Date field regex: genuine dates accepted, ambiguous bare months rejected", {
+  # Genuine date fields (with day numbers) should match
+  expect_true(is_date_field("Dec. 31"))
+  expect_true(is_date_field("July 30"))
+  expect_true(is_date_field("Jan 5"))
+  expect_true(is_date_field("May 1"))
+  # Bare month names without day number should NOT match
+  expect_false(is_date_field("May"))
+  expect_false(is_date_field("June"))
+  expect_false(is_date_field("December"))
+})
+
+test_that("Weekday field regex: genuine weekdays accepted, ambiguous names rejected", {
+  # Full weekday names with optional period should match
+  expect_true(is_weekday_field("Saturday"))
+  expect_true(is_weekday_field("Sat."))
+  expect_true(is_weekday_field("Monday"))
+  expect_true(is_weekday_field("Mon."))
+  # City names starting with weekday prefix should NOT match (now anchored)
+  expect_false(is_weekday_field("SUNNYVALE"))
+  expect_false(is_weekday_field("MONTGOMERY"))
+  expect_false(is_weekday_field("FRISCO"))
+  expect_false(is_weekday_field("SUNDERLAND"))
+})
