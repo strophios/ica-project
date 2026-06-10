@@ -31,13 +31,19 @@ load_gazetteers <- function(dir) {
 }
 
 # Does a field look like a date field? Matches "July 30", "Jul. 30", "June 1", "Jan 5".
-.DATE_RE <- "^(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\\.?\\s*[0-9]{0,2}$"
+# STRICT: anchored to complete month name (full or 3-letter abbrev + optional period),
+# optionally followed by whitespace + day number (1-2 digits). This prevents false matches
+# on city names beginning with a month prefix (JUNEAU, AUGUSTA, MARQUETTE).
+.DATE_RE <- "^(january|february|march|april|may|june|july|august|september|october|november|december|jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)\\.?\\s*[0-9]{1,2}$"
 is_date_field <- function(field) {
   grepl(.DATE_RE, trimws(tolower(field)))
 }
 
 # Does a field look like a weekday? Matches "Monday", "Sat.", "Saturday", etc.
-.WEEKDAY_RE <- "^(mon|tue|wed|thu|fri|sat|sun)[a-z.]*$"
+# STRICT: anchored to complete weekday names (full or standard 3-letter abbreviations).
+# This prevents false matches on city names beginning with a weekday prefix
+# (MONTGOMERY, SUNNYVALE, FRISCO, SUNDERLAND).
+.WEEKDAY_RE <- "^(monday|tuesday|wednesday|thursday|friday|saturday|sunday|mon|tue|wed|thu|fri|sat|sun)\\.?$"
 is_weekday_field <- function(field) {
   grepl(.WEEKDAY_RE, trimws(tolower(field)))
 }
@@ -123,6 +129,9 @@ resolve_place <- function(fields, gz) {
 # "HAMILTON, New Zealand, Saturday, Jan. 1" -> list(is_us=NA, place=...);
 # NA/empty -> list(is_us=NA, place=NA_character_).
 # Strategy: split on commas, drop date + weekday fields, then resolve through resolve_place.
+# NOTE: rds fields are pre-cleaned structured metadata from NITF parsing — no credit/wire-tag
+# stripping needed (unlike the text channel). Returns the is_us signal unconditionally
+# (no conditional stripping logic as in the text channel).
 resolve_dateline_field <- function(dateline, gz) {
   if (is.na(dateline) || !nzchar(trimws(dateline))) {
     return(list(is_us = NA, place = NA_character_))
