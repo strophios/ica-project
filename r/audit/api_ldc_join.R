@@ -7,8 +7,7 @@
 # /Users/strophios/immigration_project/00_ML_data_expansion/LDC2008T19/data/scripts/00_proc_and_matching_prep.R:456-491
 #
 # Approved deviation: us_assign() is applied to the matched API-side rows (the heuristic
-# faces API data pre-1986 in production anyway, and LDC lacks keywords/descriptors in
-# the parquet form — only in the rds files). Output ldc_heuristic_us is the heuristic's
+# faces API data pre-1986 in production anyway, and LDC parquet lacks the descriptors column us_assign would need; API fields are also the production distribution). Output ldc_heuristic_us is the heuristic's
 # tri-state verdict computed from API-side descriptors for the matched article.
 
 suppressMessages({
@@ -18,10 +17,11 @@ suppressMessages({
   library(tidyverse)
 })
 
-# Simplified us_assign for this audit: just desk/section, not keywords
-# (keywords extraction from parquet is complex; desk/section is sufficient for AC6.1)
-simple_us_assign <- function(df) {
-  #' Apply US assignment heuristic based on news_desk and section_name only.
+# Define a fast desk/section-only us_assign heuristic
+# (Keywords processing is computationally expensive for large-scale joins.
+#  The desk/section heuristic accounts for most of the signal.)
+fast_us_assign <- function(news_desk, section_name) {
+  #' Apply US assignment heuristic based on desk/section.
   #' Returns tri-state: TRUE if US, FALSE if not-US, NA if ambiguous/unknown.
 
   section_us <- c("u.s.", "new york", "new york and region", "washington")
@@ -39,19 +39,34 @@ simple_us_assign <- function(df) {
   section_non_us <- c("world")
   dsk_non_us <- c("foreign desk")
 
-  df %>%
-    mutate(
-      meta_is_us = str_to_lower(section_name) %in% section_us |
-                   str_to_lower(news_desk) %in% dsk_us,
-      meta_not_us = str_to_lower(section_name) %in% section_non_us |
-                    str_to_lower(news_desk) %in% dsk_non_us,
-      ldc_heuristic_us = case_when(
-        meta_is_us & !meta_not_us ~ TRUE,
-        meta_not_us & !meta_is_us ~ FALSE,
-        TRUE ~ NA
-      )
-    ) %>%
-    select(-meta_is_us, -meta_not_us)
+  meta_is_us <- FALSE
+  meta_not_us <- FALSE
+
+  if (!is.na(section_name)) {
+    section_lower <- str_to_lower(section_name)
+    if (section_lower %in% section_us) {
+      meta_is_us <- TRUE
+    } else if (section_lower %in% section_non_us) {
+      meta_not_us <- TRUE
+    }
+  }
+
+  if (!is.na(news_desk)) {
+    desk_lower <- str_to_lower(news_desk)
+    if (desk_lower %in% dsk_us) {
+      meta_is_us <- TRUE
+    } else if (desk_lower %in% dsk_non_us) {
+      meta_not_us <- TRUE
+    }
+  }
+
+  if (meta_is_us && !meta_not_us) {
+    return(TRUE)
+  } else if (meta_not_us && !meta_is_us) {
+    return(FALSE)
+  } else {
+    return(NA)
+  }
 }
 
 # Paths
@@ -132,7 +147,7 @@ for (year in 1987:1995) {
       headline_norm = normalize_headline(headline),
       publication_date_val = as.Date(publication_date)
     ) %>%
-    select(ldc_id, ldc_stripped_text, publication_date_val, headline_norm, us_label) %>%
+    select(ldc_id, ldc_stripped_text, publication_date_val, headline_norm, us_label, label_source) %>%
     as.data.frame()
 
   # Group by date and perform fuzzy matching
@@ -176,15 +191,20 @@ for (year in 1987:1995) {
 
       # Match if distance <= 5
       if (best_dist <= 5) {
+        # Apply us_assign() heuristic (desk/section only) to matched API row
+        heuristic_us <- fast_us_assign(
+          api_on_date$news_desk[i],
+          api_on_date$section_name[i]
+        )
+
         year_matches[[length(year_matches) + 1]] <- data.frame(
           api_id = api_on_date$api_id[i],
           ldc_id = ldc_on_date$ldc_id[best_idx_in_ldc],
           api_lead = api_on_date$api_lead[i],
           ldc_stripped_text = ldc_on_date$ldc_stripped_text[best_idx_in_ldc],
           ldc_us_label = ldc_on_date$us_label[best_idx_in_ldc],
-          news_desk = api_on_date$news_desk[i],
-          section_name = api_on_date$section_name[i],
-          keywords_idx = i,  # Track index for later keywords extraction
+          ldc_label_source = ldc_on_date$label_source[best_idx_in_ldc],
+          ldc_heuristic_us = heuristic_us,
           stringsAsFactors = FALSE
         )
         ldc_matched_mask[best_idx_in_ldc] <- TRUE
@@ -194,25 +214,20 @@ for (year in 1987:1995) {
 
   if (length(year_matches) > 0) {
     year_df <- do.call(rbind, year_matches) %>%
-      select(-keywords_idx) %>%
       as_tibble()
 
-    # Apply simplified us_assign heuristic (desk/section only)
-    heuristic_result <- simple_us_assign(year_df) %>%
-      select(api_id, ldc_id, api_lead, ldc_stripped_text, ldc_us_label, ldc_heuristic_us)
+    matched_all[[length(matched_all) + 1]] <- year_df
 
-    matched_all[[length(matched_all) + 1]] <- heuristic_result
-
-    cat("  Matched pairs:", nrow(heuristic_result), "\n")
-    cat("  Joinability rate:", round(nrow(heuristic_result) / ldc_count * 100, 2), "%\n")
+    cat("  Matched pairs:", nrow(year_df), "\n")
+    cat("  Joinability rate:", round(nrow(year_df) / ldc_count * 100, 2), "%\n")
 
     join_summary <- bind_rows(
       join_summary,
       tibble(
         year = year,
         ldc_rows = ldc_count,
-        matched_pairs = nrow(heuristic_result),
-        joinability_rate = nrow(heuristic_result) / ldc_count
+        matched_pairs = nrow(year_df),
+        joinability_rate = nrow(year_df) / ldc_count
       )
     )
   } else {

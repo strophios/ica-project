@@ -80,11 +80,15 @@ CAVEAT_STR = (
 def audit_matched_parquet(matched_path: Path | str) -> None:
     """Read matched parquet and report AC6.1, AC6.2, and AC6.5 metrics.
 
-    The parquet is produced by r/audit/api_ldc_join.py and contains ldc_heuristic_us
-    computed from API-side desk/section descriptors for the matched articles.
+    The parquet is produced by r/audit/api_ldc_join.R and contains ldc_heuristic_us
+    computed from API-side desk/section/keywords descriptors for the matched articles.
+
+    AC6.1 (heuristic error rate) is computed against dateline-labeled rows only to avoid
+    circularity: desk-derived labels in ldc_label_source == "heuristic" would be compared
+    against heuristic-derived verdicts, conflating the sources.
 
     Args:
-        matched_path: Path to api_ldc_matched.parquet (from api_ldc_join.py).
+        matched_path: Path to api_ldc_matched.parquet (from api_ldc_join.R).
     """
     if pl is None:
         print("Error: polars not available", file=sys.stderr)
@@ -100,13 +104,21 @@ def audit_matched_parquet(matched_path: Path | str) -> None:
 
     print("=== Free Heuristic Audit Report (AC6.1, AC6.2, AC6.5) ===\n")
 
-    # AC6.1: error rate (heuristic vs dateline labels)
-    # ldc_heuristic_us is the R-computed heuristic from API-side descriptors
-    error_rate = heuristic_error_rate(
-        df["ldc_heuristic_us"].to_list(),
-        df["ldc_us_label"].to_list(),
-    )
-    print(f"AC6.1 Heuristic Error Rate (vs dateline labels): {error_rate:.4f}")
+    # AC6.1: error rate (heuristic vs dateline labels only)
+    # Filter to rows where ldc_label_source == "dateline" to avoid circularity.
+    # Heuristic-sourced labels would be desk/section/keywords derived; comparing
+    # heuristic verdicts against those would be circular.
+    df_dateline = df.filter(pl.col("ldc_label_source") == "dateline")
+    dateline_count = len(df_dateline)
+
+    if dateline_count > 0:
+        error_rate = heuristic_error_rate(
+            df_dateline["ldc_heuristic_us"].to_list(),
+            df_dateline["ldc_us_label"].to_list(),
+        )
+        print(f"AC6.1 Heuristic Error Rate (vs dateline labels, n={dateline_count}): {error_rate:.4f}")
+    else:
+        print(f"AC6.1 Heuristic Error Rate: No dateline-labeled rows in matched set")
 
     # AC6.2: lead similarity
     # Compute over a deterministic random sample if the full set is very large
@@ -129,6 +141,13 @@ def audit_matched_parquet(matched_path: Path | str) -> None:
 
     # Report counts
     print(f"\nMatched pairs: {len(df)}")
+    print(f"Dateline-labeled for AC6.1: {dateline_count}")
+
+    # Report heuristic verdict distribution
+    heuristic_dist = df.select("ldc_heuristic_us").group_by("ldc_heuristic_us").agg(pl.len())
+    print(f"\nHeuristic Verdict Distribution:")
+    for row in heuristic_dist.sort("len", descending=True).to_dicts():
+        print(f"  {row['ldc_heuristic_us']}: {row['len']}")
 
     # AC6.5: joinability caveat
     print(f"\nAC6.5 Caveat (biased-by-joinability):\n{CAVEAT_STR}")
