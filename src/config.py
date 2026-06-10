@@ -87,6 +87,8 @@ else:
 
 # Data sources
 LDC_CORPUS: Path = PROJECT_ROOT / "ldc_corpus"
+# NYT Archive API corpus (dateline-less; application target for the US filter)
+API_CORPUS_DIR: Path = PROJECT_ROOT / "api_corpus"
 
 # DAPT-phase artifacts
 DAPT_TRAINING_SET: Path = PROJECT_ROOT / "dapt_training_set.tf"
