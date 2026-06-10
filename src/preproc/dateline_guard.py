@@ -294,14 +294,16 @@ def _should_strip_dateline_block(
 # ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
-def has_dateline_prefix(text: str) -> bool:
+def has_dateline_prefix(text: str | None) -> bool:
     """True if `text` begins with a dateline prefix that WOULD be stripped.
 
     This is the conditional-strip version: returns True only if the detected
     dateline block contains a date field, a recognized qualifier, or is a bare
     AP-list city. Emphasis-caps ledes and unrecognized qualifiers → False.
 
-    Used for leakage detection and assertion on model input.
+    Accepts None (polars nulls reach this at the train-entry boundary) and
+    treats it as no-prefix. Used for leakage detection and assertion on
+    model input.
     """
     if not text:
         return False
@@ -324,13 +326,17 @@ def has_dateline_prefix(text: str) -> bool:
     return should_strip
 
 
-def assert_no_dateline_residue(texts: Iterable[str], *, max_report: int = 10) -> None:
+def assert_no_dateline_residue(
+    texts: Iterable[str | None], *, max_report: int = 10
+) -> None:
     """Raise ValueError if any text retains a dateline prefix.
 
     Used as a pytest assertion and as a runtime guard at train entry (Phase 4).
     Only reports offenders up to max_report to avoid overwhelming error output.
     """
-    offenders = [(i, t) for i, t in enumerate(texts) if has_dateline_prefix(t)]
+    offenders = [
+        (i, t) for i, t in enumerate(texts) if t is not None and has_dateline_prefix(t)
+    ]
     if offenders:
         sample = offenders[:max_report]
         raise ValueError(
