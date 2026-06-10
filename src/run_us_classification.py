@@ -62,7 +62,7 @@ def main(run_config=None, max_steps=None):
         lead_column="stripped_text",
     )
     splits = src.data_setup.data.create_us_filter_data(df)
-    for name, sdf in splits.items():
+    for sdf in splits.values():
         assert_no_dateline_residue(sdf["stripped_text"])  # AC2.2 guard
 
     # -------------------------------------------------------------------------
@@ -86,7 +86,11 @@ def main(run_config=None, max_steps=None):
         for n in ("train", "val", "test")
     }
 
-    # Freshness check: cached cardinality must match current split sizes
+    # Freshness check: cached cardinality must match current split sizes.
+    # NOTE: this check validates row count but NOT row order; if the split
+    # function's ordering semantics change (e.g. shuffling is removed), the cache
+    # must be deleted manually. See create_us_filter_data for the within-split
+    # shuffle that ensures early tf.data batches are not class-blocked.
     for n in ("train", "val", "test"):
         cached_n = int(datasets[n].cardinality().numpy())
         if cached_n != splits[n].shape[0]:
@@ -164,6 +168,11 @@ def main(run_config=None, max_steps=None):
     # Optimizer and compile
     # -------------------------------------------------------------------------
     resolved = run_config.lr_schedule.resolved
+    if resolved is None:
+        raise RuntimeError(
+            "lr_schedule.resolved is None after with_resolved() — "
+            "programming error in the config resolution flow"
+        )
     lr_schedule = keras.optimizers.schedules.CosineDecay(
         initial_learning_rate=run_config.lr_schedule.initial_lr,
         decay_steps=resolved.decay_steps,

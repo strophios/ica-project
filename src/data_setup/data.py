@@ -147,8 +147,12 @@ def create_us_filter_data(dataset):
 
     Drops rows with null `us_label` (unresolved/conflict), then splits the
     `us_label=True` and `us_label=False` groups separately (seed=200) and
-    concatenates, so class proportions are stable across splits. Returns
-    {"train":..., "val":..., "test":...} polars DataFrames.
+    concatenates. Shuffles each split deterministically (seed=200) to ensure
+    well-mixed class distribution throughout, preventing class-blocking when
+    tf.data.from_tensor_slices preserves row order and downstream SHUFFLE_BUFFER
+    is smaller than the full split.
+
+    Returns {"train":..., "val":..., "test":...} polars DataFrames.
     """
     data = dataset.filter(pl.col("us_label").is_not_null())
     assert data["id"].n_unique() == data.shape[0], (
@@ -167,9 +171,9 @@ def create_us_filter_data(dataset):
     p_tr, p_va, p_te = _split(pos)
     n_tr, n_va, n_te = _split(neg)
     return {
-        "train": pl.concat([p_tr, n_tr]),
-        "val": pl.concat([p_va, n_va]),
-        "test": pl.concat([p_te, n_te]),
+        "train": pl.concat([p_tr, n_tr]).sample(fraction=1.0, shuffle=True, seed=200),
+        "val": pl.concat([p_va, n_va]).sample(fraction=1.0, shuffle=True, seed=200),
+        "test": pl.concat([p_te, n_te]).sample(fraction=1.0, shuffle=True, seed=200),
     }
 
 

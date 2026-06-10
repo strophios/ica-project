@@ -150,3 +150,36 @@ class TestIdUniquenessAssertion:
         )
         with pytest.raises(AssertionError, match="not unique"):
             create_us_filter_data(df)
+
+
+class TestNonBlockedMixing:
+    def test_train_split_not_class_blocked(self):
+        """Regression test for class-blocking bug: when the split concatenates
+        positives then negatives without shuffling, tf.data.from_tensor_slices
+        preserves that order. A SHUFFLE_BUFFER smaller than the split size
+        means early batches draw only from the positive block.
+
+        This test verifies that both classes appear within the first
+        max(50, height//10) rows of the train split, making accidental
+        (unshuffled) compliance statistically unlikely.
+        """
+        # Use large class blocks to fail if unshuffled concat isn't shuffled
+        df = _fake_us_dataframe(n_pos=2000, n_neg=8000)
+        out = create_us_filter_data(df)
+        train = out["train"]
+
+        # Check-early window: max(50, 10% of rows)
+        check_rows = max(50, train.shape[0] // 10)
+        early_rows = train.head(check_rows)
+
+        pos_count = (early_rows["us_label"] == True).sum()
+        neg_count = (early_rows["us_label"] == False).sum()
+
+        assert pos_count > 0, (
+            f"No positive examples in first {check_rows} rows of train split. "
+            f"Data appears class-blocked (unshuffled concat)."
+        )
+        assert neg_count > 0, (
+            f"No negative examples in first {check_rows} rows of train split. "
+            f"Data appears class-blocked (unshuffled concat)."
+        )
