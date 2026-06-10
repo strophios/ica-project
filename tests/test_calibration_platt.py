@@ -265,8 +265,10 @@ class TestAC45EdgeCase:
         all_labels = np.concatenate([np.ones(n_pos), np.zeros(n_neg)])
 
         # Split into fit and eval (natural balance on both)
-        np.random.RandomState(44).shuffle(all_logits)
-        np.random.RandomState(44).shuffle(all_labels)
+        rng = np.random.RandomState(44)
+        idx = rng.permutation(len(all_logits))
+        all_logits = all_logits[idx]
+        all_labels = all_labels[idx]
 
         n_fit = len(all_logits) // 2
         fit_logits, eval_logits = all_logits[:n_fit], all_logits[n_fit:]
@@ -285,4 +287,4 @@ class TestAC45EdgeCase:
         cal_report = calibration_report(cal_probs, eval_labels)
 
         # Platt should improve (reduce) ECE
-        assert cal_report["ece"] <= raw_report["ece"] + 0.01  # allow tiny numerical slack
+        assert cal_report["ece"] < raw_report["ece"]

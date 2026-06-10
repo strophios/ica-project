@@ -1,4 +1,5 @@
-# pattern: Functional Core
+# pattern: Imperative Shell
+# Reason: file I/O and tempfile creation
 
 """Unit and integration tests for src/calibration/sidecar.py."""
 

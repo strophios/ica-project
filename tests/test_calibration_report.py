@@ -5,10 +5,8 @@
 from __future__ import annotations
 
 import numpy as np
-import pytest
 from hypothesis import given, settings
 from hypothesis import strategies as st
-from hypothesis.strategies import DataObject
 
 from src.calibration.calibrator import PlattCalibrator
 from src.calibration.report import calibration_report
@@ -280,4 +278,4 @@ class TestAC45CalibratorReducesECE:
         cal_report = calibration_report(cal_probs, eval_labels)
 
         # Calibrated should be better (lower ECE)
-        assert cal_report["ece"] <= raw_report["ece"] + 0.01  # tiny tolerance for randomness
+        assert cal_report["ece"] < raw_report["ece"]
