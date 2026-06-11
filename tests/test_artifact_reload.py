@@ -1,4 +1,3 @@
-# pattern: Imperative Shell (tests artifact reload cross-process)
 """Tests for src.validation.artifact_check — artifact triple reload.
 
 Exercises reload_and_score with a tiny model + calibrator triple (weights,
@@ -7,11 +6,9 @@ call, and verified to reproduce scores within floating-point tolerance.
 Verifies AC5.2: artifact triple reloads deterministically.
 """
 
-import json
 from pathlib import Path
 
 import numpy as np
-import pytest
 
 import keras  # noqa: F401  (initializes backend)
 
@@ -19,7 +16,7 @@ from src.validation.artifact_check import reload_and_score
 from src.model_setup.heads import ClassificationHead
 from src.model_setup.assembly import build_inference_model
 from src.us_config import UsRunConfig, UsHeadConfig
-from src.cca_config import LRScheduleConfig, OptimizerConfig, DiagnosticsConfig
+from src.cca_config import LRScheduleConfig, OptimizerConfig
 from src.calibration.calibrator import PlattCalibrator
 from src.calibration.sidecar import save_calibration, calibration_path_for_weights
 from src.us_config import config_path_for_weights
