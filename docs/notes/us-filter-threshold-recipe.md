@@ -33,7 +33,7 @@ for t in thresholds:
 ### Rationale
 
 - **Default 0.5**: Operates at the calibrated probability midpoint; suitable for general-purpose US event detection.
-- **Recall-targeted recipe**: For CCA consumers using the US filter as a pre-filter, a higher threshold (e.g., 0.8) may preserve more US events (higher recall) at the cost of including borderline cases. The recipe ensures explicit control of this tradeoff.
+- **Recall-targeted recipe**: For CCA consumers using the US filter as a pre-filter, a lower threshold (e.g., 0.3) preserves more US events (higher recall) at the cost of including borderline cases. The recipe ensures explicit control of this tradeoff.
 - **Topic-skew caveat**: The `doca_recall` diagnostic is biased toward DoCA topics (civil disobedience, strikes, etc.); see `doca_recall.DOCA_TOPIC_SKEW_CAVEAT` for details.
 
 ## References
