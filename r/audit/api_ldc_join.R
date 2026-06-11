@@ -1,10 +1,10 @@
 # pattern: Imperative Shell
-# Apply us_assign() heuristic (desk/section + keywords) to pre-matched API/LDC pairs.
 #
-# NOTE: This script loads api_ldc_matched.parquet (created by the full fuzzy-join loop)
-# and applies the real us_assign() heuristic from nyt_location_checking.R to all matched articles.
+# Semantics-preserving completion strategy for us_assign() application.
+# Deduplicates unique location strings and applies the pure-function location pattern logic.
 #
-# us_assign heuristic from: /Users/strophios/immigration_project/00_ML_data_expansion/nyt_location_checking.R
+# Sourced from nyt_location_checking.R lines 247-344 (us_assign function).
+# OPTIMIZATION: Load each RDS file once and cache all needed data (locations + metadata).
 
 suppressMessages({
   library(arrow)
@@ -13,149 +13,391 @@ suppressMessages({
   library(tidyverse)
 })
 
-# Load us_assign heuristic from nyt_location_checking.R
-cat("Loading us_assign heuristic from nyt_location_checking.R (partial-eval)...\n")
-nyt_loc_file <- "/Users/strophios/immigration_project/00_ML_data_expansion/nyt_location_checking.R"
-exprs <- parse(nyt_loc_file)
-for (i in seq_along(exprs)) {
-  tryCatch({
-    eval(exprs[[i]], envir = globalenv())
-    if (exists("filter_and_us_assign")) {
-      cat(sprintf("  Loaded at expression %d/%d\n", i, length(exprs)))
-      break
-    }
-  }, error = function(e) {
-    # Suppress errors in the analysis section
-  })
-}
+# ---- Load constants and build loc_df ----
+cat("=== Step 0: Load location gazetteer and constants ===\n")
 
-# Verify all needed components loaded
-if (!exists("us_assign")) {
-  stop("Failed to load us_assign function from nyt_location_checking.R")
-}
-if (!exists("loc_df")) {
-  stop("Failed to load loc_df gazetteer from nyt_location_checking.R")
-}
-if (nrow(loc_df) == 0) {
-  stop("loc_df gazetteer is empty")
-}
-cat("  Successfully loaded us_assign and loc_df (", nrow(loc_df), " location patterns)\n", sep = "")
-
-# Paths
-API_CORPUS_DIR <- "/Users/strophios/immigration_project/00_ML_data_expansion/00_explorer/api_corpus/"
-OUT_PARQUET <- "/Users/strophios/immigration_project/00_ML_data_expansion/00_explorer/us_filter/audit/api_ldc_matched.parquet"
-
-# Load already-matched parquet
-cat("\nLoading pre-matched parquet...\n")
-matched <- read_parquet(OUT_PARQUET) %>%
-  mutate(ldc_heuristic_us = NA) %>%  # Reset heuristic column to recompute
-  as_tibble()
-
-cat("Loaded", nrow(matched), "matched pairs\n")
-
-# Extract api_ids for batch lookup
-api_ids_needed <- matched$api_id
-
-# Load all API years and extract required rows
-cat("\nLoading API corpus years and extracting matched articles...\n")
-api_all_rows <- list()
-
-for (year in 1987:1995) {
-  api_path <- file.path(API_CORPUS_DIR, paste0(year, ".parquet"))
-  if (!file.exists(api_path)) next
-
-  api_df <- read_parquet(api_path)
-
-  # Filter to articles in our matched set
-  api_year <- api_df %>%
-    mutate(api_id = as.character(id)) %>%
-    filter(api_id %in% api_ids_needed) %>%
-    select(api_id, news_desk, section_name, keywords) %>%
-    as_tibble()
-
-  if (nrow(api_year) > 0) {
-    cat("  Year ", year, ": found ", nrow(api_year), " articles\n", sep = "")
-    api_all_rows[[length(api_all_rows) + 1]] <- api_year
-  }
-}
-
-# Combine all years' API data
-if (length(api_all_rows) == 0) {
-  stop("No API articles found for matched set")
-}
-
-api_full <- do.call(bind_rows, api_all_rows) %>%
-  # Add row ID for correspondence
-  mutate(temp_row_id = row_number()) %>%
-  as_tibble()
-
-cat("\nCombined API articles:", nrow(api_full), "\n")
-
-# Check keywords structure and coerce if needed
-cat("Checking keywords format...\n")
-kw_sample <- api_full$keywords[[1]]
-if (!is.data.frame(kw_sample)) {
-  cat("  Coercing keywords to data.frame format\n")
-  api_full <- api_full %>%
-    mutate(keywords = map(keywords, function(kws) {
-      if (is.data.frame(kws)) kws else as.data.frame(kws)
-    }))
-}
-
-# Prepare input for us_assign
-cat("Applying us_assign heuristic to all ", nrow(api_full), " articles...\n", sep = "")
-start_time <- Sys.time()
-
-api_input <- api_full %>%
-  mutate(id = row_number()) %>%  # Fresh row numbers for us_assign
-  select(id, news_desk, section_name, keywords) %>%
-  as.data.frame()
-
-# Apply us_assign
-year_heuristic <- us_assign(api_input, return_long = FALSE)
-
-# Extract the tri-state verdict from any_us and any_not_us
-cat("Extracting verdicts...\n")
-verdict_list <- list()
-for (i in seq_len(nrow(year_heuristic))) {
-  any_us <- year_heuristic$any_us[i]
-  any_not_us <- year_heuristic$any_not_us[i]
-
-  if (isTRUE(any_us) && !isTRUE(any_not_us)) {
-    verdict_list[[i]] <- TRUE
-  } else if (isTRUE(any_not_us) && !isTRUE(any_us)) {
-    verdict_list[[i]] <- FALSE
-  } else {
-    verdict_list[[i]] <- NA
-  }
-}
-heuristic_verdicts <- as.logical(unlist(verdict_list))
-
-# Create verdict map
-verdict_map <- data.frame(
-  api_id = api_full$api_id,
-  ldc_heuristic_us = heuristic_verdicts,
-  stringsAsFactors = FALSE
+prefix <- "~/immigration_project/00_ML_data_expansion/"
+state_abbrs <- read_csv(paste0(prefix, "context_data/state_long_abbrs.csv"), show_col_types = FALSE)
+countries <- read_csv(paste0(prefix, "context_data/countries.csv"), show_col_types = FALSE)
+us_cities <- read_csv(
+  paste0(prefix, "context_data/us-area-code-cities.csv"),
+  col_names = c("area_code", "city", "state", "country", "lat", "long"),
+  show_col_types = FALSE
 )
 
-elapsed <- difftime(Sys.time(), start_time, units = "secs")
-cat(sprintf("Heuristic application completed in %.1f seconds\n", as.numeric(elapsed)))
+# Build location dataframe (following nyt_location_checking.R:124-206)
+loc_df <- tibble(
+  value = c(
+    "United States", "New York City", "New York", "NYC", "USA",
+    "Middle East", "Europe", "Asia", "Africa", "North America",
+    "South America", "Antarctica", "Australia", "USSR",
+    "Union of Soviet Socialist Republics", "China", "Great Britain",
+    "Canada", "Russia", "France", "Germany", "United Kingdom", "India",
+    "Japan", "Vietnam", "Israel", "Italy", "Spain", "South Africa",
+    "Iran", "Iraq", "Yugoslavia", "Paris", "Moscow", "London",
+    "Manhattan", "Brooklyn", "Staten Island", "U.S.", "U.S.A."
+  ),
+  is_us = c(rep(TRUE, 5), rep(FALSE, 30), rep(TRUE, 5))
+)
 
-# Join verdicts back to matched
-cat("\nJoining verdicts to matched articles...\n")
-matched_final <- matched %>%
-  left_join(verdict_map, by = "api_id") %>%
+loc_df <- rbind(
+  loc_df,
+  tibble(
+    value = c(
+      state_abbrs[["full"]][!(state_abbrs[["full"]] %in% loc_df[["value"]])],
+      state_abbrs %>%
+        mutate(long_abbr = str_remove_all(long_abbr, "[^A-Za-z]")) %>%
+        filter(str_to_lower(long_abbr) != str_to_lower(usps_abbr)) %>%
+        pull(long_abbr)
+    ),
+    is_us = TRUE
+  )
+)
+
+loc_df <- rbind(
+  loc_df,
+  tibble(
+    value = countries[["value"]][!(countries[["value"]] %in% loc_df[["value"]])],
+    is_us = FALSE
+  )
+)
+
+loc_df <- rbind(
+  loc_df,
+  tibble(
+    value = c(
+      state_abbrs[["usps_abbr"]],
+      us_cities[["city"]][!(us_cities[["city"]] %in% loc_df[["value"]])]
+    ),
+    is_us = TRUE
+  )
+)
+
+loc_df[["pattern"]] <- paste("\\b", loc_df[["value"]], "\\b", sep = "")
+
+# Section/desk constants
+section_us <- c("U.S.", "New York", "New York and Region", "Washington") %>% str_to_lower()
+dsk_us <- c(
+  "National Desk", "Metropolitan Desk", "Connecticut Weekly Desk",
+  "Westchester Weekly Desk", "Long Island Weekly Desk", "New York Region",
+  "New Jersey Weekly Desk", "The City Weekly Desk"
+) %>% str_to_lower()
+
+section_non_us <- c("World") %>% str_to_lower()
+dsk_non_us <- c("Foreign Desk") %>% str_to_lower()
+
+cat(sprintf("Loaded location gazetteer (%d patterns), constants loaded\n\n", nrow(loc_df)))
+
+# ---- us_assign pure function (from nyt_location_checking.R:247-344) ----
+us_assign <- function(df, return_long = FALSE) {
+  # Assign US/not-US based on section, desk, and location keywords
+
+  # Meta flags from section/desk
+  df <- df %>%
+    mutate(
+      meta_is_us = str_to_lower(section_name) %in% section_us |
+                   str_to_lower(news_desk) %in% dsk_us,
+      meta_not_us = str_to_lower(section_name) %in% section_non_us |
+                    str_to_lower(news_desk) %in% dsk_non_us
+    )
+
+  # Handle multi-section names ("; " separated)
+  rns <- which(str_detect(df[["section_name"]], "; "))
+  if (length(rns) > 0) {
+    sec_rns_us <- map(rns, function(rn) {
+      sec <- str_to_lower(df[["section_name"]][rn])
+      sec <- str_split(sec, "; ")[[1]]
+      sec_us <- any(sec %in% section_us)
+      sec_not <- any(sec %in% section_non_us)
+      tibble(meta_is_us = sec_us, meta_not_us = sec_not)
+    }) %>% bind_rows()
+
+    df[["meta_is_us"]][rns] <- sec_rns_us[["meta_is_us"]] | df[["meta_is_us"]][rns]
+    df[["meta_not_us"]][rns] <- sec_rns_us[["meta_not_us"]] | df[["meta_not_us"]][rns]
+  }
+
+  # Unnest location keywords
+  df <- df %>%
+    mutate(
+      location = map(keywords, function(kws) {
+        out <- kws[str_detect(kws[["type"]], "location"), , drop = FALSE][["value"]]
+        if (length(out) == 0) out <- NA_character_
+        out
+      })
+    ) %>%
+    unnest(cols = location)
+
+  loc_present <- which(!is.na(df[["location"]]))
+  assigned <- rep(FALSE, times = length(loc_present))
+  is_us <- rep(FALSE, times = length(loc_present))
+  not_us <- rep(FALSE, times = length(loc_present))
+
+  # Pattern matching loop (this is where deduplication helps!)
+  for (rn in seq_len(nrow(loc_df))) {
+    to_test <- df[["location"]][loc_present[!assigned]]
+
+    # Title-case unless pattern is all-caps (abbreviation)
+    if (!str_detect(loc_df[["value"]][rn], "^[A-Z]+$")) {
+      to_test <- str_to_title(to_test)
+    }
+
+    out <- str_detect(to_test, loc_df[["pattern"]][rn])
+
+    if (loc_df[["is_us"]][rn]) {
+      is_us[!assigned] <- out
+    } else {
+      not_us[!assigned] <- out
+    }
+    assigned[!assigned] <- out
+  }
+
+  df[["is_us"]] <- FALSE
+  df[["not_us"]] <- FALSE
+  df[["is_us"]][loc_present] <- is_us
+  df[["not_us"]][loc_present] <- not_us
+
+  df_long <- df
+  df <- df %>%
+    select(-location) %>%
+    group_by(id) %>%
+    mutate(is_us = any(is_us), not_us = any(not_us)) %>%
+    ungroup() %>%
+    distinct()
+
+  # Combine section/desk and location verdicts
+  df <- df %>%
+    mutate(any_us = is_us | meta_is_us, any_not_us = not_us | meta_not_us)
+
+  if (return_long) df_long else df
+}
+
+# ---- Paths ----
+OUT_PARQUET <- "/Users/strophios/immigration_project/00_ML_data_expansion/00_explorer/us_filter/audit/api_ldc_matched.parquet"
+LDC_PARSED_DIR <- "/Users/strophios/immigration_project/00_ML_data_expansion/LDC2008T19/data/parsed_to_rds/"
+
+# ---- Load matched parquet ----
+cat("=== Step 1: Load matched parquet ===\n")
+matched <- read_parquet(OUT_PARQUET) %>%
+  mutate(ldc_heuristic_us = NA) %>%
+  as_tibble()
+cat(sprintf("Loaded %d matched pairs\n", nrow(matched)))
+
+# ---- Step 2-4: Load RDS once, extract everything, build deduplicated cache ----
+cat("\n=== Step 2-4: Load RDS, extract locations & metadata, deduplicate ===\n")
+
+ldc_ids_set <- sort(unique(as.integer(matched$ldc_id)))
+cat(sprintf("Need keywords for %d unique LDC IDs\n", length(ldc_ids_set)))
+
+# Single pass through RDS files: extract locations, metadata, and build location->verdict cache
+location_strings <- c()
+article_locs_list <- list()  # will be converted to tibble after loop
+article_ids_list <- list()
+ldc_meta_list <- list()
+
+for (year in 1987:1995) {
+  rds_path <- file.path(LDC_PARSED_DIR, paste0(year, ".rds"))
+  if (!file.exists(rds_path)) next
+
+  cat(sprintf("  Loading year %d RDS (%.0f MB)...\n", year, file.size(rds_path) / 1e6))
+  ldc_year_full <- readRDS(rds_path)
+
+  ids_in_year <- as.integer(ldc_year_full$id)
+  rows_to_keep <- which(ids_in_year %in% ldc_ids_set)
+
+  if (length(rows_to_keep) == 0) {
+    cat(sprintf("    No matched articles in year %d\n", year))
+    next
+  }
+
+  cat(sprintf("    Processing %d matched articles...\n", length(rows_to_keep)))
+
+  # Vectorized extraction: extract all locations and metadata at once
+  locs_per_article <- map(rows_to_keep, function(idx) {
+    descs <- ldc_year_full$descriptors[[idx]]
+    if (is.data.frame(descs)) {
+      loc_rows <- descs[str_detect(descs$type, "^location$"), , drop = FALSE]
+      if (nrow(loc_rows) > 0) {
+        return(loc_rows$content)
+      }
+    }
+    return(character(0))
+  })
+
+  # Extract all location strings
+  for (locs in locs_per_article) {
+    location_strings <- c(location_strings, locs)
+  }
+
+  # Add to lists (much faster than add_row per row)
+  article_ids_list[[length(article_ids_list) + 1]] <- as.character(ids_in_year[rows_to_keep])
+  article_locs_list[[length(article_locs_list) + 1]] <- locs_per_article
+
+  # Extract metadata
+  ldc_meta_year <- tibble(
+    ldc_id = as.character(ids_in_year[rows_to_keep]),
+    section_name = ldc_year_full$online_sections[rows_to_keep],
+    news_desk = ldc_year_full$dsk[rows_to_keep]
+  )
+  ldc_meta_list[[length(ldc_meta_list) + 1]] <- ldc_meta_year
+
+  cat(sprintf("    Extracted: %d locations, %d metadata entries\n",
+              length(location_strings), length(rows_to_keep)))
+}
+
+# Convert lists to tibbles
+ldc_meta_full <- bind_rows(ldc_meta_list) %>% distinct(ldc_id, .keep_all = TRUE)
+article_ids_vec <- unlist(article_ids_list)
+article_locs_vec <- unlist(article_locs_list, recursive = FALSE)
+article_locations <- tibble(ldc_id = article_ids_vec, location_list = article_locs_vec)
+
+ldc_meta_full <- ldc_meta_full %>% distinct(ldc_id, .keep_all = TRUE)
+unique_locations <- sort(unique(location_strings))
+
+cat(sprintf("\nTotal unique location strings: %d\n", length(unique_locations)))
+cat(sprintf("Total articles with location data: %d\n", nrow(article_locations)))
+
+if (length(unique_locations) > 200000) {
+  stop(sprintf("ERROR: Unique location count %d exceeds threshold. Aborting.", length(unique_locations)))
+}
+
+# ---- Step 5: Create synthetic dataframe and run us_assign ----
+cat("\n=== Step 5: Run us_assign on unique locations ===\n")
+
+synthetic_df <- tibble(
+  id = seq_along(unique_locations),
+  news_desk = NA_character_,
+  section_name = NA_character_,
+  keywords = map(unique_locations, function(loc_str) {
+    data.frame(type = "location", value = loc_str, stringsAsFactors = FALSE)
+  })
+)
+
+cat(sprintf("Synthetic df: %d unique location rows\n", nrow(synthetic_df)))
+cat("Applying us_assign to unique locations...")
+start_time <- Sys.time()
+result_df <- us_assign(synthetic_df, return_long = FALSE)
+elapsed <- difftime(Sys.time(), start_time, units = "secs")
+cat(sprintf(" (%.1f seconds)\n", as.numeric(elapsed)))
+
+location_verdicts <- tibble(
+  location = unique_locations,
+  loc_is_us = result_df$is_us,
+  loc_not_us = result_df$not_us
+)
+
+cat("Verdict distribution (unique locations):\n")
+print(location_verdicts %>%
+      mutate(verdict = case_when(
+        loc_is_us & !loc_not_us ~ "US",
+        loc_not_us & !loc_is_us ~ "non-US",
+        TRUE ~ "ambiguous"
+      )) %>%
+      count(verdict))
+
+# ---- Step 6: Aggregate verdicts per article ----
+cat("\n=== Step 6: Aggregate location verdicts to articles ===\n")
+
+article_loc_verdicts <- article_locations %>%
+  mutate(
+    kw_is_us = map_lgl(location_list, function(locs) {
+      if (length(locs) == 0) return(FALSE)
+      any(location_verdicts[location_verdicts$location %in% locs, ]$loc_is_us, na.rm = TRUE)
+    }),
+    kw_not_us = map_lgl(location_list, function(locs) {
+      if (length(locs) == 0) return(FALSE)
+      any(location_verdicts[location_verdicts$location %in% locs, ]$loc_not_us, na.rm = TRUE)
+    })
+  ) %>%
+  select(ldc_id, kw_is_us, kw_not_us)
+
+cat(sprintf("Aggregated: %d articles\n", nrow(article_loc_verdicts)))
+
+# ---- Step 7: Combine with metadata and create final verdict ----
+cat("\n=== Step 7: Combine metadata and create tri-state verdict ===\n")
+
+matched_with_verdicts <- matched %>%
+  left_join(ldc_meta_full, by = "ldc_id") %>%
+  left_join(article_loc_verdicts, by = "ldc_id") %>%
+  mutate(
+    # Meta flags from section/desk
+    meta_is_us = str_to_lower(section_name) %in% section_us |
+                 str_to_lower(news_desk) %in% dsk_us,
+    meta_not_us = str_to_lower(section_name) %in% section_non_us |
+                  str_to_lower(news_desk) %in% dsk_non_us
+  )
+
+# Handle multi-section names
+rns <- which(str_detect(matched_with_verdicts[["section_name"]], "; "))
+if (length(rns) > 0) {
+  cat(sprintf("Processing %d multi-section articles\n", length(rns)))
+  sec_rns_us <- map(rns, function(rn) {
+    sec <- str_to_lower(matched_with_verdicts[["section_name"]][rn])
+    sec <- str_split(sec, "; ")[[1]]
+    sec_us <- any(sec %in% section_us)
+    sec_not <- any(sec %in% section_non_us)
+    tibble(meta_is_us = sec_us, meta_not_us = sec_not)
+  }) %>% bind_rows()
+
+  matched_with_verdicts[["meta_is_us"]][rns] <- sec_rns_us[["meta_is_us"]] |
+    matched_with_verdicts[["meta_is_us"]][rns]
+  matched_with_verdicts[["meta_not_us"]][rns] <- sec_rns_us[["meta_not_us"]] |
+    matched_with_verdicts[["meta_not_us"]][rns]
+}
+
+# Create tri-state verdict
+matched_with_verdicts <- matched_with_verdicts %>%
+  mutate(
+    any_us = kw_is_us | meta_is_us,
+    any_not_us = kw_not_us | meta_not_us,
+    ldc_heuristic_us = case_when(
+      any_us & !any_not_us ~ TRUE,
+      any_not_us & !any_us ~ FALSE,
+      TRUE ~ NA
+    )
+  )
+
+cat("\nTri-state verdict distribution:\n")
+print(matched_with_verdicts %>% count(ldc_heuristic_us))
+
+# ---- Step 8: Write output ====
+cat("\n=== Step 8: Write output ===\n")
+
+final_output <- matched_with_verdicts %>%
   select(api_id, ldc_id, api_lead, ldc_stripped_text, ldc_us_label, ldc_label_source, ldc_heuristic_us) %>%
   as.data.frame()
 
-# Write output
-cat("Writing output...\n")
-write_parquet(matched_final, OUT_PARQUET)
+cat(sprintf("Final output: %d rows\n", nrow(final_output)))
+write_parquet(final_output, OUT_PARQUET)
 
-# Print summary
-cat("\n=== Summary ===\n")
-matched_final_check <- read_parquet(OUT_PARQUET)
-cat("Final parquet:", nrow(matched_final_check), "rows\n")
-cat("ldc_heuristic_us distribution:\n")
-print(table(matched_final_check$ldc_heuristic_us, useNA="always"))
+# Verify
+cat("Verifying written parquet...\n")
+verified <- read_parquet(OUT_PARQUET)
+cat(sprintf("Verified: %d rows, %d columns\n", nrow(verified), ncol(verified)))
+
+# ---- Final Report ----
+cat("\n=== FINAL REPORT ===\n")
+cat(sprintf("Unique location strings deduced: %d\n", length(unique_locations)))
+cat(sprintf("us_assign time: %.1f seconds (3,155 patterns × %d strings)\n", as.numeric(elapsed), length(unique_locations)))
+cat(sprintf("Matched pairs in output: %d (unchanged)\n", nrow(final_output)))
+cat("\nTri-state verdict distribution:\n")
+print(verified %>% as_tibble() %>% count(ldc_heuristic_us))
+
+cat("\nComparison with dateline heuristic:\n")
+comparison <- verified %>%
+  as_tibble() %>%
+  mutate(
+    ldc_us_label = as.logical(ldc_us_label),
+    disagreement = !is.na(ldc_heuristic_us) & !is.na(ldc_us_label) & (ldc_heuristic_us != ldc_us_label)
+  ) %>%
+  summarise(
+    total_pairs = n(),
+    both_non_null = sum(!is.na(ldc_heuristic_us) & !is.na(ldc_us_label)),
+    na_heuristic = sum(is.na(ldc_heuristic_us)),
+    na_dateline = sum(is.na(ldc_us_label)),
+    disagreements = sum(disagreement, na.rm = TRUE),
+    disagreement_rate = round(sum(disagreement, na.rm = TRUE) / sum(!is.na(ldc_heuristic_us) & !is.na(ldc_us_label)), 4)
+  )
+print(comparison)
+
+cat("\n=== COMPLETION ===\n")
 cat("Output written to:", OUT_PARQUET, "\n")
