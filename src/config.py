@@ -117,6 +117,9 @@ US_FILTER_CLASSIFIER_DIR: Path = US_FILTER_DIR / "classifier"
 US_FILTER_CLASSIFIER_WEIGHTS: Path = US_FILTER_DIR / "us_classifier.weights.h5"
 US_FILTER_LOGS_DIR: Path = US_FILTER_DIR / "logs"
 
+# Validation (gold-set) artifacts
+VALIDATION_DIR: Path = PROJECT_ROOT / "validation"
+
 
 # ---------------------------------------------------------------------------
 # Compute / precision
