@@ -1,3 +1,4 @@
+# pattern: Imperative Shell (delegates artifact-triple reload + scoring to apply_us_model)
 """Artifact triple reload check — proves reproducibility cross-process.
 
 Demonstrates that the durable artifact (weights + config + calibration sidecars)
