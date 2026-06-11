@@ -9,4 +9,6 @@ source("r/dateline/resolve_dateline.R")
 source("r/dateline/label_policy.R")
 # Load gazetteers and make available to tests via parent environment
 gz <- load_gazetteers("r/dateline/gazetteers")
+# Load vendored us_assign heuristic for tests
+source("r/vendored/us_assign.R")
 testthat::test_dir("r/tests/testthat", stop_on_failure = TRUE)
