@@ -2,8 +2,6 @@
 """Tests for src.validation.slice_eval — transfer eval + proxy gap."""
 
 import json
-import tempfile
-from pathlib import Path
 
 import numpy as np
 import polars as pl
@@ -20,8 +18,6 @@ from src.model_setup.heads import ClassificationHead
 from src.model_setup.assembly import build_inference_model
 from src.us_config import UsRunConfig, UsHeadConfig
 from src.cca_config import LRScheduleConfig, OptimizerConfig, DiagnosticsConfig
-from src.calibration.calibrator import PlattCalibrator
-import src.config as config
 
 
 SEQ_LEN = 4

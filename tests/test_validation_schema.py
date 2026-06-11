@@ -82,6 +82,21 @@ class TestValidateGoldSet:
         with pytest.raises(ValueError, match="sample_stratum"):
             validate_gold_set(df)
 
+    def test_null_in_required_column_raises(self):
+        """A null value in a required column raises (required = non-null)."""
+        df = pl.DataFrame({
+            "id": ["1", "2"],
+            "corpus": ["api", "ldc"],
+            "year": [1990, 1995],
+            "news_desk": ["National", None],
+            "section_name": ["US", "International"],
+            "headline": ["Test", "Article"],
+            "lead_paragraph": ["Lead 1", "Lead 2"],
+            "sample_stratum": ["random_pre1986", "doca_matched"],
+        })
+        with pytest.raises(ValueError, match="null values"):
+            validate_gold_set(df)
+
     def test_label_columns_present_but_null_tolerated(self):
         """Label columns can be present and null."""
         df = pl.DataFrame({
