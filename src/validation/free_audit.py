@@ -81,7 +81,8 @@ def audit_matched_parquet(matched_path: Path | str) -> None:
     """Read matched parquet and report AC6.1, AC6.2, and AC6.5 metrics.
 
     The parquet is produced by r/audit/api_ldc_join.R and contains ldc_heuristic_us
-    computed from API-side desk/section/keywords descriptors for the matched articles.
+    computed from LDC-side descriptors (LDC2008T19/data/parsed_to_rds fields + LDC online_sections/dsk)
+    using the us_assign() heuristic from nyt_location_checking.R.
 
     AC6.1 (heuristic error rate) is computed against dateline-labeled rows only to avoid
     circularity: desk-derived labels in ldc_label_source == "heuristic" would be compared
@@ -118,7 +119,7 @@ def audit_matched_parquet(matched_path: Path | str) -> None:
         )
         print(f"AC6.1 Heuristic Error Rate (vs dateline labels, n={dateline_count}): {error_rate:.4f}")
     else:
-        print(f"AC6.1 Heuristic Error Rate: No dateline-labeled rows in matched set")
+        print("AC6.1 Heuristic Error Rate: No dateline-labeled rows in matched set")
 
     # AC6.2: lead similarity
     # Compute over a deterministic random sample if the full set is very large
@@ -145,7 +146,7 @@ def audit_matched_parquet(matched_path: Path | str) -> None:
 
     # Report heuristic verdict distribution
     heuristic_dist = df.select("ldc_heuristic_us").group_by("ldc_heuristic_us").agg(pl.len())
-    print(f"\nHeuristic Verdict Distribution:")
+    print("\nHeuristic Verdict Distribution:")
     for row in heuristic_dist.sort("len", descending=True).to_dicts():
         print(f"  {row['ldc_heuristic_us']}: {row['len']}")
 

@@ -159,9 +159,11 @@ class UsRunConfig:
                 f"UsRunConfig.freeze_encoder must be a bool; "
                 f"got {type(self.freeze_encoder).__name__}."
             )
-        if not isinstance(self.unfreeze_top_n, int) or self.unfreeze_top_n < 0:
+        # unfreeze_top_n: RoBERTa-base has 12 layers; max unfreeze is top 12 (all layers)
+        # The multi-head future may parameterize this, but for now it's hardcoded.
+        if not isinstance(self.unfreeze_top_n, int) or self.unfreeze_top_n < 0 or self.unfreeze_top_n > 12:
             raise ValueError(
-                f"UsRunConfig.unfreeze_top_n must be a non-negative int; "
+                f"UsRunConfig.unfreeze_top_n must be in [0, 12] (RoBERTa-base has 12 layers); "
                 f"got {self.unfreeze_top_n!r}."
             )
         if self.layer_multipliers is not None and not isinstance(self.layer_multipliers, dict):

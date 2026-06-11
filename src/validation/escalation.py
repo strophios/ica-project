@@ -37,8 +37,14 @@ def top_n_group_fn(n_top: int, n_layers: int = 12):
         """Group a variable based on whether it's in the top N layers."""
         path = var.path
 
-        # Check if any top-layer name appears in the path
-        if any(layer_name in path for layer_name in top_layer_names):
+        # Check if any top-layer name appears in the path, using boundary matching
+        # to avoid substring collisions (e.g., roberta_layer_1 matching roberta_layer_11).
+        # Boundary patterns: "{layer_name}/" or path segment equality after splitting on "/".
+        path_segments = path.split("/")
+        if any(
+            layer_name in path_segments or f"{layer_name}/" in path
+            for layer_name in top_layer_names
+        ):
             return "encoder_top"
 
         # Check if roberta appears in the path (but not in top layers)

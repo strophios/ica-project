@@ -13,9 +13,6 @@ from pathlib import Path
 import numpy as np
 import polars as pl
 
-import keras
-import numpy as np
-
 import src.config as config
 from src.calibration.sidecar import (
     calibration_path_for_weights,
@@ -31,6 +28,7 @@ from src.us_config import UsRunConfig, config_path_for_weights
 def apply_us_model(
     texts: list[str],
     weights_path: Path | str = config.US_FILTER_CLASSIFIER_WEIGHTS,
+    backbone=None,
 ) -> np.ndarray:
     """Apply calibrated US model to texts (Pattern 2: fresh head, loaded weights).
 
@@ -46,6 +44,7 @@ def apply_us_model(
     Args:
         texts: List of article texts (headline + lead_paragraph)
         weights_path: Path to trained US model weights
+        backbone: Optional pre-built backbone (for testing; if None, loads from config)
 
     Returns:
         Calibrated probability scores [0, 1], shape (len(texts),)
@@ -62,7 +61,8 @@ def apply_us_model(
         name=run_config.head.name,
     )
 
-    backbone = load_dapt_backbone(run_config.backbone_weights_path)
+    if backbone is None:
+        backbone = load_dapt_backbone(run_config.backbone_weights_path)
     run_config.validate_against_backbone(backbone)
 
     inference_model = build_inference_model(
@@ -114,7 +114,8 @@ def evaluate_slice(
     """Evaluate model performance on gold-set slice.
 
     Computes precision, recall, F1 against us_event labels using
-    us_score >= threshold for prediction.
+    us_score >= threshold for prediction. Rows with null us_event
+    are silently excluded from metrics computation.
 
     Args:
         gold_df: Gold-set dataframe with 'us_score' and 'us_event' columns
@@ -128,14 +129,13 @@ def evaluate_slice(
     labels = gold_df["us_event"]
 
     # Count positives and negatives
-    n_pos = (labels == True).sum()
-    n_neg = (labels == False).sum()
+    n_pos = labels.sum()
+    n_neg = (~labels).sum()
 
     # Confusion matrix
-    tp = ((predictions == True) & (labels == True)).sum()
-    fp = ((predictions == True) & (labels == False)).sum()
-    fn = ((predictions == False) & (labels == True)).sum()
-    tn = ((predictions == False) & (labels == False)).sum()
+    tp = (predictions & labels).sum()
+    fp = (predictions & ~labels).sum()
+    fn = (~predictions & labels).sum()
 
     # Metrics
     precision = tp / (tp + fp) if (tp + fp) > 0 else 0.0
@@ -155,33 +155,77 @@ def evaluate_slice(
     }
 
 
-def proxy_gap(gold_df: pl.DataFrame) -> dict[str, float | int]:
-    """Compute dateline-vs-event-location agreement proxy gap.
+def proxy_gap(
+    gold_df: pl.DataFrame,
+    dateline_labels_df: pl.DataFrame | None = None,
+) -> dict[str, float | int]:
+    """Compute dateline-vs-event-location agreement proxy gap (AC6.3).
 
-    For rows where both event_location is available, checks agreement
-    between the us_event label and the event_location code.
+    Measures agreement between DATELINE labels (looked up via alt_corpus_id from
+    the LDC labeled parquet) and hand-coded event_location. This is a proxy for
+    assessing whether the DATELINE label is a reliable stand-in for hand-coding
+    when a gold set doesn't exist.
+
+    If dateline_labels_df is not provided, reads from config.US_FILTER_LABELED_PARQUET
+    and filters to label_source == "dateline". Expects both dataframes to have
+    id columns cast to str for consistent joining.
+
+    Agreement is computed as: mean(dateline_us_label == event_location_us_coding)
+    where event_location_us_coding is derived by checking if event_location == "US".
 
     Args:
-        gold_df: Gold-set dataframe with 'us_event' and 'event_location' columns
+        gold_df: Gold-set dataframe with columns:
+            - alt_corpus_id (str, nullable): LDC id for joining to dateline labels
+            - event_location (str, nullable): hand-coded location ("US" or foreign)
+            - us_event (bool, nullable): hand-coded US-ness (included for context)
+        dateline_labels_df: Optional DataFrame with columns:
+            - ldc_id (str): LDC article id
+            - us_label (bool): dateline-derived label
+            If None, read from config.US_FILTER_LABELED_PARQUET, cast id to str,
+            filter to label_source == "dateline".
 
     Returns:
-        Dict with keys: dateline_event_agreement (0-1), n (count of rows with both)
+        Dict with keys:
+        - dateline_event_agreement (float in [0, 1]): fraction of rows where
+          dateline label matches hand-coded event_location
+        - n (int): count of gold-set rows successfully joined with dateline labels
     """
-    # Filter to rows with event_location present
-    rows_with_loc = gold_df.filter(pl.col("event_location").is_not_null())
+    # Load dateline labels if not provided
+    if dateline_labels_df is None:
+        ldc_labeled = pl.read_parquet(config.US_FILTER_LABELED_PARQUET)
+        # Filter to dateline-sourced labels only (avoid circular comparison)
+        dateline_labels_df = ldc_labeled.filter(pl.col("label_source") == "dateline").select(
+            pl.col("id").cast(pl.Utf8).alias("ldc_id"),
+            pl.col("us_label")
+        )
 
-    if rows_with_loc.shape[0] == 0:
+    # Filter gold_df to rows with both alt_corpus_id and event_location present
+    joinable = gold_df.filter(
+        (pl.col("alt_corpus_id").is_not_null())
+        & (pl.col("event_location").is_not_null())
+    )
+
+    if joinable.shape[0] == 0:
         return {"dateline_event_agreement": 0.0, "n": 0}
 
-    # Check agreement: us_event=True (US event) should match event_location="US"
-    event_location = rows_with_loc["event_location"]
-    us_event = rows_with_loc["us_event"]
+    # Join on alt_corpus_id (API gold) to ldc_id (dateline labels)
+    joined = joinable.join(
+        dateline_labels_df,
+        left_on="alt_corpus_id",
+        right_on="ldc_id",
+        how="inner",
+    )
 
-    # us_event=True should match event_location="US"
-    is_us_location = event_location == "US"
-    agreement = (us_event == is_us_location).sum() / rows_with_loc.shape[0]
+    if joined.shape[0] == 0:
+        return {"dateline_event_agreement": 0.0, "n": 0}
+
+    # Compute event_location-derived US coding: event_location == "US" → True
+    event_location_us = joined["event_location"] == "US"
+
+    # Agreement: fraction where dateline us_label matches event_location US coding
+    agreement = (joined["us_label"] == event_location_us).sum() / joined.shape[0]
 
     return {
         "dateline_event_agreement": float(agreement),
-        "n": int(rows_with_loc.shape[0]),
+        "n": int(joined.shape[0]),
     }

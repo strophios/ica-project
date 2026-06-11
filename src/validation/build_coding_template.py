@@ -124,3 +124,61 @@ def build_and_write_template(
 
     # Write
     template.write_parquet(output_path)
+
+
+if __name__ == "__main__":
+    import argparse
+    import src.config as config
+
+    parser = argparse.ArgumentParser(
+        description="Generate hand-coding candidate template for gold-set validation."
+    )
+    parser.add_argument(
+        "--n-per-cell",
+        type=int,
+        default=5,
+        help="Number of articles per era-desk cell (default: 5, matching the 546-row template)",
+    )
+    parser.add_argument(
+        "--doca-matched",
+        type=str,
+        default=None,
+        help="Optional path to parquet with DoCA-matched ids; rows will be marked as 'doca_matched'",
+    )
+    parser.add_argument(
+        "--output",
+        type=str,
+        default=str(config.VALIDATION_DIR / "coding_template.parquet"),
+        help=f"Output path for the template parquet (default: {config.VALIDATION_DIR / 'coding_template.parquet'})",
+    )
+    parser.add_argument(
+        "--seed",
+        type=int,
+        default=42,
+        help="Random seed for reproducibility (default: 42)",
+    )
+
+    args = parser.parse_args()
+
+    # Load API corpus (years < 1987)
+    api_df = pl.read_parquet(config.API_CORPUS_DIR)
+    api_df = api_df.filter(pl.col("year") < 1987)
+
+    # Optionally load DoCA-matched ids
+    doca_matched_df = None
+    if args.doca_matched:
+        doca_matched_df = pl.read_parquet(args.doca_matched)
+
+    # Generate and write template
+    build_and_write_template(
+        api_df=api_df,
+        output_path=args.output,
+        n_per_cell=args.n_per_cell,
+        doca_matched_df=doca_matched_df,
+        seed=args.seed,
+    )
+
+    print(f"Coding template written to: {args.output}")
+    print(f"Stratified sampling: {args.n_per_cell} rows per era-desk cell, seed={args.seed}")
+    if args.doca_matched:
+        print(f"DoCA-matched set merged from: {args.doca_matched}")

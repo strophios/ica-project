@@ -50,6 +50,7 @@ def validate_gold_set(df: pl.DataFrame) -> None:
     - Missing required columns
     - Columns with wrong dtype
     - Invalid enumeration values in corpus, sample_stratum
+    - Null values in required columns
 
     Args:
         df: The dataframe to validate
@@ -65,6 +66,15 @@ def validate_gold_set(df: pl.DataFrame) -> None:
     ]
     if missing_required:
         errors.append(f"Missing required columns: {missing_required}")
+
+    # Check for null values in required columns
+    for col in REQUIRED_COLUMNS:
+        if col in df.columns:
+            null_count = df[col].is_null().sum()
+            if null_count > 0:
+                errors.append(
+                    f"Column '{col}' has {null_count} null values, but is required to be non-null"
+                )
 
     # Check dtypes for present columns
     for col in REQUIRED_COLUMNS:
