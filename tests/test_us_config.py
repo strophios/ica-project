@@ -334,3 +334,93 @@ class TestConfigReproducibility:
             optimizer=OptimizerConfig(weight_decay=5e-3),
         )
         assert cfg1 == cfg2
+
+
+# ---------------------------------------------------------------------------
+# Escalation knobs (Task 7)
+# ---------------------------------------------------------------------------
+
+
+class TestEscalationKnobs:
+    """Test the new freeze_encoder, unfreeze_top_n, and layer_multipliers fields."""
+
+    def test_default_escalation_knobs(self):
+        """Defaults: freeze_encoder=True, unfreeze_top_n=0, layer_multipliers=None."""
+        cfg = _valid_run_config()
+        assert cfg.freeze_encoder is True
+        assert cfg.unfreeze_top_n == 0
+        assert cfg.layer_multipliers is None
+
+    def test_freeze_encoder_false(self):
+        """Can set freeze_encoder=False for unfreezing."""
+        cfg = _valid_run_config(freeze_encoder=False)
+        assert cfg.freeze_encoder is False
+
+    def test_unfreeze_top_n_positive(self):
+        """Can set unfreeze_top_n to positive int."""
+        cfg = _valid_run_config(unfreeze_top_n=2)
+        assert cfg.unfreeze_top_n == 2
+
+    def test_layer_multipliers_dict(self):
+        """Can set layer_multipliers to a dict."""
+        multipliers = {"head": 1.0, "encoder_top": 0.1, "encoder_frozen": 0.0}
+        cfg = _valid_run_config(layer_multipliers=multipliers)
+        assert cfg.layer_multipliers == multipliers
+
+    def test_unfreeze_top_n_negative_rejected(self):
+        """unfreeze_top_n < 0 should be rejected."""
+        with pytest.raises(ValueError, match="unfreeze_top_n"):
+            _valid_run_config(unfreeze_top_n=-1)
+
+    def test_layer_multipliers_non_dict_rejected(self):
+        """layer_multipliers must be dict or None, not other types."""
+        with pytest.raises(ValueError, match="layer_multipliers"):
+            _valid_run_config(layer_multipliers="not a dict")
+
+    def test_freeze_encoder_non_bool_rejected(self):
+        """freeze_encoder must be a bool."""
+        with pytest.raises(ValueError, match="freeze_encoder"):
+            _valid_run_config(freeze_encoder="yes")
+
+
+class TestEscalationKnobsRoundTrip:
+    """Test JSON round-trip with new escalation knob fields."""
+
+    def test_round_trip_with_escalation_knobs(self):
+        """Config with escalation knobs should round-trip correctly."""
+        cfg = _valid_run_config(
+            freeze_encoder=False,
+            unfreeze_top_n=2,
+            layer_multipliers={"head": 1.0, "encoder_top": 0.1},
+        )
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = Path(tmpdir) / "config.json"
+            cfg.to_json(path)
+            reloaded = UsRunConfig.from_json(path)
+            assert reloaded == cfg
+            assert reloaded.freeze_encoder is False
+            assert reloaded.unfreeze_top_n == 2
+            assert reloaded.layer_multipliers == {"head": 1.0, "encoder_top": 0.1}
+
+    def test_back_compat_old_sidecar_missing_fields(self):
+        """Old sidecars missing escalation knobs should load with defaults."""
+        cfg = _valid_run_config()
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = Path(tmpdir) / "config.json"
+            cfg.to_json(path)
+
+            # Remove the new fields to simulate an old sidecar
+            payload = json.loads(path.read_text())
+            del payload["freeze_encoder"]
+            del payload["unfreeze_top_n"]
+            del payload["layer_multipliers"]
+            path.write_text(json.dumps(payload))
+
+            # Load should succeed with defaults
+            reloaded = UsRunConfig.from_json(path)
+            assert reloaded.freeze_encoder is True
+            assert reloaded.unfreeze_top_n == 0
+            assert reloaded.layer_multipliers is None
+            # Everything else should match
+            assert reloaded.seq_length == cfg.seq_length
+            assert reloaded.head == cfg.head

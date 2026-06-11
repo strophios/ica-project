@@ -72,6 +72,12 @@ class UsRunConfig:
     - lr_schedule: LRScheduleConfig with warmup/decay parameters
     - optimizer: OptimizerConfig (AdamW weight_decay)
     - diagnostics: DiagnosticsConfig (enable_loss_components must be False)
+    - freeze_encoder: bool; if False, enables per-layer LR scaling (default True)
+    - unfreeze_top_n: int; number of top RoBERTa layers to unfreeze for
+      fine-tuning. Used with freeze_encoder=False. Validated >= 0 (default 0).
+    - layer_multipliers: dict | None; custom per-group LR multipliers for
+      LayerLRModel. When unfreeze_top_n > 0, passed to build_endpoint_model
+      with sensible defaults if None. Validated as dict when not None (default None).
     """
 
     seq_length: int
@@ -85,6 +91,9 @@ class UsRunConfig:
     diagnostics: DiagnosticsConfig = dataclasses.field(
         default_factory=lambda: DiagnosticsConfig(enable_loss_components=False)
     )
+    freeze_encoder: bool = True
+    unfreeze_top_n: int = 0
+    layer_multipliers: dict | None = None
 
     def __post_init__(self):
         if not isinstance(self.seq_length, int) or self.seq_length <= 0:
@@ -144,6 +153,22 @@ class UsRunConfig:
                 f"UsRunConfig.diagnostics must be a DiagnosticsConfig; "
                 f"got {type(self.diagnostics).__name__}."
             )
+        # Escalation knobs validation
+        if not isinstance(self.freeze_encoder, bool):
+            raise ValueError(
+                f"UsRunConfig.freeze_encoder must be a bool; "
+                f"got {type(self.freeze_encoder).__name__}."
+            )
+        if not isinstance(self.unfreeze_top_n, int) or self.unfreeze_top_n < 0:
+            raise ValueError(
+                f"UsRunConfig.unfreeze_top_n must be a non-negative int; "
+                f"got {self.unfreeze_top_n!r}."
+            )
+        if self.layer_multipliers is not None and not isinstance(self.layer_multipliers, dict):
+            raise ValueError(
+                f"UsRunConfig.layer_multipliers must be a dict or None; "
+                f"got {type(self.layer_multipliers).__name__}."
+            )
 
     @property
     def label_keys(self) -> dict[str, str]:
@@ -180,6 +205,10 @@ class UsRunConfig:
         back to tuples. This is robust to the populated `resolved` field
         (present in a sidecar written after with_resolved) and to future
         sub-config field additions.
+
+        Back-compat: older sidecars (pre-escalation knobs) are missing
+        freeze_encoder, unfreeze_top_n, and layer_multipliers fields.
+        from_json defaults these to True, 0, and None respectively.
         """
         payload = json.loads(Path(path).read_text())
         return cls(
@@ -192,6 +221,9 @@ class UsRunConfig:
             lr_schedule=LRScheduleConfig._from_dict(payload["lr_schedule"]),
             optimizer=OptimizerConfig._from_dict(payload["optimizer"]),
             diagnostics=DiagnosticsConfig._from_dict(payload["diagnostics"]),
+            freeze_encoder=payload.get("freeze_encoder", True),
+            unfreeze_top_n=payload.get("unfreeze_top_n", 0),
+            layer_multipliers=payload.get("layer_multipliers", None),
         )
 
 

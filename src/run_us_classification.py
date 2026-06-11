@@ -30,6 +30,7 @@ from src.model_setup.assembly import build_endpoint_model, build_inference_model
 from src.us_metrics import make_us_metrics
 from src.diagnostics.distribution_metrics import make_distribution_metrics
 from src.preproc.dateline_guard import assert_no_dateline_residue
+from src.validation.escalation import top_n_group_fn
 
 
 def main(run_config=None, max_steps=None):
@@ -150,14 +151,32 @@ def main(run_config=None, max_steps=None):
         expose_loss_components=False,
     )
 
+    # Escalation knobs: when unfreeze_top_n > 0, use per-layer LR scaling
+    # (frozen path unchanged, byte-identical when unfreeze_top_n == 0)
+    build_kwargs = {
+        "backbone": backbone,
+        "heads": {head_cfg.name: us_head},
+        "seq_length": run_config.seq_length,
+        "diagnostics": run_config.diagnostics,
+    }
+
+    if run_config.unfreeze_top_n > 0:
+        # Unfreezing path: use top-N layer groups + custom LR multipliers
+        build_kwargs.update({
+            "freeze_encoder": False,
+            "group_fn": top_n_group_fn(run_config.unfreeze_top_n, n_layers=12),
+            "layer_multipliers": run_config.layer_multipliers or {
+                "head": 1.0,
+                "encoder_top": 0.1,
+                "encoder_frozen": 0.0,
+            },
+        })
+    else:
+        # Frozen probe path (default): freeze encoder, no custom LR scaling
+        build_kwargs.update({"freeze_encoder": True})
+
     # Pattern A: endpoint + inference models share head/backbone instances
-    us_model = build_endpoint_model(
-        backbone=backbone,
-        heads={head_cfg.name: us_head},
-        seq_length=run_config.seq_length,
-        freeze_encoder=True,
-        diagnostics=run_config.diagnostics,
-    )
+    us_model = build_endpoint_model(**build_kwargs)
     us_inference = build_inference_model(
         backbone=backbone,
         heads={head_cfg.name: us_head},
