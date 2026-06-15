@@ -36,11 +36,21 @@ LABEL_COLUMNS = {
 # Optional columns that may or may not be present
 OPTIONAL_COLUMNS = {
     "alt_corpus_id": pl.Utf8,
+    # Model scores attached to a score-stratified template (CCA gold set). The
+    # raw logit drives thresholding (evaluate_cca_slice); cca_score is its sigmoid
+    # for human readability.
+    "cca_logit": pl.Float64,
+    "cca_score": pl.Float64,
 }
 
 # Enumeration values for categorical columns
 VALID_CORPUS = {"api", "ldc"}
-VALID_SAMPLE_STRATUM = {"doca_matched", "random_pre1986", "ambiguous"}
+# US-filter sampling modes ("doca_matched", "random_pre1986", "ambiguous") plus
+# CCA score-band strata for the score-stratified CCA gold set.
+VALID_SAMPLE_STRATUM = {
+    "doca_matched", "random_pre1986", "ambiguous",
+    "cca_score_high", "cca_score_mid", "cca_score_low",
+}
 
 
 def validate_gold_set(df: pl.DataFrame) -> None:
