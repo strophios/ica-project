@@ -55,7 +55,7 @@ def train_lu_classifier(pos_feats, unl_feats, epochs=5, batch_size=256):
     return model, X, y
 
 
-def main(suffix="train250k", threshold=0.0, epochs=5):
+def main(suffix="train250k", threshold=0.0, epochs=5, max_unl=40000):
     meta, cls = load_cache(config.CCA_EMBED_CACHE_DIR / suffix)
     positives = pl.read_parquet(config.CCA_DOCA_POSITIVES)["id"].to_list()
     table = label_and_restrict(meta, positives, threshold)
@@ -64,8 +64,18 @@ def main(suffix="train250k", threshold=0.0, epochs=5):
     unl_rows = table.filter(
         (pl.col("cca_label") == 0) & pl.col("us")
     )["emb_row"].to_numpy()
-    pos_feats, unl_feats = cls[pos_rows], cls[unl_rows]
-    print(f"L/U: positives={len(pos_feats)} unlabeled-US={len(unl_feats)}")  # LOG
+    pos_feats = cls[pos_rows]
+    unl_feats = cls[unl_rows]
+    n_unl_full = len(unl_feats)
+    # DEDPUL's density-ratio KDE is O(n^2) and stabilizes at tens of thousands of
+    # points, so subsample the unlabeled (uniform -> preserves the positive
+    # fraction DEDPUL estimates). All positives are kept.
+    if max_unl is not None and n_unl_full > max_unl:
+        rng = np.random.default_rng(200)
+        unl_feats = unl_feats[rng.choice(n_unl_full, size=max_unl, replace=False)]
+        print(f"subsampled unlabeled {n_unl_full} -> {max_unl} for DEDPUL KDE")  # LOG
+    print(f"L/U: positives={len(pos_feats)} unlabeled(DEDPUL)={len(unl_feats)} "
+          f"(full US pool={n_unl_full})")  # LOG
 
     model, X, y = train_lu_classifier(pos_feats, unl_feats, epochs=epochs)
     logits = model.predict(X, batch_size=512, verbose=0).reshape(-1)
@@ -75,18 +85,26 @@ def main(suffix="train250k", threshold=0.0, epochs=5):
     diffs = dedpul_em.estimate_diff(preds, target, tune=True, kde_mode="prob")
     alpha, _ = dedpul_em.estimate_poster_em(diffs, preds, target)
     pi_pos = 1.0 - alpha
-    naive = len(pos_feats) / (len(pos_feats) + len(unl_feats))
+    naive = len(pos_feats) / (len(pos_feats) + n_unl_full)
 
     print(f"DEDPUL alpha (neg frac in U) = {alpha:.4f}  ->  pi_pos = {pi_pos:.4f}")  # LOG
-    print(f"naive labeled rate = {naive:.4f}  (sanity floor; true pi >= this)")  # LOG
-    if not (0.0 < pi_pos < 1.0) or pi_pos < naive * 0.5:
-        print("  WARNING: pi_pos is implausible vs the naive rate — investigate "
-              "before using (L/U separability, KDE bandwidth, label leakage).")  # LOG
+    # The nnPU prior is the positive rate in the UNLABELED background (DEDPUL's
+    # 1 - alpha), NOT bounded below by the labeled rate. The labeled rate here is
+    # a sampling artifact (we force-include ALL positives + a fixed background
+    # sample), so it is reported for context but is NOT a floor for pi.
+    print(f"labeled rate n_pos/(n_pos+n_unl) = {naive:.4f}  "
+          "(sampling artifact; NOT a floor for the nnPU prior)")  # LOG
+    if not (0.0 < pi_pos < 1.0):
+        print("  WARNING: pi_pos out of (0,1) — degenerate DEDPUL output; investigate.")  # LOG
+    elif pi_pos < 0.002 or pi_pos > 0.5:
+        print(f"  NOTE: pi_pos={pi_pos:.4f} is unusual — confirm L/U separability "
+              "and robustness (re-run with a different seed / kde_mode).")  # LOG
 
     out = {
         "pi_pos": float(pi_pos), "alpha": float(alpha),
         "naive_labeled_rate": float(naive),
-        "n_pos": int(len(pos_feats)), "n_unl": int(len(unl_feats)),
+        "n_pos": int(len(pos_feats)), "n_unl": int(n_unl_full),
+        "n_unl_dedpul": int(len(unl_feats)),
         "suffix": suffix, "threshold": threshold,
     }
     config.CCA_DOCA_DIR.mkdir(parents=True, exist_ok=True)
@@ -99,5 +117,8 @@ if __name__ == "__main__":
     ap.add_argument("--suffix", default="train250k", help="embedding cache subdir")
     ap.add_argument("--threshold", type=float, default=0.0, help="US logit threshold")
     ap.add_argument("--epochs", type=int, default=5)
+    ap.add_argument("--max-unl", type=int, default=40000,
+                    help="subsample unlabeled to this many for DEDPUL's O(n^2) KDE")
     args = ap.parse_args()
-    main(suffix=args.suffix, threshold=args.threshold, epochs=args.epochs)
+    main(suffix=args.suffix, threshold=args.threshold, epochs=args.epochs,
+         max_unl=args.max_unl)
