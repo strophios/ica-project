@@ -1,0 +1,299 @@
+# pattern: Imperative Shell (pure selection/provenance helpers at top; model + I/O in main)
+"""
+Embedding extractor: cache frozen-DAPT CLS vectors (+ raw US logit) for the API corpus.
+
+The whole CCA/DoCA retrain rests on a frozen backbone, so the RoBERTa forward
+pass is a pure function `text -> 768-d CLS`. This script runs it ONCE over a
+chosen article set and caches `(id, year, us_logit, CLS)`; everything downstream
+(US restriction, DEDPUL, CCA head training, gold-set scoring) then runs on the
+cached vectors in minutes. See docs/notes/cca-doca-retrain-design.md.
+
+The US head shares the same DAPT backbone, so we co-emit its **raw logit** in the
+same forward pass (the Platt calibration sidecar does not exist yet, so we cache
+the logit and threshold on logit 0.0 downstream — never the calibrated path).
+
+Cache layout (under CCA_EMBED_CACHE_DIR / <suffix>/):
+    provenance.json
+    shard_{i:03d}_cls.npy        float32 (rows, 768)
+    shard_{i:03d}_meta.parquet   columns: id, year, us_logit  (row-aligned to cls)
+
+Usage (from project root):
+    # unblock run: all DoCA positives + a stratified unlabeled sample
+    uv run python -m src.embed_corpus --include-ids <positives.parquet> \
+        --sample-n 235000 --stamp 20260615 --out-suffix train250k
+    # canonical full cache (overnight)
+    uv run python -m src.embed_corpus --full --stamp 20260615 --out-suffix full
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+from pathlib import Path
+
+import numpy as np
+import polars as pl
+import keras
+import tensorflow as tf
+
+import src.config as config
+from src.data_setup.data import data_from_parquet
+from src.preproc.preprocessor import ClassifierPreprocessor
+from src.model_setup.backbone import load_dapt_backbone
+from src.model_setup.heads import ClassificationHead
+from src.model_setup.assembly import build_inference_model
+from src.us_config import UsRunConfig, config_path_for_weights
+
+
+# ---------------------------------------------------------------------------
+# Functional core: article selection + provenance (pure, unit-tested)
+# ---------------------------------------------------------------------------
+def stratified_sample_by_year(df: pl.DataFrame, n: int, seed: int = 200) -> pl.DataFrame:
+    """Proportional per-year sample of ~n rows (preserves the corpus year mix).
+
+    Deterministic under `seed`. Returns all rows if n >= len; empty if n <= 0.
+    Requires a `year` column.
+    """
+    if n <= 0 or df.height == 0:
+        return df.head(0)
+    if n >= df.height:
+        return df
+    frac = n / df.height
+    parts = [part.sample(fraction=frac, seed=seed) for part in df.partition_by("year")]
+    return pl.concat(parts)
+
+
+def select_articles(
+    corpus: pl.DataFrame,
+    include_ids: list[str] | None,
+    sample_n: int,
+    full: bool,
+    seed: int = 200,
+) -> pl.DataFrame:
+    """Choose the article set to embed.
+
+    - full=True: the entire corpus.
+    - otherwise: force-include every `include_ids` row present in the corpus
+      (the DoCA positives, so training is not starved of positives), then add a
+      stratified-by-year sample of `sample_n` rows drawn from the REMAINDER.
+
+    Deterministic under `seed`. The result has unique ids (includes are unique;
+    the sample is drawn disjointly from the remainder).
+    """
+    if full:
+        return corpus
+    include_list = list(dict.fromkeys(include_ids or []))
+    included = corpus.filter(pl.col("id").is_in(include_list))
+    remainder = corpus.filter(~pl.col("id").is_in(include_list))
+    sampled = stratified_sample_by_year(remainder, sample_n, seed)
+    return pl.concat([included, sampled])
+
+
+def provenance_record(
+    *,
+    backbone_weights: Path,
+    us_weights: Path,
+    seq_length: int,
+    text_channel: str,
+    stamp: str,
+    n_rows: int,
+    n_included: int,
+    sample_n: int,
+    full: bool,
+) -> dict:
+    """Provenance for a cache run: what produced these embeddings.
+
+    Records the source weights' mtime+size so a stale/swapped backbone is
+    detectable. `stamp` is passed in (not read from the clock) for reproducibility.
+    """
+    def _stat(p: Path) -> dict:
+        return {"path": str(p), "exists": p.exists(),
+                "size": p.stat().st_size if p.exists() else None,
+                "mtime": int(p.stat().st_mtime) if p.exists() else None}
+
+    return {
+        "backbone_weights": _stat(Path(backbone_weights)),
+        "us_weights": _stat(Path(us_weights)),
+        "seq_length": seq_length,
+        "text_channel": text_channel,
+        "stamp": stamp,
+        "n_rows": n_rows,
+        "n_included": n_included,
+        "sample_n": sample_n,
+        "full": full,
+    }
+
+
+# ---------------------------------------------------------------------------
+# Cache I/O (thin shell helpers; reused by downstream phases)
+# ---------------------------------------------------------------------------
+def _shard_paths(cache_dir: Path, idx: int) -> tuple[Path, Path]:
+    return (cache_dir / f"shard_{idx:03d}_cls.npy",
+            cache_dir / f"shard_{idx:03d}_meta.parquet")
+
+
+def write_shard(cache_dir: Path, idx: int, cls: np.ndarray, meta: pl.DataFrame) -> None:
+    """Write one row-aligned shard (CLS matrix + metadata)."""
+    if cls.shape[0] != meta.height:
+        raise ValueError(
+            f"shard {idx}: cls rows {cls.shape[0]} != meta rows {meta.height}"
+        )
+    cls_path, meta_path = _shard_paths(cache_dir, idx)
+    np.save(cls_path, cls.astype(np.float32, copy=False))
+    meta.write_parquet(meta_path)
+
+
+def load_cache(cache_dir: Path) -> tuple[pl.DataFrame, np.ndarray]:
+    """Load all shards in order; return (meta, cls) with a contiguous `emb_row`.
+
+    `meta` carries the shard columns plus `emb_row` (0..N-1), the row index into
+    the returned `cls` matrix. Raises if no shards or if a shard is misaligned.
+    """
+    cache_dir = Path(cache_dir)
+    metas = sorted(cache_dir.glob("shard_*_meta.parquet"))
+    if not metas:
+        raise FileNotFoundError(f"no shards found in {cache_dir}")
+    meta_parts, cls_parts = [], []
+    for meta_path in metas:
+        idx = int(meta_path.name.split("_")[1])
+        cls_path, _ = _shard_paths(cache_dir, idx)
+        m = pl.read_parquet(meta_path)
+        c = np.load(cls_path)
+        if c.shape[0] != m.height:
+            raise ValueError(f"shard {idx} misaligned: {c.shape[0]} vs {m.height}")
+        meta_parts.append(m)
+        cls_parts.append(c)
+    meta = pl.concat(meta_parts).with_row_index("emb_row")
+    cls = np.concatenate(cls_parts, axis=0)
+    return meta, cls
+
+
+# ---------------------------------------------------------------------------
+# Imperative shell
+# ---------------------------------------------------------------------------
+def _build_embed_model(us_weights: Path):
+    """Build a dual-output model {cls, us_logit} on the weighted DAPT backbone + US head.
+
+    Mirrors slice_eval.apply_us_model's Pattern-2 construction (load UsRunConfig
+    sidecar, fresh head, build_inference_model, load_weights) but taps the CLS
+    vector and emits the RAW US logit (no calibrator). Returns (model, us_cfg).
+    """
+    us_cfg = UsRunConfig.from_json(config_path_for_weights(us_weights))
+    us_head = ClassificationHead(hidden_dim=us_cfg.head.hidden_dim, name=us_cfg.head.name)
+    backbone = load_dapt_backbone(us_cfg.backbone_weights_path)
+    us_cfg.validate_against_backbone(backbone)
+    # Build + load weights via the inference model (populates backbone + head).
+    inf = build_inference_model(
+        backbone=backbone, heads={us_cfg.head.name: us_head}, seq_length=us_cfg.seq_length
+    )
+    inf.load_weights(str(us_weights), skip_mismatch=False)
+    # Dual-output graph on the now-weighted instances.
+    tok = keras.Input(shape=(us_cfg.seq_length,), dtype="int32", name="token_ids")
+    pad = keras.Input(shape=(us_cfg.seq_length,), dtype="int32", name="padding_mask")
+    seq_out = backbone({"token_ids": tok, "padding_mask": pad})
+    cls = seq_out[:, 0, :]
+    us_logit = us_head(cls)
+    model = keras.Model(
+        inputs={"token_ids": tok, "padding_mask": pad},
+        outputs={"cls": cls, "us": us_logit},
+    )
+    return model, us_cfg
+
+
+def main(
+    include_ids_path=None,
+    sample_n=0,
+    full=False,
+    stamp="unstamped",
+    out_suffix="run",
+    shard_size=250_000,
+    batch_size=256,
+):
+    keras.config.set_dtype_policy(config.DTYPE_POLICY)
+    keras.utils.set_random_seed(200)
+
+    cache_dir = config.CCA_EMBED_CACHE_DIR / out_suffix
+    cache_dir.mkdir(parents=True, exist_ok=True)
+
+    # Load corpus (id, headline, lead_paragraph, year, headline_with_lead).
+    corpus = data_from_parquet(
+        config.PROJECT_ROOT, "api_corpus", addl_columns=["year"],
+        lead_column="lead_paragraph",
+    )
+
+    include_ids = None
+    if include_ids_path is not None:
+        include_ids = pl.read_parquet(include_ids_path)["id"].to_list()
+
+    selected = select_articles(corpus, include_ids, sample_n, full)
+    # Defense-in-depth: the split logic downstream requires unique ids.
+    if selected["id"].n_unique() != selected.height:
+        raise ValueError(
+            f"selected set has duplicate ids: {selected.height} rows, "
+            f"{selected['id'].n_unique()} unique"
+        )
+    n_included = 0 if include_ids is None else selected.filter(
+        pl.col("id").is_in(include_ids)
+    ).height
+    print(f"Embedding {selected.height} articles "
+          f"(included={n_included}, sample_n={sample_n}, full={full})")  # LOG
+
+    model, us_cfg = _build_embed_model(config.US_FILTER_CLASSIFIER_WEIGHTS)
+    preproc = ClassifierPreprocessor(
+        SEQ_LENGTH=us_cfg.seq_length, text_key=us_cfg.text_key,
+        label_keys={}, endpoint_model=True, target_dtype=us_cfg.target_dtype,
+    )
+
+    n = selected.height
+    n_shards = (n + shard_size - 1) // shard_size
+    for idx in range(n_shards):
+        chunk = selected.slice(idx * shard_size, shard_size)
+        ds = (
+            tf.data.Dataset.from_tensor_slices(
+                {us_cfg.text_key: chunk[us_cfg.text_key].to_list()}
+            )
+            .batch(batch_size)
+            .map(preproc, num_parallel_calls=tf.data.AUTOTUNE)
+            .prefetch(tf.data.AUTOTUNE)
+        )
+        preds = model.predict(ds, verbose=0)
+        cls = np.asarray(preds["cls"], dtype=np.float32)
+        us_logit = np.asarray(preds["us"], dtype=np.float32).reshape(-1)
+        if not np.isfinite(cls).all() or not np.isfinite(us_logit).all():
+            raise ValueError(f"shard {idx}: non-finite embeddings/logits produced")
+        meta = chunk.select(["id", "year"]).with_columns(
+            pl.Series("us_logit", us_logit)
+        )
+        write_shard(cache_dir, idx, cls, meta)
+        # Vigilance spot-check, per shard.
+        print(f"  shard {idx}: rows={cls.shape[0]} cls_std={float(cls.std()):.4f} "
+              f"us_logit[min/mean/max]="
+              f"{us_logit.min():.2f}/{us_logit.mean():.2f}/{us_logit.max():.2f}")  # LOG
+
+    prov = provenance_record(
+        backbone_weights=Path(us_cfg.backbone_weights_path),
+        us_weights=config.US_FILTER_CLASSIFIER_WEIGHTS,
+        seq_length=us_cfg.seq_length, text_channel=us_cfg.text_key,
+        stamp=stamp, n_rows=n, n_included=n_included, sample_n=sample_n, full=full,
+    )
+    (cache_dir / "provenance.json").write_text(json.dumps(prov, indent=2))
+    print(f"Wrote cache to {cache_dir} ({n_shards} shards, {n} rows)")  # LOG
+
+
+if __name__ == "__main__":
+    ap = argparse.ArgumentParser(description="Embed the API corpus (CLS + US logit).")
+    ap.add_argument("--include-ids", default=None,
+                    help="parquet with an `id` column to force-include (e.g. DoCA positives)")
+    ap.add_argument("--sample-n", type=int, default=0,
+                    help="stratified-by-year sample size drawn from non-included rows")
+    ap.add_argument("--full", action="store_true", help="embed the entire corpus")
+    ap.add_argument("--stamp", required=True, help="reproducibility stamp (e.g. YYYYMMDD)")
+    ap.add_argument("--out-suffix", required=True, help="cache subdir name under CCA_EMBED_CACHE_DIR")
+    ap.add_argument("--shard-size", type=int, default=250_000)
+    ap.add_argument("--batch-size", type=int, default=256)
+    args = ap.parse_args()
+    main(
+        include_ids_path=args.include_ids, sample_n=args.sample_n, full=args.full,
+        stamp=args.stamp, out_suffix=args.out_suffix,
+        shard_size=args.shard_size, batch_size=args.batch_size,
+    )
