@@ -143,6 +143,21 @@ def write_shard(cache_dir: Path, idx: int, cls: np.ndarray, meta: pl.DataFrame) 
     meta.write_parquet(meta_path)
 
 
+def load_cache_meta(cache_dir: Path) -> pl.DataFrame:
+    """Load only shard metadata (id, year, us_logit) with a contiguous `emb_row`.
+
+    Skips the (large) CLS matrix — use when only labels/scores are needed (table
+    build, US thresholding). `emb_row` ordering matches `load_cache` (both iterate
+    shards in zero-padded filename order), so an `emb_row` from here indexes the
+    same row `load_cache` would return.
+    """
+    cache_dir = Path(cache_dir)
+    metas = sorted(cache_dir.glob("shard_*_meta.parquet"))
+    if not metas:
+        raise FileNotFoundError(f"no shards found in {cache_dir}")
+    return pl.concat([pl.read_parquet(p) for p in metas]).with_row_index("emb_row")
+
+
 def load_cache(cache_dir: Path) -> tuple[pl.DataFrame, np.ndarray]:
     """Load all shards in order; return (meta, cls) with a contiguous `emb_row`.
 

@@ -177,6 +177,51 @@ def create_us_filter_data(dataset):
     }
 
 
+def create_cca_doca_data(table, seed=200):
+    """PU split for the CCA/DoCA retrain over cached embeddings.
+
+    Operates on a polars table carrying at least `id`, `cca_label` (0/1), `us`
+    (bool), and `emb_row` (row index into the cached CLS matrix). Returns the
+    separate-labels shape `{"train":{"pos","unl"}, "val":..., "test":...}` of
+    polars frames (each still carrying `emb_row`), so the caller gathers cached
+    vectors per group and Ratio-Batch samples via `dataset_from_embeddings`.
+
+    Positive/unlabeled definition (see docs/notes/cca-doca-retrain-design.md):
+      - positives = `cca_label == 1` (DoCA-confirmed). Kept REGARDLESS of `us`:
+        DoCA events are US by construction, so we never drop a confirmed positive
+        because the US model scored it low.
+      - unlabeled = `cca_label == 0 AND us` — the US-restricted background pool.
+
+    Each group is split 90/5/5 separately (seed) and shuffled within split (seed),
+    mirroring `create_us_filter_data` (prevents class-blocking under from_tensor_
+    slices + a SHUFFLE_BUFFER smaller than the split).
+    """
+    assert table["id"].n_unique() == table.height, (
+        f"`id` not unique: {table.height} rows, {table['id'].n_unique()} ids"
+    )
+
+    def _split(group):
+        train = group.sample(fraction=0.9, seed=seed)
+        rest = group.filter(pl.col("id").is_in(train["id"].implode()).not_())
+        test = rest.sample(fraction=0.5, seed=seed)
+        val = rest.filter(pl.col("id").is_in(test["id"].implode()).not_())
+        return train, val, test
+
+    pos = table.filter(pl.col("cca_label") == 1)
+    unl = table.filter((pl.col("cca_label") == 0) & pl.col("us"))
+    p_tr, p_va, p_te = _split(pos)
+    u_tr, u_va, u_te = _split(unl)
+
+    def _shuf(d):
+        return d.sample(fraction=1.0, shuffle=True, seed=seed)
+
+    return {
+        "train": {"pos": _shuf(p_tr), "unl": _shuf(u_tr)},
+        "val": {"pos": _shuf(p_va), "unl": _shuf(u_va)},
+        "test": {"pos": _shuf(p_te), "unl": _shuf(u_te)},
+    }
+
+
 def dataset_create(
     shuffle_buffer,
     batch_size,
