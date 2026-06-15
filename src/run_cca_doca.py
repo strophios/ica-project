@@ -51,7 +51,7 @@ def _config_with_prior(prior: float, epochs: int) -> cca_config.RunConfig:
     new_head = dataclasses.replace(
         head, loss=dataclasses.replace(head.loss, prior=prior)
     )
-    return dataclasses.replace(base, heads=[new_head], epochs=epochs)
+    return dataclasses.replace(base, heads=(new_head,), epochs=epochs)
 
 
 def _gather(cls: np.ndarray, group: pl.DataFrame, label: float):
