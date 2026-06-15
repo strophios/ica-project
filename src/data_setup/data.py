@@ -242,6 +242,58 @@ def dataset_create(
     return dataset
 
 
+def dataset_from_embeddings(
+    shuffle_buffer,
+    batch_size,
+    data,
+    weights=None,
+    head_name="cca",
+    repeat=True,
+    seed=200,
+):
+    """Build a tf.data pipeline over CACHED CLS embeddings (features-mode).
+
+    Counterpart to `dataset_create` for the frozen-backbone embedding cache:
+    there is no tokenizer/preprocessor map because entries are already numeric.
+    Each group in `data` is an `(features, labels)` pair of arrays — features
+    `(N, hidden_dim)`, labels `(N,)`. With `weights`, groups are Ratio-Batch
+    sampled exactly as `dataset_create` (e.g. `[0.1, 0.9]` pos:unl); without
+    `weights`, `data` is a single `(features, labels)` group.
+
+    Yields dicts shaped for `build_feature_endpoint_model`:
+    `{"features": ..., f"{head_name}_targets": ...}`.
+
+    `repeat=True` (training) gives an infinite pipeline for `steps_per_epoch`-
+    driven `fit`; `repeat=False` (finite eval/predict) iterates once.
+    """
+    def _group_ds(group):
+        feats, labels = group
+        return tf.data.Dataset.from_tensor_slices(
+            {
+                "features": tf.convert_to_tensor(feats, dtype=tf.float32),
+                f"{head_name}_targets": tf.convert_to_tensor(labels, dtype=tf.float32),
+            }
+        )
+
+    if weights is not None:
+        dataset = tf.data.Dataset.sample_from_datasets(
+            [_group_ds(g) for g in data],
+            weights=weights,
+            seed=seed,
+            stop_on_empty_dataset=True,
+            rerandomize_each_iteration=True,
+        )
+    else:
+        dataset = _group_ds(data)
+
+    if shuffle_buffer != 0:
+        dataset = dataset.shuffle(buffer_size=shuffle_buffer)
+    if repeat:
+        dataset = dataset.repeat()
+    dataset = dataset.batch(batch_size, drop_remainder=repeat)
+    return dataset.prefetch(tf.data.AUTOTUNE)
+
+
 # the below version is the most recent working version, but it only works for the lu_classifier, since it doesn't implement path
 # def dataset_create(
 #     shuffle_buffer,
