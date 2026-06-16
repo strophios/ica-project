@@ -223,18 +223,28 @@ def main(
     out_suffix="run",
     shard_size=250_000,
     batch_size=256,
+    years=None,
+    append=False,
 ):
     keras.config.set_dtype_policy(config.DTYPE_POLICY)
     keras.utils.set_random_seed(200)
 
     cache_dir = config.CCA_EMBED_CACHE_DIR / out_suffix
     cache_dir.mkdir(parents=True, exist_ok=True)
+    # Append mode (split a big embed into parts that share one cache): continue
+    # shard numbering after the shards already present, so a later run extends the
+    # same canonical cache rather than overwriting shard_000.
+    shard_offset = len(list(cache_dir.glob("shard_*_cls.npy"))) if append else 0
 
     # Load corpus (id, headline, lead_paragraph, year, headline_with_lead).
     corpus = data_from_parquet(
         config.PROJECT_ROOT, "api_corpus", addl_columns=["year"],
         lead_column="lead_paragraph",
     )
+    if years is not None:
+        lo, hi = years
+        corpus = corpus.filter(pl.col("year").cast(pl.Int64).is_between(lo, hi))
+        print(f"year filter {lo}-{hi}: {corpus.height} articles")  # LOG
 
     include_ids = None
     if include_ids_path is not None:
@@ -279,10 +289,10 @@ def main(
         meta = chunk.select(["id", "year"]).with_columns(
             pl.Series("us_logit", us_logit)
         )
-        write_shard(cache_dir, idx, cls, meta)
+        write_shard(cache_dir, shard_offset + idx, cls, meta)
         # Vigilance spot-check, per shard.
-        print(f"  shard {idx}: rows={cls.shape[0]} cls_std={float(cls.std()):.4f} "
-              f"us_logit[min/mean/max]="
+        print(f"  shard {shard_offset + idx}: rows={cls.shape[0]} "
+              f"cls_std={float(cls.std()):.4f} us_logit[min/mean/max]="
               f"{us_logit.min():.2f}/{us_logit.mean():.2f}/{us_logit.max():.2f}")  # LOG
 
     prov = provenance_record(
@@ -291,8 +301,12 @@ def main(
         seq_length=us_cfg.seq_length, text_channel=us_cfg.text_key,
         stamp=stamp, n_rows=n, n_included=n_included, sample_n=sample_n, full=full,
     )
-    (cache_dir / "provenance.json").write_text(json.dumps(prov, indent=2))
-    print(f"Wrote cache to {cache_dir} ({n_shards} shards, {n} rows)")  # LOG
+    prov["years"] = list(years) if years is not None else None
+    prov["shard_offset"] = shard_offset
+    (cache_dir / f"provenance.{shard_offset:03d}.json").write_text(
+        json.dumps(prov, indent=2)
+    )
+    print(f"Wrote {n_shards} shards (offset {shard_offset}, {n} rows) to {cache_dir}")  # LOG
 
 
 if __name__ == "__main__":
@@ -306,9 +320,18 @@ if __name__ == "__main__":
     ap.add_argument("--out-suffix", required=True, help="cache subdir name under CCA_EMBED_CACHE_DIR")
     ap.add_argument("--shard-size", type=int, default=250_000)
     ap.add_argument("--batch-size", type=int, default=256)
+    ap.add_argument("--years", default=None,
+                    help="inclusive year range 'LO-HI' to embed (e.g. 1960-1975)")
+    ap.add_argument("--append", action="store_true",
+                    help="continue shard numbering after existing shards in the cache dir")
     args = ap.parse_args()
+    years = None
+    if args.years is not None:
+        lo, hi = args.years.split("-")
+        years = (int(lo), int(hi))
     main(
         include_ids_path=args.include_ids, sample_n=args.sample_n, full=args.full,
         stamp=args.stamp, out_suffix=args.out_suffix,
         shard_size=args.shard_size, batch_size=args.batch_size,
+        years=years, append=args.append,
     )
