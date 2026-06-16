@@ -8,9 +8,26 @@
 from __future__ import annotations
 
 import polars as pl
+import pytest
 
-from src.build_cca_doca_table import label_and_restrict
+from src.build_cca_doca_table import filter_positives_by_form, label_and_restrict
 from src.data_setup.data import create_cca_doca_data
+
+
+def test_filter_positives_by_form_partitions_ids():
+    pos = pl.DataFrame({
+        "id": ["a", "b", "c", "d"],
+        "any_street": [1, 0, 1, None],  # int flags; null -> not-set
+    })
+    keep, drop = filter_positives_by_form(pos, "any_street")
+    assert set(keep) == {"a", "c"}
+    assert set(drop) == {"b", "d"}  # null treated as not-set
+
+
+def test_filter_positives_by_form_unknown_column_raises():
+    pos = pl.DataFrame({"id": ["a"], "any_street": [1]})
+    with pytest.raises(ValueError):
+        filter_positives_by_form(pos, "any_strike")  # no such form
 
 
 def test_label_and_restrict_labels_and_thresholds():

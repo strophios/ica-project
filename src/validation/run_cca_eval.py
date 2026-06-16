@@ -40,7 +40,7 @@ import numpy as np
 
 import src.config as config
 import src.cca_config as cca_config
-from src.build_cca_doca_table import label_and_restrict
+from src.build_cca_doca_table import filter_positives_by_form, label_and_restrict
 from src.data_setup.data import create_cca_doca_data
 from src.embed_corpus import load_cache
 from src.validation.build_cca_coding_template import assign_score_band
@@ -50,7 +50,15 @@ from src.validation.cca_slice_eval import (
     evaluate_cca_slice,
     evaluate_cca_slice_weighted,
     recall_at_thresholds,
+    restrict_label_to_form,
 )
+
+# Form flag -> the gold-set event_type that counts as positive under that
+# restricted CCA definition. `no_form` has no event_type and is unsupported here.
+_FORM_EVENT_TYPE = {
+    "any_street": "street", "any_boycott": "boycott",
+    "any_conventional": "conventional", "any_lawsuit": "lawsuit",
+}
 
 # Logit-space thresholds. 0.0 == prob 0.5; 1.0 is the high-band boundary, where the
 # raw and reweighted estimates converge (high band is densely sampled).
@@ -110,17 +118,17 @@ def _attach_gold_scores(
 
 def _doca_test_recall(
     meta: pl.DataFrame, cls: np.ndarray, weights_path: Path,
-    thresholds: tuple[float, ...], us_threshold: float = 0.0,
+    thresholds: tuple[float, ...], positives: list, us_threshold: float = 0.0,
 ) -> list[dict[str, float | int]]:
     """Recall over the held-out test-split DoCA positives (trustworthy recall proxy).
 
     Reconstructs the deterministic 90/5/5 split (seed=200) and scores the TEST
-    positives -- never trained on, so leakage-honest. The positive split is
-    independent of the gold-set holdout (held-out ids are all unlabeled), so no
-    holdout is passed here. Recall = fraction of confirmed CCA events scored above
-    each logit threshold.
+    positives -- never trained on, so leakage-honest. `positives` MUST match the
+    set the model trained on (all DoCA ids, or a form-restricted subset), so the
+    reconstructed test split is the model's own held-out positives. The positive
+    split is independent of the gold-set holdout (held-out ids are all unlabeled).
+    Recall = fraction of confirmed CCA events scored above each logit threshold.
     """
-    positives = pl.read_parquet(config.CCA_DOCA_POSITIVES)["id"].to_list()
     table = label_and_restrict(meta, positives, us_threshold)
     splits = create_cca_doca_data(table)
     test_pos = splits["test"]["pos"]
@@ -170,12 +178,24 @@ def _per_event_type_recall(
 
 
 def run_eval(
-    coded_path: Path, suffix: str, weights_path: Path
+    coded_path: Path, suffix: str, weights_path: Path, form_filter: str | None = None
 ) -> dict:
-    """Full eval -> a run-record dict (raw + IPW metrics, per-type, provenance)."""
+    """Full eval -> a run-record dict (raw + IPW metrics, per-type, provenance).
+
+    `form_filter` must match the model's training restriction so the DoCA-recall
+    reconstruction scores the model's own held-out positives (leakage-clean).
+    """
     meta, cls = load_cache(config.CCA_EMBED_CACHE_DIR / suffix)
     coded = _parse_cca_event(pl.read_csv(coded_path))
     coded = _attach_gold_scores(coded, meta, cls, Path(weights_path))
+
+    # Form-restricted CCA definition: the gold positive shrinks to confirmed events
+    # of that form (e.g. street-only); other-form CCA become negatives. Must match
+    # the model's training restriction, else precision/recall measure a mismatched task.
+    if form_filter:
+        if form_filter not in _FORM_EVENT_TYPE:
+            raise ValueError(f"form_filter {form_filter!r} has no gold event_type mapping")
+        coded = restrict_label_to_form(coded, _FORM_EVENT_TYPE[form_filter])
 
     gold_counts = _gold_band_counts(coded)
     corpus_counts = _corpus_band_counts()
@@ -194,7 +214,14 @@ def run_eval(
         str(thr): _per_event_type_recall(coded, thr)
         for thr in _EVENT_TYPE_THRESHOLDS
     }
-    doca_recall = _doca_test_recall(meta, cls, Path(weights_path), _THRESHOLD_GRID)
+    pos_df = pl.read_parquet(config.CCA_DOCA_POSITIVES)
+    if form_filter:
+        positives, _ = filter_positives_by_form(pos_df, form_filter)
+    else:
+        positives = pos_df["id"].to_list()
+    doca_recall = _doca_test_recall(
+        meta, cls, Path(weights_path), _THRESHOLD_GRID, positives
+    )
 
     run_config = cca_config.RunConfig.from_json(
         cca_config.config_path_for_weights(Path(weights_path))
@@ -205,6 +232,11 @@ def run_eval(
         "weights_path": str(weights_path),
         "coded_path": str(coded_path),
         "cache_suffix": suffix,
+        "form_filter": form_filter,
+        "positive_definition": (
+            f"cca_event & event_type=={_FORM_EVENT_TYPE[form_filter]!r}"
+            if form_filter else "cca_event (any form)"
+        ),
         "git_commit": _git_commit(),
         "prior": run_config.heads[0].loss.prior,
         "n_coded": n_coded,
@@ -219,7 +251,9 @@ def run_eval(
 
 
 def _print_report(record: dict) -> None:
-    print(f"\nCCA gold-set eval  (commit {record['git_commit']}, prior {record['prior']})")  # LOG
+    ff = record.get("form_filter") or "all-forms"
+    print(f"\nCCA gold-set eval  (commit {record['git_commit']}, prior {record['prior']}, "
+          f"forms={ff})")  # LOG
     print(f"  coded n={record['n_coded']}  positives={record['n_positive']}  "
           f"cache={record['cache_suffix']}")  # LOG
     print("  IPW weights: " + "  ".join(
@@ -246,12 +280,12 @@ def _print_report(record: dict) -> None:
 
 
 def main(coded_path: str | None = None, suffix: str = "train250k",
-         weights_path: str | None = None) -> None:
+         weights_path: str | None = None, form_filter: str | None = None) -> None:
     coded = Path(coded_path) if coded_path else (
         config.VALIDATION_DIR / "cca_coding_first500_coded.csv"
     )
     weights = Path(weights_path) if weights_path else config.CCA_DOCA_WEIGHTS
-    record = run_eval(coded, suffix, weights)
+    record = run_eval(coded, suffix, weights, form_filter=form_filter)
     _print_report(record)
 
     out_dir = config.CCA_DOCA_DIR / "experiments"
@@ -267,5 +301,11 @@ if __name__ == "__main__":
     ap.add_argument("--coded", default=None, help="coded gold-set CSV (default: first500)")
     ap.add_argument("--suffix", default="train250k", help="embedding cache subdir")
     ap.add_argument("--weights", default=None, help="weights .h5 (default: CCA_DOCA_WEIGHTS)")
+    ap.add_argument("--form-filter", default=None,
+                    choices=["any_street", "any_boycott", "any_conventional",
+                             "any_lawsuit", "no_form"],
+                    help="match the model's training form restriction (for a "
+                         "leakage-clean DoCA-recall reconstruction)")
     args = ap.parse_args()
-    main(coded_path=args.coded, suffix=args.suffix, weights_path=args.weights)
+    main(coded_path=args.coded, suffix=args.suffix, weights_path=args.weights,
+         form_filter=args.form_filter)

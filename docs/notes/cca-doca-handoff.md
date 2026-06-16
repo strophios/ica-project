@@ -71,6 +71,33 @@ retrain (next).
 
 645 tests green, lint clean.
 
+### Street-restricted experiment (CCA = street only) — corrected, hypothesis SUPPORTED
+
+`run_cca_doca --form-filter any_street` redefines CCA as street events only: positives = street
+DoCA ids (10,632); non-street DoCA (4,982) become UNLABELED presumed-negatives (NOT dropped —
+they are informative hard negatives for the street/not-street boundary). The eval
+(`run_cca_eval --form-filter any_street`) redefines the gold positive to `cca_event AND
+event_type=='street'` (144 of 500; the 25 non-street CCA and 15 street-but-not-CCA rows become
+negatives). `filter_positives_by_form` + `restrict_label_to_form` are the pure cores.
+
+**Head-to-head on the street task** (same 144 gold positives; both models hold out the template,
+so both leakage-clean): the street-trained model beats the all-forms model as a *street* detector
+by +0.025–0.086 raw precision at matched recall (0.55–0.80), and on reweighted precision 0.770 vs
+0.737 @logit 1.5, 0.868 vs 0.778 @logit 2.0. It does so with FEWER positives (9,277 vs 13,742) —
+label cleanliness + hard negatives, not data volume. Supports the hypothesis that the non-street
+forms carry the label noise.
+
+> A first pass got this wrong: it DROPPED non-street DoCA from the table and evaluated against the
+> 169-positive all-forms label, yielding a spurious "frontier-neutral, hypothesis not supported".
+> Corrected to non-street→unlabeled (hard negatives) + gold label→street-only. The wrong version
+> never reached git. Lesson: a form-restricted retrain is a CCA *definition* change — it must change
+> both the training pool (non-form → presumed-negative) AND the eval positive set.
+
+**Decision: carry BOTH definitions forward in parallel** (the street-only scoping is a collaborator
+call, not yet made). Maintain the all-forms model (`cca_doca.weights.h5`) and the street model
+(`cca_doca_street.weights.h5`) as parallel tracks so the full range of options can be presented.
+Future experiments (threshold lock, frontier-movers) should run for both.
+
 ## Overnight embed (split to free the morning GPU)
 
 - **Part 1 RUNNING**: `--years 1960-1975` (1,831,300 articles, ~9.8h) → `cca_doca/embed_cache/full/`,
@@ -142,12 +169,17 @@ then DoCA-recall). This is the "recording and comparing" surface.
   unless we want >2,553 or more high-band).
 
 ## Resume checklist
-- `git checkout cca-doca-retrain`. Harness + holdout guard + honest baseline + π sweep are committed.
-- **NEXT: street-restricted retrain** — add a `form_filter` knob (e.g. `any_street`) to the training
-  path so positives restrict to DoCA street forms (flags on `cca_doca_positives.parquet`: `any_street`
-  10,632), retrain with `--holdout-ids`, eval with `run_cca_eval.py`, compare the frontier (DoCA-recall
-  at matched precision) against the all-forms base. Tests the lawsuit/conventional-as-label-noise hypothesis.
+- `git checkout cca-doca-retrain`. Harness + holdout guard + honest baseline + π sweep + the corrected
+  street experiment are committed.
+- **Two parallel model tracks** (collaborator call on street-only scoping pending):
+  - all-forms: `cca_doca.weights.h5` (169-positive gold task), π=0.02.
+  - street-only: `cca_doca_street.weights.h5` (`--form-filter any_street`, 144-positive gold task), π=0.02.
+  - Run future experiments + the threshold lock for BOTH; report side by side.
+- **Candidate next steps** (frontier-movers — π and form filter are settled operating-point knobs):
+  (1) lock the deployment threshold per track from the gold PR curve; (2) encoder unfreeze (LayerLRModel
+  `freeze_encoder=False`) — biggest representational lever, heavier (token-mode) run; (3) refine label
+  definitions; (4) broaden/ form-stratify the gold set (only 500 of 2,553 coded; street-dominated).
 - Part 2 full embed (1976–1995 `--append`) still pending (evening; non-blocking for tuning).
-- Trained π models: `cca_doca/cca_doca_pi{0.01,0.03,0.05}.weights.h5`; base π=0.02 at `cca_doca.weights.h5`.
-- Eval records: `cca_doca/experiments/eval_*.json`. A `compare_experiments.py` (load records → frontier
-  table) is the obvious next harness piece once there are multiple frontier-moving runs to compare.
+- π models: `cca_doca/cca_doca_pi{0.01,0.03,0.05}.weights.h5`. Eval records: `cca_doca/experiments/eval_*.json`
+  (identify by `prior` + `form_filter` + `weights_path`). A `compare_experiments.py` (load records → frontier
+  table) is the obvious next harness piece.

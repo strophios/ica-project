@@ -30,7 +30,7 @@ from src.diagnostics.distribution_metrics import make_distribution_metrics
 import polars as pl
 from src.data_setup.data import create_cca_doca_data, dataset_from_embeddings
 from src.embed_corpus import load_cache
-from src.build_cca_doca_table import label_and_restrict
+from src.build_cca_doca_table import filter_positives_by_form, label_and_restrict
 from src.model_setup.heads import ClassificationHead
 from src.model_setup.assembly import (
     build_feature_endpoint_model,
@@ -78,7 +78,7 @@ def _load_holdout_ids(holdout_path: str | None) -> list[str] | None:
 
 
 def main(prior, suffix="train250k", threshold=0.0, epochs=7, max_steps=None,
-         holdout_ids=None, weights_path=None):
+         holdout_ids=None, weights_path=None, form_filter=None):
     weights_path = config.CCA_DOCA_WEIGHTS if weights_path is None else Path(weights_path)
     run_config = _config_with_prior(prior, epochs)
     head_cfg = run_config.heads[0]
@@ -90,10 +90,21 @@ def main(prior, suffix="train250k", threshold=0.0, epochs=7, max_steps=None,
         raise ValueError(
             f"cache feature dim {hidden_dim} != head hidden_dim {head_cfg.hidden_dim}"
         )
-    positives = pl.read_parquet(config.CCA_DOCA_POSITIVES)["id"].to_list()
+    pos_df = pl.read_parquet(config.CCA_DOCA_POSITIVES)
+    holdout_ids = list(holdout_ids or [])
+    if form_filter:
+        positives, nonform = filter_positives_by_form(pos_df, form_filter)
+        # Form-restricted CCA definition: only `form_filter` events are positive;
+        # non-form DoCA are NOT dropped -- they fall to cca_label=0 and join the
+        # unlabeled background as presumed-negatives (known non-form protests are
+        # informative hard negatives for the form/not-form boundary).
+        print(f"form_filter={form_filter}: {len(positives)} positives; "
+              f"{len(nonform)} non-form DoCA -> unlabeled (presumed-negative)")  # LOG
+    else:
+        positives = pos_df["id"].to_list()
     table = label_and_restrict(meta, positives, threshold)
     if holdout_ids:
-        print(f"holdout: dropping {len(holdout_ids)} gold-set ids from training pool")  # LOG
+        print(f"holdout: dropping {len(holdout_ids)} ids from training pool")  # LOG
     splits = create_cca_doca_data(table, holdout_ids=holdout_ids)
 
     pos_tr = _gather(cls, splits["train"]["pos"], 1.0)
@@ -192,7 +203,13 @@ if __name__ == "__main__":
     ap.add_argument("--out", default=None,
                     help="output weights .h5 path (default: CCA_DOCA_WEIGHTS); the "
                          "sidecar is derived from it (per-experiment weights)")
+    ap.add_argument("--form-filter", default=None,
+                    choices=["any_street", "any_boycott", "any_conventional",
+                             "any_lawsuit", "no_form"],
+                    help="restrict positives to a DoCA form flag; non-form DoCA ids "
+                         "are dropped from the table (label-noise hypothesis test)")
     args = ap.parse_args()
     main(prior=args.prior, suffix=args.suffix, threshold=args.threshold,
          epochs=args.epochs, max_steps=args.max_steps,
-         holdout_ids=_load_holdout_ids(args.holdout_ids), weights_path=args.out)
+         holdout_ids=_load_holdout_ids(args.holdout_ids), weights_path=args.out,
+         form_filter=args.form_filter)

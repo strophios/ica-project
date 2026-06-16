@@ -87,6 +87,23 @@ def evaluate_cca_slice(
     }
 
 
+def restrict_label_to_form(
+    coded: pl.DataFrame, event_type: str,
+    label_col: str = "cca_event", type_col: str = "event_type",
+) -> pl.DataFrame:
+    """Redefine the gold positive as a confirmed CCA event of one specific form.
+
+    Under a form-restricted CCA definition (e.g. street-only), a gold row is
+    positive iff `cca_event` is true AND `event_type == event_type`. Everything
+    else -- non-CCA, other-form CCA, and untyped (null/NA event_type) CCA -- is a
+    negative. Overwrites `label_col` with the restricted Boolean.
+    """
+    # eq_missing so a null event_type compares False (untyped CCA -> negative),
+    # not null (which would poison the AND and leave the row unlabeled).
+    restricted = pl.col(label_col).fill_null(False) & pl.col(type_col).eq_missing(event_type)
+    return coded.with_columns(restricted.alias(label_col))
+
+
 def recall_at_thresholds(
     scores: np.ndarray, thresholds: tuple[float, ...]
 ) -> list[dict[str, float | int]]:

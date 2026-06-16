@@ -17,6 +17,7 @@ from src.validation.cca_slice_eval import (
     evaluate_cca_slice,
     evaluate_cca_slice_weighted,
     recall_at_thresholds,
+    restrict_label_to_form,
 )
 from src.validation.build_cca_coding_template import assign_score_band, build_cca_template
 from src.validation.schema import validate_gold_set
@@ -120,6 +121,18 @@ def test_weighted_recall_corrects_stratification_bias():
     assert raw["recall"] == pytest.approx(0.5)
     assert wtd["recall"] == pytest.approx(1.0 / 101.0)
     assert wtd["support_tp"] == 1 and wtd["support_fn"] == 1
+
+
+def test_restrict_label_to_form_street_only():
+    coded = pl.DataFrame({
+        "cca_event": [True, True, True, False, None],
+        "event_type": ["street", "lawsuit", None, "street", "street"],
+    })
+    out = restrict_label_to_form(coded, "street")
+    # positive iff cca_event True AND event_type == street:
+    #   row0 (T, street)->T; row1 (T, lawsuit)->F; row2 (T, None)->F;
+    #   row3 (F, street)->F; row4 (None, street)->F
+    assert out["cca_event"].to_list() == [True, False, False, False, False]
 
 
 def test_recall_at_thresholds_counts_fraction_above():

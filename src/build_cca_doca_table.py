@@ -35,6 +35,27 @@ def label_and_restrict(
     )
 
 
+def filter_positives_by_form(
+    pos_df: pl.DataFrame, form_column: str
+) -> tuple[list, list]:
+    """Pure: partition DoCA positive ids by a form flag (e.g. `any_street`).
+
+    Returns `(keep_ids, drop_ids)` -- ids where `form_column` is set vs not. The
+    street-restricted experiment trains on `keep_ids` as positives and drops
+    `drop_ids` from the table entirely (via the holdout mechanism) so non-form
+    DoCA positives do not pollute the unlabeled background. Form flags are stored
+    0/1 (Int); null is treated as not-set.
+    """
+    if form_column not in pos_df.columns:
+        raise ValueError(
+            f"form column {form_column!r} not in positives (have {pos_df.columns})"
+        )
+    flag = pl.col(form_column).fill_null(0).cast(pl.Boolean)
+    keep = pos_df.filter(flag)["id"].to_list()
+    drop = pos_df.filter(~flag)["id"].to_list()
+    return keep, drop
+
+
 def _report(table: pl.DataFrame, threshold: float) -> None:
     n = table.height
     n_pos = int(table.filter(pl.col("cca_label") == 1).height)
