@@ -29,6 +29,11 @@ LABEL_COLUMNS = {
     "us_event": pl.Boolean,
     "event_location": pl.Utf8,
     "cca_event": pl.Boolean,
+    # Hand-coded collective-action form (coder's judgment, free vocab; typical
+    # values: street, strike, boycott, conventional, lawsuit, other). Lets us
+    # measure detection by event type and test whether non-prototypical forms
+    # drive label noise.
+    "event_type": pl.Utf8,
     "immig_relevant": pl.Boolean,
     "ica_event": pl.Boolean,
 }

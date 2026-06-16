@@ -28,11 +28,26 @@ cat(sprintf("  total match rows: %d\n", nrow(m)))
 good <- m %>% filter(match_quality == "succeeded")
 cat(sprintf("  succeeded match rows: %d\n", nrow(good)))
 
-# Dedupe to unique article ids; record per-article DoCA event count.
+# Dedupe to unique article ids; record per-article DoCA event count and the
+# DoCA form flags (any matched event of each form). DoCA forms here are
+# street / boycott / conventional / lawsuit (there is NO separate `strike` code).
+# `no_form` marks events with none of the four flags (non-prototypical candidates).
+# These let downstream training restrict positives by form (e.g., street-only).
 pos <- good %>%
   group_by(id = article_id) %>%
-  summarise(n_doca_events = n(), .groups = "drop")
+  summarise(
+    n_doca_events = n(),
+    any_street = as.integer(any(street == 1)),
+    any_boycott = as.integer(any(boycott == 1)),
+    any_conventional = as.integer(any(conventional == 1)),
+    any_lawsuit = as.integer(any(lawsuit == 1)),
+    no_form = as.integer(all(street == 0 & boycott == 0 & conventional == 0 & lawsuit == 0)),
+    .groups = "drop"
+  )
 cat(sprintf("  unique positive article ids: %d\n", nrow(pos)))
+cat(sprintf("  by form: street=%d boycott=%d conventional=%d lawsuit=%d no_form=%d\n",
+            sum(pos$any_street), sum(pos$any_boycott), sum(pos$any_conventional),
+            sum(pos$any_lawsuit), sum(pos$no_form)))
 
 # Sanity: ids should be in nyt://article/... form (the API corpus join key).
 n_nyt <- sum(startsWith(pos$id, "nyt://article/"))

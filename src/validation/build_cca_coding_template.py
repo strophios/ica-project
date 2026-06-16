@@ -30,7 +30,7 @@ _DEFAULT_ALLOC = {"cca_score_high": 1200, "cca_score_mid": 900, "cca_score_low":
 _SCHEMA_COLS = [
     "id", "corpus", "year", "news_desk", "section_name", "headline",
     "lead_paragraph", "sample_stratum", "us_event", "event_location",
-    "cca_event", "immig_relevant", "ica_event", "alt_corpus_id",
+    "cca_event", "event_type", "immig_relevant", "ica_event", "alt_corpus_id",
     "cca_logit", "cca_score",
 ]
 
@@ -89,6 +89,7 @@ def build_cca_template(
         pl.lit(None, dtype=pl.Boolean).alias("us_event"),
         pl.lit(None, dtype=pl.Utf8).alias("event_location"),
         pl.lit(None, dtype=pl.Boolean).alias("cca_event"),
+        pl.lit(None, dtype=pl.Utf8).alias("event_type"),
         pl.lit(None, dtype=pl.Boolean).alias("immig_relevant"),
         pl.lit(None, dtype=pl.Boolean).alias("ica_event"),
     ).select(_SCHEMA_COLS)
