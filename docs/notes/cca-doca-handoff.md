@@ -29,6 +29,48 @@ The full features-mode pipeline landed and a first model trained successfully:
 
 638 tests green. ~16 commits on `cca-doca-retrain`.
 
+## Day 2 progress (2026-06-16)
+
+Gold set coded (`cca_coding_first500_coded.csv`, 500 rows: 169 pos / 331 neg) and the
+eval/experiment harness built. Part 1 of the full embed finished overnight (1.83M rows,
+1960–1975, 8 shards in `cca_doca/embed_cache/full/`); Part 2 (1976–1995 `--append`) still
+pending and non-blocking.
+
+**Leakage guard.** `create_cca_doca_data(holdout_ids=)` + `run_cca_doca --holdout-ids <template>`
+drop the full 2,553-row coding template from the training unlabeled pool (all unlabeled; zero
+DoCA positives), so gold ids are never trained as noisy negatives. `run_cca_doca --out` writes
+per-experiment weights + sidecar. The honest base model is actually slightly BETTER separated
+than the day-1 leaky one (training true-positives-as-negatives was mildly hurting).
+
+**Eval harness** (`src/validation/run_cca_eval.py`). Re-scores gold ids with the current weights
+(the template `cca_score` is stale — from a model that trained on them), then reports per logit
+threshold: RAW precision/recall (cross-experiment comparable); IPW-REWEIGHTED precision/recall
+(corpus operating point; weight = `corpus_band / gold_band` by `sample_stratum`) with unweighted
+support counts so high-variance cells are visible; DoCA test-recall (over held-out test-split
+DoCA positives — the trustworthy recall); and per-event-type recall. IPW core (`band_ipw_weights`,
+`evaluate_cca_slice_weighted`, `recall_at_thresholds`) + `assign_score_band` (single-source band
+boundaries) live in `cca_slice_eval.py` / `build_cca_coding_template.py`. Records land in
+`cca_doca/experiments/eval_*.json` (identify by `prior` field) — the seed of `compare_experiments`.
+
+**Honest baseline (leakage-holdout, π=0.02).** At logit ≥1.0: precision ≈0.80 (raw 0.79 ≈
+reweighted 0.82 — they converge in the densely-sampled high band, so it's trustworthy),
+DoCA-recall 0.35. At ≥2.0: P≈0.86, recall 0.19. At logit 0: P≈0.55–0.73, DoCA-recall 0.61.
+Operate at a HIGH threshold (≥1.0): the corpus is ~87% low-band, so a low cut floods with false
+positives (reweighted P collapses to 0.55 @0, 0.26 @−1).
+
+**π sweep finding: π is an operating-point knob, not a quality knob.** Across π ∈
+{0.01,0.02,0.03,0.05}, DoCA-recall at matched precision is invariant (~0.51 at P=0.75 for all
+four). π only rescales the logit so prob-0.5 lands elsewhere on a FIXED precision–recall frontier.
+So: π=0.02 is fine (don't fuss 0.02 vs 0.03); pick the deployment threshold from the gold-set PR
+curve, not the prior's prob-0.5; and frontier-MOVING experiments (labels/forms/hyperparams), not
+π, are where quality gains live.
+
+**Per-event-type recall** (base, @logit 0): street 0.84, conventional 0.78, boycott 1.00 (n=3),
+lawsuit 0.50 (→0.20 @logit 1.0). Lawsuit/conventional score lower — motivates the street-restricted
+retrain (next).
+
+645 tests green, lint clean.
+
 ## Overnight embed (split to free the morning GPU)
 
 - **Part 1 RUNNING**: `--years 1960-1975` (1,831,300 articles, ~9.8h) → `cca_doca/embed_cache/full/`,
@@ -100,6 +142,12 @@ then DoCA-recall). This is the "recording and comparing" surface.
   unless we want >2,553 or more high-band).
 
 ## Resume checklist
-- `git checkout cca-doca-retrain`; `tail /tmp/embed_full_part1.log` (part 1 status).
-- If part 1 done: run part 2 (command above) in the evening.
-- Build `run_cca_eval.py`, then the registry + `compare_experiments.py`, then run the experiments.
+- `git checkout cca-doca-retrain`. Harness + holdout guard + honest baseline + π sweep are committed.
+- **NEXT: street-restricted retrain** — add a `form_filter` knob (e.g. `any_street`) to the training
+  path so positives restrict to DoCA street forms (flags on `cca_doca_positives.parquet`: `any_street`
+  10,632), retrain with `--holdout-ids`, eval with `run_cca_eval.py`, compare the frontier (DoCA-recall
+  at matched precision) against the all-forms base. Tests the lawsuit/conventional-as-label-noise hypothesis.
+- Part 2 full embed (1976–1995 `--append`) still pending (evening; non-blocking for tuning).
+- Trained π models: `cca_doca/cca_doca_pi{0.01,0.03,0.05}.weights.h5`; base π=0.02 at `cca_doca.weights.h5`.
+- Eval records: `cca_doca/experiments/eval_*.json`. A `compare_experiments.py` (load records → frontier
+  table) is the obvious next harness piece once there are multiple frontier-moving runs to compare.

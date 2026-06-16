@@ -27,6 +27,20 @@ from src.validation.schema import validate_gold_set
 _HIGH, _LOW = 1.0, -1.0  # cca_logit band boundaries
 _DEFAULT_ALLOC = {"cca_score_high": 1200, "cca_score_mid": 900, "cca_score_low": 900}
 
+
+def assign_score_band(logit: pl.Expr) -> pl.Expr:
+    """Map a `cca_logit` expression to its sampling-stratum band label.
+
+    Single source for the band boundaries: the template sampler and the eval's
+    corpus-band reweighting (`run_cca_eval`) must band identically, since the IPW
+    weights compare gold-band sampling against the corpus the sampler drew from.
+    """
+    return (
+        pl.when(logit >= _HIGH).then(pl.lit("cca_score_high"))
+        .when(logit < _LOW).then(pl.lit("cca_score_low"))
+        .otherwise(pl.lit("cca_score_mid"))
+    )
+
 _SCHEMA_COLS = [
     "id", "corpus", "year", "news_desk", "section_name", "headline",
     "lead_paragraph", "sample_stratum", "us_event", "event_location",
@@ -52,12 +66,7 @@ def build_cca_template(
             & pl.col("year").is_not_null()
             & pl.col("id").is_not_null()
         )
-        .with_columns(
-            pl.when(pl.col("cca_logit") >= _HIGH).then(pl.lit("cca_score_high"))
-            .when(pl.col("cca_logit") < _LOW).then(pl.lit("cca_score_low"))
-            .otherwise(pl.lit("cca_score_mid"))
-            .alias("sample_stratum")
-        )
+        .with_columns(assign_score_band(pl.col("cca_logit")).alias("sample_stratum"))
     )
 
     parts = []

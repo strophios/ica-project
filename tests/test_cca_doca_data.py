@@ -61,6 +61,37 @@ def test_split_unlabeled_pool_is_us_only():
         assert not any(int(x[1:]) >= 700 for x in unl["id"].to_list())
 
 
+def test_holdout_ids_excluded_from_every_split():
+    # cca-doca.AC1.4: gold-set ids dropped from the training pool (leakage guard).
+    table = _synthetic_table()
+    # mix unlabeled + one positive to document "drop from the whole table".
+    holdout = {"u0", "u1", "u300", "p0"}
+    out = create_cca_doca_data(table, holdout_ids=holdout)
+    seen = set()
+    for split in ("train", "val", "test"):
+        for grp in ("pos", "unl"):
+            seen |= set(out[split][grp]["id"].to_list())
+    assert seen.isdisjoint(holdout)
+    # everything NOT held out still present (120 pos - p0, US-unl 700 - u0,u1,u300)
+    assert len(seen & {f"p{i}" for i in range(120)}) == 119
+    assert "u0" not in seen and "u300" not in seen
+
+
+def test_holdout_ids_none_is_a_noop():
+    table = _synthetic_table()
+    base = create_cca_doca_data(table)
+    held = create_cca_doca_data(table, holdout_ids=None)
+    assert base["train"]["unl"].equals(held["train"]["unl"])
+    assert base["train"]["pos"].equals(held["train"]["pos"])
+
+
+def test_holdout_ids_empty_is_a_noop():
+    table = _synthetic_table()
+    base = create_cca_doca_data(table)
+    held = create_cca_doca_data(table, holdout_ids=[])
+    assert base["train"]["unl"].equals(held["train"]["unl"])
+
+
 def test_splits_are_disjoint_and_deterministic():
     table = _synthetic_table()
     out = create_cca_doca_data(table)

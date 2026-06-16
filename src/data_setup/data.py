@@ -177,7 +177,7 @@ def create_us_filter_data(dataset):
     }
 
 
-def create_cca_doca_data(table, seed=200):
+def create_cca_doca_data(table, seed=200, holdout_ids=None):
     """PU split for the CCA/DoCA retrain over cached embeddings.
 
     Operates on a polars table carrying at least `id`, `cca_label` (0/1), `us`
@@ -192,6 +192,14 @@ def create_cca_doca_data(table, seed=200):
         because the US model scored it low.
       - unlabeled = `cca_label == 0 AND us` — the US-restricted background pool.
 
+    `holdout_ids` (gold-set leakage guard): when given, those ids are dropped from
+    the WHOLE table before splitting, so they never enter training in either role.
+    The gold set is sampled from the unlabeled background and scored as (noisy)
+    negatives; training on it then evaluating on it inflates apparent quality. The
+    coding template carries no DoCA positives, but we drop from the whole table
+    (not just the unlabeled pool) so the guard stays correct if that ever changes.
+    `None`/empty is a strict no-op.
+
     Each group is split 90/5/5 separately (seed) and shuffled within split (seed),
     mirroring `create_us_filter_data` (prevents class-blocking under from_tensor_
     slices + a SHUFFLE_BUFFER smaller than the split).
@@ -199,6 +207,9 @@ def create_cca_doca_data(table, seed=200):
     assert table["id"].n_unique() == table.height, (
         f"`id` not unique: {table.height} rows, {table['id'].n_unique()} ids"
     )
+
+    if holdout_ids:
+        table = table.filter(pl.col("id").is_in(list(holdout_ids)).not_())
 
     def _split(group):
         train = group.sample(fraction=0.9, seed=seed)

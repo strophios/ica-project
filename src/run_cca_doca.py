@@ -18,6 +18,7 @@ import argparse
 import dataclasses
 import datetime
 import math
+from pathlib import Path
 
 import numpy as np
 import keras
@@ -62,7 +63,23 @@ def _gather(cls: np.ndarray, group: pl.DataFrame, label: float):
     return feats, labels
 
 
-def main(prior, suffix="train250k", threshold=0.0, epochs=7, max_steps=None):
+def _load_holdout_ids(holdout_path: str | None) -> list[str] | None:
+    """Read the gold-set coding template's `id` column (leakage-guard holdout).
+
+    The path is the score-stratified coding template (`cca_coding_template.parquet`),
+    whose full id set we hold out so any coded prefix stays leakage-clean.
+    """
+    if holdout_path is None:
+        return None
+    frame = pl.read_parquet(holdout_path)
+    if "id" not in frame.columns:
+        raise ValueError(f"holdout file {holdout_path} has no `id` column")
+    return frame["id"].to_list()
+
+
+def main(prior, suffix="train250k", threshold=0.0, epochs=7, max_steps=None,
+         holdout_ids=None, weights_path=None):
+    weights_path = config.CCA_DOCA_WEIGHTS if weights_path is None else Path(weights_path)
     run_config = _config_with_prior(prior, epochs)
     head_cfg = run_config.heads[0]
 
@@ -75,7 +92,9 @@ def main(prior, suffix="train250k", threshold=0.0, epochs=7, max_steps=None):
         )
     positives = pl.read_parquet(config.CCA_DOCA_POSITIVES)["id"].to_list()
     table = label_and_restrict(meta, positives, threshold)
-    splits = create_cca_doca_data(table)
+    if holdout_ids:
+        print(f"holdout: dropping {len(holdout_ids)} gold-set ids from training pool")  # LOG
+    splits = create_cca_doca_data(table, holdout_ids=holdout_ids)
 
     pos_tr = _gather(cls, splits["train"]["pos"], 1.0)
     unl_tr = _gather(cls, splits["train"]["unl"], 0.0)
@@ -144,9 +163,9 @@ def main(prior, suffix="train250k", threshold=0.0, epochs=7, max_steps=None):
         callbacks=callbacks,
     )
 
-    model.save_weights(str(config.CCA_DOCA_WEIGHTS))
-    run_config.to_json(cca_config.config_path_for_weights(config.CCA_DOCA_WEIGHTS))
-    print(f"Saved weights + sidecar at {config.CCA_DOCA_WEIGHTS}")  # LOG
+    model.save_weights(str(weights_path))
+    run_config.to_json(cca_config.config_path_for_weights(weights_path))
+    print(f"Saved weights + sidecar at {weights_path}")  # LOG
 
     # Spot-check: score held-out test pos/unl and report distributions.
     pos_te = _gather(cls, splits["test"]["pos"], 1.0)
@@ -167,6 +186,13 @@ if __name__ == "__main__":
     ap.add_argument("--threshold", type=float, default=0.0, help="US logit threshold")
     ap.add_argument("--epochs", type=int, default=7)
     ap.add_argument("--max-steps", type=int, default=None)
+    ap.add_argument("--holdout-ids", default=None,
+                    help="path to the gold-set coding template parquet; its ids are "
+                         "dropped from the training pool (leakage guard)")
+    ap.add_argument("--out", default=None,
+                    help="output weights .h5 path (default: CCA_DOCA_WEIGHTS); the "
+                         "sidecar is derived from it (per-experiment weights)")
     args = ap.parse_args()
     main(prior=args.prior, suffix=args.suffix, threshold=args.threshold,
-         epochs=args.epochs, max_steps=args.max_steps)
+         epochs=args.epochs, max_steps=args.max_steps,
+         holdout_ids=_load_holdout_ids(args.holdout_ids), weights_path=args.out)
