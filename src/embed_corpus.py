@@ -225,6 +225,8 @@ def main(
     batch_size=256,
     years=None,
     append=False,
+    corpus_subdir="api_corpus",
+    year_column="year",
 ):
     keras.config.set_dtype_policy(config.DTYPE_POLICY)
     keras.utils.set_random_seed(200)
@@ -236,11 +238,15 @@ def main(
     # same canonical cache rather than overwriting shard_000.
     shard_offset = len(list(cache_dir.glob("shard_*_cls.npy"))) if append else 0
 
-    # Load corpus (id, headline, lead_paragraph, year, headline_with_lead).
+    # Load corpus (id, headline, lead_paragraph, year, headline_with_lead). The LDC
+    # corpus partitions on `publication_year`, the API corpus carries `year`; both
+    # are normalized to `year` here so the filter + meta downstream are uniform.
     corpus = data_from_parquet(
-        config.PROJECT_ROOT, "api_corpus", addl_columns=["year"],
+        config.PROJECT_ROOT, corpus_subdir, addl_columns=[year_column],
         lead_column="lead_paragraph",
     )
+    if year_column != "year":
+        corpus = corpus.rename({year_column: "year"})
     if years is not None:
         lo, hi = years
         corpus = corpus.filter(pl.col("year").cast(pl.Int64).is_between(lo, hi))
@@ -324,6 +330,10 @@ if __name__ == "__main__":
                     help="inclusive year range 'LO-HI' to embed (e.g. 1960-1975)")
     ap.add_argument("--append", action="store_true",
                     help="continue shard numbering after existing shards in the cache dir")
+    ap.add_argument("--corpus", default="api_corpus",
+                    help="corpus subdir under the data root (e.g. api_corpus, ldc_corpus)")
+    ap.add_argument("--year-column", default="year",
+                    help="name of the year column in the corpus (LDC: publication_year)")
     args = ap.parse_args()
     years = None
     if args.years is not None:
@@ -334,4 +344,5 @@ if __name__ == "__main__":
         stamp=args.stamp, out_suffix=args.out_suffix,
         shard_size=args.shard_size, batch_size=args.batch_size,
         years=years, append=args.append,
+        corpus_subdir=args.corpus, year_column=args.year_column,
     )

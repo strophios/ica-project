@@ -168,9 +168,30 @@ then DoCA-recall). This is the "recording and comparing" surface.
   finishes, or keep the 2,553-row train250k draw (the first 500 are coded either way; "draw once" holds
   unless we want >2,553 or more high-band).
 
+## Day 2 (cont.): model characterization + out-of-sample prep
+
+Wrote `docs/notes/cca-model-characterization.md` — what the model does, the eval methodology, and
+**performance vs baselines in corpus space**: random-at-prior P≈0.02 (1x), a protest-keyword lexicon
+P≈0.19 (~9x), the model P≈0.82 at logit ≥1.0 (~41x). The keyword baseline's *raw* gold precision
+(0.83) looks like it beats the model, but that's a stratification artifact — reweighted to corpus
+space it's 0.19, and the model is ~4x more precise. (Methodological catch: never compare a model's
+reweighted precision to a baseline's raw gold precision.)
+
+**Yield projection** (`scripts/cca_corpus_scores.py` → `cca_doca/experiments/corpus_scores_*.json`):
+on part-1 (1960–1975, 1.61M US-restricted), all-forms @logit 1.0 flags 9,722 → ~8,000 true CCA
+events at ~0.35 DoCA recall; lower the threshold for ~17,300 true events at 0.55 precision.
+
+**Out-of-sample prep**: `embed_corpus` gained `--corpus` / `--year-column` so it can target the LDC
+corpus (Hive-partitioned on `publication_year`). LDC 1995–2007 = 681,470 articles (~3.6h to embed),
+with `cca_descriptor` = 8,981 positives as the noisy out-of-period reference (DoCA matches are gone
+post-1995). Plan: embed overnight, then score both models and evaluate vs `cca_descriptor` for
+temporal + cross-source generalization.
+
 ## Resume checklist
 - `git checkout cca-doca-retrain`. Harness + holdout guard + honest baseline + π sweep + the corrected
-  street experiment are committed.
+  street experiment + the characterization doc are committed.
+- **Overnight LDC embed** (instead of API part-2): see the command in this doc's day-2 section / the
+  characterization doc's out-of-sample section. After it lands, score both models + eval vs `cca_descriptor`.
 - **Two parallel model tracks** (collaborator call on street-only scoping pending):
   - all-forms: `cca_doca.weights.h5` (169-positive gold task), π=0.02.
   - street-only: `cca_doca_street.weights.h5` (`--form-filter any_street`, 144-positive gold task), π=0.02.
