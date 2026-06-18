@@ -204,3 +204,58 @@ temporal + cross-source generalization.
 - π models: `cca_doca/cca_doca_pi{0.01,0.03,0.05}.weights.h5`. Eval records: `cca_doca/experiments/eval_*.json`
   (identify by `prior` + `form_filter` + `weights_path`). A `compare_experiments.py` (load records → frontier
   table) is the obvious next harness piece.
+
+## Day 3 (2026-06-18): US-filter hardening, reconcile, calibration, memo
+
+The day's goal was the MVP collaborator deliverable, gated on hardening the US filter (which turned
+out to be a 200-step smoke test, not a real run). All of it is done.
+
+**US filter — properly retrained + calibrated + validated.** The filter trains token-mode (full
+backbone over ~1.16M LDC rows), so we made it cheap by embedding its training set once and training
+the head features-mode:
+- `src/embed_corpus.py` gained `--source-pattern` / `--lead-column` / `--label-column` / `--no-year`
+  / `--limit` to embed `us_filter/ldc_labeled.parquet` (stripped_text channel, us_label carried) →
+  cache `us_train_ldc/` (630,663 rows). This also fixed a latent `data_from_parquet` bug (greedy
+  `us_filter/**/*.parquet` glob pulled in `audit/api_ldc_matched.parquet`; added a `pattern` override).
+  **`run_us_classification.py` still has this bug — apply the same `pattern` fix when next touched.**
+- `src/run_us_features.py` (new): features-mode BCE US trainer → `us_classifier_full.weights.h5`,
+  held-out **F1 0.97**. `src/calibrate_us_filter.py` (new): Platt on natural-balance val (A=1.03,
+  B=−0.22, ECE 0.007→0.004). Old smoke `us_classifier.weights.h5` kept for comparison only.
+- Validated: DoCA-recall sweep (0.96 @ calib 0.5; recipe thr 0.25 → 0.98 recall, the deployment
+  operating point); gold-set `us_event` agreement 0.934 (new) vs 0.912 (old) — +11 foreign rejected
+  at no US-recall cost.
+
+**CCA reconciled against the new filter.** `run_cca_doca.py` gained `--us-weights` (re-scores
+`us_logit` by applying the new calibrated US head to cached CLS — valid, shared frozen backbone — no
+re-embed). Both tracks re-fit at calibrated US thr 0.5. Result: **frontier unchanged within noise**
+(raw precision at matched DoCA recall differs ≤0.01; training curves near-twins). The apparent
+reweighted-precision "drop" at fixed logit was IPW variance + nnPU logit-scale non-identifiability
+(same as the π-sweep). US-hardened models PROMOTED to canonical (`cca_doca.weights.h5`,
+`cca_doca_street.weights.h5`); pre-hardening kept as `*_oldus`.
+
+**CCA calibration.** `src/calibrate_cca.py` (new) + `platt_fit` gained `sample_weight`: IPW-weighted
+Platt so probabilities map to corpus base rate, not the gold's 34% (all-forms A=1.32/B=−1.02; street
+A=1.81/B=−1.05; IPW-weighted mean calibrated prob == positive rate, aggregate-calibrated). Artifact
+triples now complete for all three models.
+
+**Out-of-sample** (`src/validation/cca_oos_eval.py`, new): scored LDC 1995–2007 (out-of-period +
+cross-source) vs `cca_descriptor`. ROC-AUC 0.89 (all-forms) / 0.90 (street). US-restricted pipeline
+over 681k LDC articles: ~4,524 US events @ score 1.0, ~3,100 untagged by the NYT descriptor — the
+dataset-expansion evidence, including events the tag missed (e.g. Buffalo 1999 abortion protests).
+
+**Deliverable:** `docs/reports/cca-collaborator-memo.md` finalized (operate at score ≥ 1.5 / calib
+P ≥ 0.73 → ~0.79 precision / ~0.33 DoCA recall / ~40× base rate). Operator ships it Friday.
+
+648 tests green, my files ruff-clean.
+
+### Next session — pickup points (in priority order)
+1. **Immigration labels (the crux of the multi-head).** Trustworthy immigration *training* positives
+   are the open problem — descriptor/keyword tags are over-generous (the same disease DoCA-matching
+   cured for CCA), and there's no DoCA-equivalent gold source. The 500 gold rows carry `immig` codes
+   for *eval* only. Timeboxed go/no-go scoping is the first task (task board #9): assess refining NYT
+   descriptors, NYT-API subject keywords, and whether a small hand-coded positive set is needed.
+2. **Multi-head ICA** (#10, gated on #1): if labels crack, the immigration head trains features-mode
+   on cached embeddings cheaply (like CCA); then assemble US → CCA + immigration → ICA.
+3. **Saturday tier** (#11/#12): full CLAUDE.md/README reconciliation (this handoff + the
+   `project-state-and-data-map.md` note are the interim source of truth); full-corpus apply
+   (`api_us_scores` + `api_cca_scores`); broaden the gold set; the `run_us_classification.py` glob fix.
