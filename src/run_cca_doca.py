@@ -37,6 +37,8 @@ from src.model_setup.assembly import (
     build_feature_inference_model,
 )
 from src.loss_functions.loss import FLPULoss
+from src.us_config import UsRunConfig, config_path_for_weights as us_config_path_for_weights
+from src.calibration.sidecar import load_calibration, calibration_path_for_weights
 
 keras.config.set_dtype_policy(config.DTYPE_POLICY)
 keras.utils.set_random_seed(200)
@@ -77,14 +79,37 @@ def _load_holdout_ids(holdout_path: str | None) -> list[str] | None:
     return frame["id"].to_list()
 
 
+def _rescore_us_restriction(meta, cls, us_weights_path: Path):
+    """Replace the cached `us_logit` with a NEW US filter's calibrated score.
+
+    The embedding cache stored `us_logit` from whatever US model produced it. To
+    reconcile CCA training against a retrained US filter WITHOUT re-embedding, apply
+    the new frozen-backbone US head to the cached CLS vectors — valid because both
+    share the same DAPT backbone — and overwrite `us_logit` with the calibrated
+    probability. `label_and_restrict` then thresholds it (use threshold=0.5 for a
+    calibrated score, vs the raw-logit cache default of 0.0).
+    """
+    rc = UsRunConfig.from_json(us_config_path_for_weights(us_weights_path))
+    head = ClassificationHead(hidden_dim=rc.head.hidden_dim, name=rc.head.name)
+    inf = build_feature_inference_model({rc.head.name: head}, hidden_dim=cls.shape[1])
+    inf.load_weights(str(us_weights_path), skip_mismatch=False)
+    logit = inf.predict({"features": cls}, verbose=0)[rc.head.name].reshape(-1)
+    cal = load_calibration(calibration_path_for_weights(us_weights_path))
+    return meta.with_columns(pl.Series("us_logit", cal.transform(logit)))
+
+
 def main(prior, suffix="train250k", threshold=0.0, epochs=7, max_steps=None,
-         holdout_ids=None, weights_path=None, form_filter=None):
+         holdout_ids=None, weights_path=None, form_filter=None, us_weights_path=None):
     weights_path = config.CCA_DOCA_WEIGHTS if weights_path is None else Path(weights_path)
     run_config = _config_with_prior(prior, epochs)
     head_cfg = run_config.heads[0]
 
     # Load cache + build the labeled, US-restricted table, then split.
     meta, cls = load_cache(config.CCA_EMBED_CACHE_DIR / suffix)
+    if us_weights_path is not None:
+        meta = _rescore_us_restriction(meta, cls, Path(us_weights_path))
+        print(f"US restriction re-scored via {us_weights_path} "
+              f"(calibrated; threshold={threshold})")  # LOG
     hidden_dim = cls.shape[1]
     if hidden_dim != head_cfg.hidden_dim:
         raise ValueError(
@@ -208,8 +233,11 @@ if __name__ == "__main__":
                              "any_lawsuit", "no_form"],
                     help="restrict positives to a DoCA form flag; non-form DoCA ids "
                          "are dropped from the table (label-noise hypothesis test)")
+    ap.add_argument("--us-weights", default=None,
+                    help="re-score the US restriction with this US filter's calibrated "
+                         "score (applies the new head to cached CLS; use --threshold 0.5)")
     args = ap.parse_args()
     main(prior=args.prior, suffix=args.suffix, threshold=args.threshold,
          epochs=args.epochs, max_steps=args.max_steps,
          holdout_ids=_load_holdout_ids(args.holdout_ids), weights_path=args.out,
-         form_filter=args.form_filter)
+         form_filter=args.form_filter, us_weights_path=args.us_weights)

@@ -11,15 +11,19 @@ import numpy as np
 from sklearn.linear_model import LogisticRegression
 
 
-def platt_fit(logits, labels):
+def platt_fit(logits, labels, sample_weight=None):
     """Fit sigmoid(A*z + B) by 1-D logistic regression of label ~ logit.
     Returns (A, B). `logits`/`labels` are 1-D arrays over a held-out split at
     its NATURAL class balance (rebalanced batches are disallowed — they skew B).
+
+    `sample_weight` (optional): per-row weights. Use to calibrate a score-stratified
+    gold set to corpus proportions via inverse-probability weights (the gold set is
+    not natural-balance, so the weights stand in for it). None → unweighted fit.
     """
     z = np.asarray(logits, dtype=np.float64).reshape(-1, 1)
     y = np.asarray(labels).astype(int).reshape(-1)
     lr = LogisticRegression(penalty=None)
-    lr.fit(z, y)
+    lr.fit(z, y, sample_weight=sample_weight)
     return float(lr.coef_[0, 0]), float(lr.intercept_[0])
 
 
@@ -51,8 +55,9 @@ class PlattCalibrator(Calibrator):
     method: str = "platt"
 
     @classmethod
-    def fit(cls, logits, labels, *, fit_population: str) -> "PlattCalibrator":
-        A, B = platt_fit(logits, labels)
+    def fit(cls, logits, labels, *, fit_population: str,
+            sample_weight=None) -> "PlattCalibrator":
+        A, B = platt_fit(logits, labels, sample_weight=sample_weight)
         return cls(A=A, B=B, fit_population=fit_population, n=int(len(labels)))
 
     def transform(self, logits):
