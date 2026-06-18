@@ -241,6 +241,58 @@ def create_cca_doca_data(table, seed=200, holdout_ids=None):
     }
 
 
+def create_relevance_data(table, seed=200, holdout_ids=None):
+    """PNU split for the relevance head: positives / reliable-negatives / unlabeled.
+
+    The nnPNU counterpart to `create_cca_doca_data`. Operates on a table carrying
+    `id`, `cca_label` (0/1), `reliable_neg` (bool), `us` (bool), and `emb_row`.
+    Returns `{"train":{"pos","neg","unl"}, "val":..., "test":...}` so the caller
+    gathers cached vectors per group and Ratio-Batch samples three streams.
+
+    Group definition (differs from the CCA PU split):
+      - positives  = `cca_label == 1`. Already US-restricted by the caller (unlike
+        CCA, a relevance positive that scores non-US is foreign and out-of-domain).
+      - reliable negatives = `reliable_neg` (confidently-foreign, no-US-footprint
+        articles; selected US-passing). Fed to the loss as label -1.
+      - unlabeled  = `cca_label == 0 AND us AND NOT reliable_neg` — US-restricted
+        background minus the carved-out reliable negatives.
+
+    `holdout_ids` drops gold-set ids from the whole table before splitting (same
+    leakage guard as `create_cca_doca_data`). `None`/empty is a strict no-op.
+    Each group is split 90/5/5 separately (seed) and shuffled within split (seed).
+    """
+    assert table["id"].n_unique() == table.height, (
+        f"`id` not unique: {table.height} rows, {table['id'].n_unique()} ids"
+    )
+    if holdout_ids:
+        table = table.filter(pl.col("id").is_in(list(holdout_ids)).not_())
+
+    def _split(group):
+        train = group.sample(fraction=0.9, seed=seed)
+        rest = group.filter(pl.col("id").is_in(train["id"].implode()).not_())
+        test = rest.sample(fraction=0.5, seed=seed)
+        val = rest.filter(pl.col("id").is_in(test["id"].implode()).not_())
+        return train, val, test
+
+    pos = table.filter(pl.col("cca_label") == 1)
+    neg = table.filter(pl.col("reliable_neg"))
+    unl = table.filter(
+        (pl.col("cca_label") == 0) & pl.col("us") & pl.col("reliable_neg").not_()
+    )
+    p_tr, p_va, p_te = _split(pos)
+    g_tr, g_va, g_te = _split(neg)
+    u_tr, u_va, u_te = _split(unl)
+
+    def _shuf(d):
+        return d.sample(fraction=1.0, shuffle=True, seed=seed)
+
+    return {
+        "train": {"pos": _shuf(p_tr), "neg": _shuf(g_tr), "unl": _shuf(u_tr)},
+        "val": {"pos": _shuf(p_va), "neg": _shuf(g_va), "unl": _shuf(u_va)},
+        "test": {"pos": _shuf(p_te), "neg": _shuf(g_te), "unl": _shuf(u_te)},
+    }
+
+
 def dataset_create(
     shuffle_buffer,
     batch_size,

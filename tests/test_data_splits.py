@@ -390,3 +390,54 @@ class TestLabelConstruction:
         assert cca_row["immig_label"][0] == 0
         assert immig_row["cca_label"][0] == 0
         assert immig_row["immig_label"][0] == 1
+
+
+class TestCreateRelevanceData:
+    """The 3-way PNU split: positives / reliable-negatives / unlabeled."""
+
+    @staticmethod
+    def _table():
+        # 8 positives (US), 6 reliable-neg, 20 unlabeled-US, 4 unlabeled-not-US.
+        # (count, cca_label, us, reliable_neg)
+        spec = [(8, 1, True, False), (6, 0, True, True), (20, 0, True, False), (4, 0, False, False)]
+        cca, us, rneg = [], [], []
+        for n, lab, is_us, rn in spec:
+            cca += [lab] * n
+            us += [is_us] * n
+            rneg += [rn] * n
+        return pl.DataFrame({
+            "id": [f"d{i}" for i in range(len(cca))],
+            "cca_label": cca, "us": us, "reliable_neg": rneg,
+            "emb_row": list(range(len(cca))),
+        })
+
+    def _splits(self):
+        from src.data_setup.data import create_relevance_data
+        return create_relevance_data(self._table())
+
+    def test_groups_are_disjoint_and_correctly_assigned(self):
+        s = self._splits()
+        all_pos = pl.concat([s[k]["pos"] for k in ("train", "val", "test")])
+        all_neg = pl.concat([s[k]["neg"] for k in ("train", "val", "test")])
+        all_unl = pl.concat([s[k]["unl"] for k in ("train", "val", "test")])
+        pos_ids, neg_ids, unl_ids = (set(g["id"].to_list()) for g in (all_pos, all_neg, all_unl))
+        # positives = cca_label==1; reliable negatives carved out; unlabeled is
+        # US-restricted and excludes the reliable negatives.
+        assert all(all_pos["cca_label"] == 1)
+        assert all(all_neg["reliable_neg"])
+        assert pos_ids.isdisjoint(neg_ids)
+        assert neg_ids.isdisjoint(unl_ids)
+        assert pos_ids.isdisjoint(unl_ids)
+        # non-US unlabeled rows (4) are dropped from the unlabeled pool.
+        assert len(unl_ids) == 20
+        assert "emb_row" in all_unl.columns
+
+    def test_holdout_drops_ids_from_all_groups(self):
+        from src.data_setup.data import create_relevance_data
+        held = ["d0", "d8", "d14"]  # one positive, one reliable-neg, one unlabeled
+        s = create_relevance_data(self._table(), holdout_ids=held)
+        seen = set()
+        for k in ("train", "val", "test"):
+            for grp in ("pos", "neg", "unl"):
+                seen |= set(s[k][grp]["id"].to_list())
+        assert seen.isdisjoint(set(held))

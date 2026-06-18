@@ -36,7 +36,7 @@ import src.config as config
 import src.cca_config as cca_config
 from src.build_cca_doca_table import label_and_restrict
 from src.cca_metrics import make_cca_metrics
-from src.data_setup.data import create_cca_doca_data, dataset_from_embeddings
+from src.data_setup.data import create_relevance_data, dataset_from_embeddings
 from src.diagnostics.distribution_metrics import make_distribution_metrics
 from src.embed_corpus import load_cache
 from src.loss_functions.loss import FLPULoss
@@ -58,9 +58,18 @@ DEFAULT_WEIGHTS = RELEVANCE_DIR / "relevance.weights.h5"
 
 
 def main(prior, suffix="relevance_train", threshold=0.5, epochs=7, max_steps=None,
-         holdout_ids=None, weights_path=None):
+         holdout_ids=None, weights_path=None, nnpnu_eta=0.0, neg_weight=0.15):
     weights_path = weights_path or DEFAULT_WEIGHTS
     run_config = _config_with_prior(prior, epochs)
+    # Set the nnPNU mixing weight on the (frozen) loss config so it is recorded in
+    # the run sidecar. eta=0 leaves the head as pure nnPU (CCA-identical).
+    head0 = run_config.heads[0]
+    run_config = dataclasses.replace(
+        run_config,
+        heads=(dataclasses.replace(
+            head0, loss=dataclasses.replace(head0.loss, nnpnu_eta=nnpnu_eta)
+        ),),
+    )
     head_cfg = run_config.heads[0]
 
     meta, cls = load_cache(config.CCA_EMBED_CACHE_DIR / suffix)
@@ -85,25 +94,39 @@ def main(prior, suffix="relevance_train", threshold=0.5, epochs=7, max_steps=Non
     )
     n_pos_us = int((table["cca_label"] == 1).sum())
     print(f"positives US-restricted: {n_pos_us}/{n_pos_all} kept")  # LOG
+
+    # Reliable negatives (label -1): confidently-foreign, no-US-footprint articles
+    # carved out of the unlabeled background. eta=0 ignores them (back-compat); the
+    # loss only weights them when nnpnu_eta>0.
+    reliable_neg_ids = pl.read_parquet(RELEVANCE_DIR / "reliable_negatives.parquet")["id"].to_list()
+    table = table.with_columns(pl.col("id").is_in(reliable_neg_ids).alias("reliable_neg"))
+    n_neg = int(table["reliable_neg"].sum())
+    print(f"reliable negatives: {n_neg} (nnpnu_eta={nnpnu_eta})")  # LOG
     if holdout_ids:
         print(f"holdout: dropping {len(holdout_ids)} ids from training pool")  # LOG
-    splits = create_cca_doca_data(table, holdout_ids=holdout_ids)
+    splits = create_relevance_data(table, holdout_ids=holdout_ids)
 
     pos_tr = _gather(cls, splits["train"]["pos"], 1.0)
+    neg_tr = _gather(cls, splits["train"]["neg"], -1.0)
     unl_tr = _gather(cls, splits["train"]["unl"], 0.0)
     pos_va = _gather(cls, splits["val"]["pos"], 1.0)
+    neg_va = _gather(cls, splits["val"]["neg"], -1.0)
     unl_va = _gather(cls, splits["val"]["unl"], 0.0)
     n_pos_tr, n_pos_va = pos_tr[0].shape[0], pos_va[0].shape[0]
-    print(f"train pos={n_pos_tr} unl={unl_tr[0].shape[0]} | "
-          f"val pos={n_pos_va} unl={unl_va[0].shape[0]} | prior={prior}")  # LOG
+    print(f"train pos={n_pos_tr} neg={neg_tr[0].shape[0]} unl={unl_tr[0].shape[0]} | "
+          f"val pos={n_pos_va} neg={neg_va[0].shape[0]} unl={unl_va[0].shape[0]} | prior={prior}")  # LOG
 
+    # Three-stream Ratio Batch: pos, reliable-neg, unlabeled. Weights sum to 1;
+    # the reliable-neg stream is small (neg_weight) but guaranteed-present so the
+    # PN term gets signal every batch when eta>0.
+    tp, vp = run_config.ratio_batch.train_pos, run_config.ratio_batch.val_pos
     train_set = dataset_from_embeddings(
-        SHUFFLE_BUFFER, BATCH_SIZE, data=[pos_tr, unl_tr],
-        weights=[run_config.ratio_batch.train_pos, 1 - run_config.ratio_batch.train_pos],
+        SHUFFLE_BUFFER, BATCH_SIZE, data=[pos_tr, neg_tr, unl_tr],
+        weights=[tp, neg_weight, 1 - tp - neg_weight],
     )
     val_set = dataset_from_embeddings(
-        SHUFFLE_BUFFER, BATCH_SIZE, data=[pos_va, unl_va],
-        weights=[run_config.ratio_batch.val_pos, 1 - run_config.ratio_batch.val_pos],
+        SHUFFLE_BUFFER, BATCH_SIZE, data=[pos_va, neg_va, unl_va],
+        weights=[vp, neg_weight, 1 - vp - neg_weight],
     )
     steps_per_epoch = math.floor(n_pos_tr / (BATCH_SIZE * run_config.ratio_batch.train_pos))
     validation_steps = max(1, math.floor(n_pos_va / (BATCH_SIZE * run_config.ratio_batch.val_pos)))
@@ -115,7 +138,11 @@ def main(prior, suffix="relevance_train", threshold=0.5, epochs=7, max_steps=Non
 
     head = ClassificationHead(
         hidden_dim=head_cfg.hidden_dim,
-        loss_fn=FLPULoss(prior=head_cfg.loss.prior, kiryo_clawback=head_cfg.loss.kiryo_clawback),
+        loss_fn=FLPULoss(
+            prior=head_cfg.loss.prior,
+            kiryo_clawback=head_cfg.loss.kiryo_clawback,
+            nnpnu_eta=head_cfg.loss.nnpnu_eta,
+        ),
         metrics=make_cca_metrics() + make_distribution_metrics(run_config.diagnostics),
         name=head_cfg.name,
         expose_loss_components=run_config.diagnostics.enable_loss_components,
@@ -178,10 +205,14 @@ if __name__ == "__main__":
     ap.add_argument("--holdout-ids", default=None,
                     help="parquet of ids (with `id` col) to drop from the unlabeled pool")
     ap.add_argument("--out", default=None, help="weights output path")
+    ap.add_argument("--eta", type=float, default=0.0,
+                    help="nnPNU PU<->PN mixing weight (0 = pure nnPU)")
+    ap.add_argument("--neg-weight", type=float, default=0.15,
+                    help="reliable-negative Ratio-Batch sampling weight")
     args = ap.parse_args()
     main(
         prior=args.prior, suffix=args.suffix, threshold=args.threshold,
         epochs=args.epochs, max_steps=args.max_steps,
         holdout_ids=_load_holdout_ids(args.holdout_ids),
-        weights_path=args.out,
+        weights_path=args.out, nnpnu_eta=args.eta, neg_weight=args.neg_weight,
     )
