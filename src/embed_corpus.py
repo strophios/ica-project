@@ -227,6 +227,11 @@ def main(
     append=False,
     corpus_subdir="api_corpus",
     year_column="year",
+    lead_column="lead_paragraph",
+    label_column=None,
+    include_year=True,
+    limit=None,
+    source_pattern=None,
 ):
     keras.config.set_dtype_policy(config.DTYPE_POLICY)
     keras.utils.set_random_seed(200)
@@ -238,19 +243,38 @@ def main(
     # same canonical cache rather than overwriting shard_000.
     shard_offset = len(list(cache_dir.glob("shard_*_cls.npy"))) if append else 0
 
-    # Load corpus (id, headline, lead_paragraph, year, headline_with_lead). The LDC
-    # corpus partitions on `publication_year`, the API corpus carries `year`; both
-    # are normalized to `year` here so the filter + meta downstream are uniform.
+    # Load corpus (id, headline, <lead_column>, [year], [label_column],
+    # headline_with_lead). The API corpus carries `year`; the LDC corpus partitions
+    # on `publication_year` (normalized to `year`). The US-filter training source
+    # (`us_filter/ldc_labeled.parquet`) has NO year column and a `stripped_text`
+    # lead channel — so for that case: include_year=False, lead_column="stripped_text",
+    # label_column="us_label".
+    addl = [year_column] if include_year else []
+    if label_column is not None:
+        addl.append(label_column)
     corpus = data_from_parquet(
-        config.PROJECT_ROOT, corpus_subdir, addl_columns=[year_column],
-        lead_column="lead_paragraph",
+        config.PROJECT_ROOT, corpus_subdir, addl_columns=addl,
+        lead_column=lead_column, pattern=source_pattern,
     )
-    if year_column != "year":
+    if include_year and year_column != "year":
         corpus = corpus.rename({year_column: "year"})
+    # Drop unlabeled rows when a label channel is requested (mirrors
+    # create_us_filter_data's null-label drop) — embedding them would waste the pass.
+    if label_column is not None:
+        kept = corpus.filter(pl.col(label_column).is_not_null())
+        print(f"label filter {label_column} non-null: {kept.height}/{corpus.height}")  # LOG
+        corpus = kept
     if years is not None:
+        if not include_year:
+            raise ValueError("--years requires a year column (include_year is False)")
         lo, hi = years
         corpus = corpus.filter(pl.col("year").cast(pl.Int64).is_between(lo, hi))
         print(f"year filter {lo}-{hi}: {corpus.height} articles")  # LOG
+    # Smoke-test slice: head(limit) BEFORE selection, no year needed (unlike the
+    # stratified sample path) — for verifying a new corpus/channel cheaply.
+    if limit is not None:
+        corpus = corpus.head(limit)
+        print(f"limit: head({limit}) -> {corpus.height} articles")  # LOG
 
     include_ids = None
     if include_ids_path is not None:
@@ -292,7 +316,10 @@ def main(
         us_logit = np.asarray(preds["us"], dtype=np.float32).reshape(-1)
         if not np.isfinite(cls).all() or not np.isfinite(us_logit).all():
             raise ValueError(f"shard {idx}: non-finite embeddings/logits produced")
-        meta = chunk.select(["id", "year"]).with_columns(
+        meta_cols = ["id"] + (["year"] if include_year else [])
+        if label_column is not None:
+            meta_cols.append(label_column)
+        meta = chunk.select(meta_cols).with_columns(
             pl.Series("us_logit", us_logit)
         )
         write_shard(cache_dir, shard_offset + idx, cls, meta)
@@ -309,6 +336,8 @@ def main(
     )
     prov["years"] = list(years) if years is not None else None
     prov["shard_offset"] = shard_offset
+    prov["lead_column"] = lead_column
+    prov["label_column"] = label_column
     (cache_dir / f"provenance.{shard_offset:03d}.json").write_text(
         json.dumps(prov, indent=2)
     )
@@ -334,6 +363,18 @@ if __name__ == "__main__":
                     help="corpus subdir under the data root (e.g. api_corpus, ldc_corpus)")
     ap.add_argument("--year-column", default="year",
                     help="name of the year column in the corpus (LDC: publication_year)")
+    ap.add_argument("--lead-column", default="lead_paragraph",
+                    help="text column feeding headline+lead (US filter: stripped_text)")
+    ap.add_argument("--label-column", default=None,
+                    help="label column to carry into shard meta + drop nulls "
+                         "(US-filter training cache: us_label)")
+    ap.add_argument("--no-year", dest="include_year", action="store_false",
+                    help="source has no year column (e.g. us_filter/ldc_labeled.parquet)")
+    ap.add_argument("--limit", type=int, default=None,
+                    help="embed only the first N rows (smoke test; no stratification)")
+    ap.add_argument("--source-pattern", default=None,
+                    help="exact parquet path under the data root (overrides --corpus "
+                         "glob; e.g. us_filter/ldc_labeled.parquet)")
     args = ap.parse_args()
     years = None
     if args.years is not None:
@@ -345,4 +386,7 @@ if __name__ == "__main__":
         shard_size=args.shard_size, batch_size=args.batch_size,
         years=years, append=args.append,
         corpus_subdir=args.corpus, year_column=args.year_column,
+        lead_column=args.lead_column, label_column=args.label_column,
+        include_year=args.include_year, limit=args.limit,
+        source_pattern=args.source_pattern,
     )

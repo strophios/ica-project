@@ -3,10 +3,18 @@ import tensorflow as tf
 
 
 def data_from_parquet(
-    project_root, db_folder="ldc_corpus", addl_columns=None, lead_column="lead_paragraph"
+    project_root, db_folder="ldc_corpus", addl_columns=None, lead_column="lead_paragraph",
+    pattern=None,
 ):
+    # `pattern` (relative to project_root) overrides the default recursive glob.
+    # Needed when a folder holds multiple parquets with different schemas — e.g.
+    # us_filter/ contains both ldc_labeled.parquet and audit/api_ldc_matched.parquet
+    # (the latter lacking `id`), so the default `us_filter/**/*.parquet` glob fails
+    # with ColumnNotFoundError. Pass pattern="us_filter/ldc_labeled.parquet" to read
+    # exactly one file. Default (None) preserves the `{db_folder}/**/*.parquet` glob.
+    glob = pattern if pattern is not None else f"{db_folder}/**/*.parquet"
     ldc_pq = pl.scan_parquet(
-        f"{project_root}/{db_folder}/**/*.parquet", hive_partitioning=True
+        f"{project_root}/{glob}", hive_partitioning=True
     )
     cols_to_select = ["id", "headline", lead_column]
     if addl_columns is not None:
