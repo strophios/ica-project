@@ -1,11 +1,12 @@
 # Project state and data map
 
-*Last updated: 2026-06-18. Interim orientation note. The top-level `CLAUDE.md` (2026-06-10)
-and `README.md` (April) predate the entire `cca-doca-retrain` arc and are stale on the data
-layout, the label source, and the model state. This note is the accurate working reference
-until that reconciliation lands (deferred, Saturday tier). It is a snapshot, not a contract —
-lead facts are verified against the filesystem on the date above. Updated 06-18 after the US
-filter was retrained + calibrated and the CCA models were reconciled against it.*
+*Last updated: 2026-06-19. The **data/artifact MAP** — where things live and what
+state they're in. For **what's next / deferred**, see `docs/notes/roadmap.md` (the
+live roadmap + index). The top-level `CLAUDE.md` (2026-06-10) and `README.md`
+(April) predate the entire `cca-doca-retrain` arc and are stale; full reconciliation
+is deferred (a roadmap item). This note is a snapshot, not a contract — lead facts
+are verified against the filesystem on the date above. Updated 06-19 after the
+relevance head + smarter US gate landed (see below).*
 
 ## The one-paragraph version
 
@@ -135,13 +136,22 @@ applied to the full API corpus (`us_filter/api_us_scores/` absent — that's the
   0.90 (street) vs `cca_descriptor`; US-restricted yield ~4,524 events @ score 1.0 (~3,100 untagged).
 - Collaborator memo finalized: `docs/reports/cca-collaborator-memo.md`.
 
-**Open gaps:**
-- **Immigration head: not built — the next major piece.** The 500 gold rows carry `immig` codes
-  (eval only); trustworthy training positives are the open problem (the crux of the multi-head work).
-- Multi-head ICA model (US filter → CCA + immigration → ICA): not assembled.
+**Done 2026-06-19 (relevance head + smarter US gate):**
+- **Immigrant-relevance head — built** (`relevance.weights.h5`, η=0, fused-gated).
+  Positives = curated immigration-content descriptors ∪ 466 ICA anchors, US-restricted,
+  FLPU features-mode; gold AUC ≈ 0.94. The nnPNU reliable-negative experiment was a
+  clean negative result (η=0 canonical). See `relevance-head-handoff.md`.
+- **Smarter US gate** — `src/preproc/us_location.py` fuses the dateline ML filter with
+  a location signal (`any_us`/`any_not_us`); the fused gate halves the foreign-event
+  leak. Threaded into `run_relevance`. Deferred gate options B/C in `roadmap.md`.
+- New data products (gitignored): `relevance/{candidates,ica_anchors,reliable_negatives}.parquet`,
+  `cca_doca/embed_cache/relevance_{pos,train}/`, `relevance/relevance*.weights.h5`.
+
+**Open gaps (full live list in `roadmap.md`):**
+- Multi-head ICA model (US gate → CCA + relevance → ICA): not assembled — the next major piece.
 - No full-corpus apply outputs (`api_cca_scores/`, `api_us_scores/` absent) — the Saturday apply step.
 - Larger hand-coded gold set (only 500 of 2,553 drawn; street-dominated) to tighten precision SEs.
-- Full CLAUDE.md/README reconciliation (this note is the interim stand-in).
+- Full CLAUDE.md/README reconciliation (banners added 06-19; full rewrite deferred).
 
 **Latent bug fixed this session:** `data_from_parquet` globbed `us_filter/**/*.parquet` greedily,
 pulling in `audit/api_ldc_matched.parquet` (no `id` column → crash). Fixed with an additive `pattern`

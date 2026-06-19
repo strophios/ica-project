@@ -1,5 +1,12 @@
 # CLAUDE.md
 
+> ⚠️ **STALE as of the `cca-doca-retrain` branch (2026-06-10 content).** This file
+> predates the CCA/DoCA retrain, the immigrant-relevance head, and the smarter US
+> gate, and is out of date on the data layout, label sources, and model state.
+> **For current state: `docs/notes/project-state-and-data-map.md` (data/artifact
+> map) and `docs/notes/roadmap.md` (what's next / deferred).** Full reconciliation
+> of this file is a deferred roadmap item (after a working multi-head model lands).
+
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
 *Last updated: 2026-06-10. Orientation doc for the project as a whole — current state and contracts. For tier-by-tier history (what landed when, commit-level), see `docs/notes/tiers-and-checkpoints.md`; for per-tier design reasoning, the `docs/notes/tier{2,3,4,5}-design.md` docs. For the US/not-US pre-filter (the second classification head, plus its R dateline-labeling pipeline), see the "US/not-US Pre-Filter" section below and `r/CLAUDE.md`.*

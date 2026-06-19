@@ -1,5 +1,9 @@
 # CCA/DoCA Retrain — Handoff & Tuning Plan
 
+> **Historical arc detail.** The live roadmap / deferred list (incl. the Saturday
+> Tier) is consolidated in `docs/notes/roadmap.md`; this doc retains the CCA/DoCA
+> narrative and reasoning.
+
 *Created 2026-06-15 (evening). Branch `cca-doca-retrain`. Read with
 `docs/notes/cca-doca-retrain-design.md` (design) and the `docs/implementation-plans/2026-06-15-cca-doca-retrain/`
 phase files. This doc captures where today's build landed and the plan for tomorrow:

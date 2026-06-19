@@ -1,5 +1,11 @@
 # ICA Project: Transformer-Based Classification for Historical Protest Events
 
+> ⚠️ **STALE (April content).** This README predates the `cca-doca-retrain` arc
+> (CCA/DoCA retrain, US filter, immigrant-relevance head, smarter US gate) and is
+> out of date on data layout and model state. **For current state see
+> `docs/notes/project-state-and-data-map.md` and `docs/notes/roadmap.md`.** Full
+> rewrite is deferred until a working multi-head model lands.
+
 A machine learning system for identifying immigrant collective action (ICA) events in 150+ years of *New York Times* coverage, using positive-unlabeled (PU) learning with a RoBERTa backbone.
 
 ## The Research Problem

@@ -1,5 +1,9 @@
 # Immigrant-relevance head — handoff & deferred work
 
+> **Historical arc detail.** The live roadmap / deferred list is consolidated in
+> `docs/notes/roadmap.md`; this doc retains the relevance-head narrative and the
+> reasoning behind the nnPNU negative result and the fused gate.
+
 *Created 2026-06-19. Branch `cca-doca-retrain`. Captures the relevance-head arc
 (pass-1 → nnPNU negative result → smarter US gate) and the explicit deferred
 items, so the multi-head assembly can be picked up cleanly. Read with
