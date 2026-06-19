@@ -120,6 +120,53 @@ def location_signals(
     return (loc_us or meta_us), (loc_not or meta_not)
 
 
+def compute_location_signals(
+    articles: pl.DataFrame, places: PlaceSets | None = None
+) -> pl.DataFrame:
+    """Pure: from an articles frame (`id`, `keywords` list-struct, `news_desk`,
+    `section_name`) compute per-article `any_us` / `any_not_us`.
+
+    Vectorized: classify the UNIQUE glocation values once (far fewer than rows),
+    aggregate `any` per id, then fuse the desk/section signals. Articles with no
+    location keyword fall back to their desk/section signal (both False if neither).
+    """
+    places = places or load_place_sets()
+    glocs = (
+        articles.select("id", "keywords")
+        .explode("keywords")
+        .unnest("keywords")
+        .filter(pl.col("type").str.contains("location"))  # matches "glocations"
+        .select("id", pl.col("value").alias("loc"))
+    )
+    uniq = glocs.select("loc").unique().with_columns(
+        is_us=pl.col("loc").map_elements(lambda v: is_us_place(v, places), return_dtype=pl.Boolean),
+        is_for=pl.col("loc").map_elements(lambda v: is_foreign_place(v, places), return_dtype=pl.Boolean),
+    )
+    per = (
+        glocs.join(uniq, on="loc", how="left")
+        .group_by("id")
+        .agg(loc_us=pl.col("is_us").any(), loc_not=pl.col("is_for").any())
+    )
+    out = articles.select("id", "news_desk", "section_name").join(per, on="id", how="left")
+    # fill_null("") on desk/section so is_in returns False (not null) on missing
+    # metadata; null OR False is null under Kleene logic and would leak through.
+    section = pl.col("section_name").str.to_lowercase().fill_null("")
+    desk = pl.col("news_desk").str.to_lowercase().fill_null("")
+    return out.select(
+        "id",
+        any_us=(
+            pl.col("loc_us").fill_null(False)
+            | section.is_in(list(SECTION_US))
+            | desk.is_in(list(DSK_US))
+        ),
+        any_not_us=(
+            pl.col("loc_not").fill_null(False)
+            | section.is_in(list(SECTION_NON_US))
+            | desk.is_in(list(DSK_NON_US))
+        ),
+    )
+
+
 def is_clearly_foreign(any_us: bool, any_not_us: bool) -> bool:
     """True when the event is clearly foreign: a foreign location signal and NO US
     one. This is what the fused gate excludes on top of the ML US filter."""

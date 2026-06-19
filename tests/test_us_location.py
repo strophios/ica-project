@@ -1,8 +1,10 @@
 """Tests for the US/not-US location heuristic (src/preproc/us_location.py)."""
 
+import polars as pl
 import pytest
 
 from src.preproc.us_location import (
+    compute_location_signals,
     is_clearly_foreign,
     is_foreign_place,
     is_us_place,
@@ -55,6 +57,27 @@ class TestLocationSignals:
 
     def test_empty_signals(self):
         assert location_signals([], None, None) == (False, False)
+
+
+def _kw(*locs):
+    return [{"type": "glocations", "value": v, "rank": i + 1, "major": "N"}
+            for i, v in enumerate(locs)]
+
+
+class TestComputeLocationSignals:
+    def test_per_article_signals(self):
+        df = pl.DataFrame({
+            "id": ["foreign", "diaspora", "domestic", "nokw"],
+            "keywords": [_kw("Uganda"), _kw("Cuba", "Miami (Fla)"), _kw("California"), None],
+            "news_desk": ["Foreign Desk", None, None, "National Desk"],
+            "section_name": ["World", None, None, None],
+        })
+        out = compute_location_signals(df).sort("id")
+        d = {r["id"]: (r["any_us"], r["any_not_us"]) for r in out.iter_rows(named=True)}
+        assert d["foreign"] == (False, True)     # foreign loc + Foreign Desk
+        assert d["diaspora"] == (True, True)      # US enclave + foreign homeland
+        assert d["domestic"] == (True, False)     # US state
+        assert d["nokw"] == (True, False)         # National Desk, no glocation
 
 
 class TestFusedGate:
