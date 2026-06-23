@@ -283,9 +283,13 @@ def main():
     # =========================================================================
     # Print hand-coding worklist count
     # =========================================================================
-    # Count rows where us_event==True AND cca_event==True (need hand-coding of ica_event)
+    # Count rows that still NEED ica_event hand-coding: us_event==True AND
+    # cca_event==True AND ica_event is null. Anchors are us∧cca but already
+    # carry ica_event=True (confirmation-only), so they are excluded here.
     worklist = full_template.filter(
-        (pl.col("us_event")) & (pl.col("cca_event"))
+        (pl.col("us_event"))
+        & (pl.col("cca_event"))
+        & (pl.col("ica_event").is_null())
     )
     worklist_count = worklist.height
     print(f"\n✓ Hand-coding worklist size: {worklist_count} rows", flush=True)
