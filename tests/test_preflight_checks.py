@@ -259,3 +259,19 @@ class TestLdcGoldCoverageVerdict:
         verdict = ldc_gold_coverage_verdict(n_apply_ids=1000, n_with_gold_label=0)
         assert verdict.status == "PASS"
         assert "0" in verdict.detail
+
+    def test_sub_100_percent_coverage(self):
+        """Verify numerator counts gold-labeled ids, not all id-presence.
+
+        Regression test for the bug where _get_ldc_gold_coverage counted
+        all labeled_df ids (100%) instead of ids with non-null us_label (56.5%).
+        The verdict detail must show a sub-100% fraction when the numerator
+        (gold label count) is less than the denominator (apply id count).
+        """
+        # Real-world data: 352,777 ids with non-null us_label out of 624,842 LDC apply ids
+        verdict = ldc_gold_coverage_verdict(n_apply_ids=624842, n_with_gold_label=352777)
+        assert verdict.status == "PASS"
+        # The detail should reflect the sub-100% fraction, not a trivial 100%
+        assert "56.4%" in verdict.detail or "56.5%" in verdict.detail
+        assert "352777" in verdict.detail
+        assert "624842" in verdict.detail

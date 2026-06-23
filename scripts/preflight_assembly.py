@@ -172,9 +172,12 @@ def _get_ldc_gold_coverage() -> tuple[int, int]:
                 year_df = pl.scan_parquet(str(year_partition / "*.parquet")).select("id").collect()
                 ldc_ids_set.update(year_df.select("id").to_series().to_list())
 
-        # Count gold labels in that range
-        labeled_ids = set(labeled_df.select("id").to_series().to_list())
-        ldc_labeled = ldc_ids_set & labeled_ids
+        # Count gold labels in that range: ids with non-null us_label (conflict rows
+        # have null us_label and don't count as gold). The numerator measures the count
+        # of ids with actual gold us_label values, not merely id-presence.
+        labeled_df_gold = labeled_df.filter(pl.col("us_label").is_not_null())
+        labeled_ids_gold = set(labeled_df_gold.select("id").to_series().to_list())
+        ldc_labeled = ldc_ids_set & labeled_ids_gold
 
         return len(ldc_ids_set), len(ldc_labeled)
     except (OSError, pl.exceptions.ComputeError, KeyError):
