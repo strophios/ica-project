@@ -10,14 +10,95 @@ from __future__ import annotations
 
 import pytest
 
+import polars as pl
+
 from src.preflight.checks import (
     Verdict,
+    gold_coverage_counts,
     us_weights_verdict,
     calibration_presence_verdict,
     doca_freshness_verdict,
     ldc_channel_verdict,
     ldc_gold_coverage_verdict,
 )
+
+
+class TestGoldCoverageCounts:
+    """Test gold_coverage_counts pure function (non-null us_label counting)."""
+
+    def test_counts_non_null_us_label_intersection(self):
+        """Count ids with non-null us_label in the LDC id set."""
+        ldc_ids = {"id-1", "id-2", "id-3", "id-4", "id-5"}
+
+        labeled_df = pl.DataFrame({
+            "id": ["id-1", "id-2", "id-3", "id-6", "id-7"],
+            "us_label": [True, False, None, True, False],
+        })
+
+        n_apply_ids, n_with_gold = gold_coverage_counts(ldc_ids, labeled_df)
+
+        # n_apply_ids = len(ldc_ids) = 5
+        assert n_apply_ids == 5
+        # n_with_gold = count of ids in ldc_ids WITH non-null us_label
+        # id-1 (True, non-null, in ldc_ids): yes
+        # id-2 (False, non-null, in ldc_ids): yes
+        # id-3 (None, null, in ldc_ids): NO
+        # id-6 (True, non-null, NOT in ldc_ids): NO
+        # id-7 (False, non-null, NOT in ldc_ids): NO
+        assert n_with_gold == 2
+
+    def test_ignores_null_us_label(self):
+        """Null us_label rows (conflicts) do not count as gold."""
+        ldc_ids = {"id-1", "id-2"}
+
+        labeled_df = pl.DataFrame({
+            "id": ["id-1", "id-2"],
+            "us_label": [None, None],
+        })
+
+        n_apply_ids, n_with_gold = gold_coverage_counts(ldc_ids, labeled_df)
+
+        assert n_apply_ids == 2
+        assert n_with_gold == 0  # No non-null us_label values
+
+    def test_ignores_ids_not_in_ldc_set(self):
+        """Ids not in ldc_ids set do not count, even with non-null us_label."""
+        ldc_ids = {"id-1", "id-2"}
+
+        labeled_df = pl.DataFrame({
+            "id": ["id-1", "id-2", "id-3", "id-4"],
+            "us_label": [True, False, True, True],
+        })
+
+        n_apply_ids, n_with_gold = gold_coverage_counts(ldc_ids, labeled_df)
+
+        assert n_apply_ids == 2
+        # id-1 (True, in ldc_ids): yes
+        # id-2 (False, in ldc_ids): yes
+        # id-3 (True, NOT in ldc_ids): no
+        # id-4 (True, NOT in ldc_ids): no
+        assert n_with_gold == 2
+
+    def test_real_world_scenario(self):
+        """Verify 56.5% coverage scenario from real data."""
+        # Simulate 624842 LDC ids, 352777 with non-null us_label
+        ldc_ids = {f"id-{i}" for i in range(1, 624843)}  # 624842 ids
+
+        # Create labeled_df with:
+        # - 352777 rows with non-null us_label
+        # - 272065 rows with null us_label (624842 - 352777)
+        labeled_rows = []
+        for i in range(1, 352778):  # 352777 non-null rows
+            labeled_rows.append({"id": f"id-{i}", "us_label": True})
+        for i in range(352778, 624843):  # 272065 null rows
+            labeled_rows.append({"id": f"id-{i}", "us_label": None})
+
+        labeled_df = pl.DataFrame(labeled_rows)
+
+        n_apply_ids, n_with_gold = gold_coverage_counts(ldc_ids, labeled_df)
+
+        assert n_apply_ids == 624842
+        assert n_with_gold == 352777
 
 
 class TestVerdictDataclass:

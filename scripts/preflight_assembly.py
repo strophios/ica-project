@@ -22,6 +22,7 @@ from src.calibration.sidecar import calibration_path_for_weights
 from src.preflight.checks import (
     calibration_presence_verdict,
     doca_freshness_verdict,
+    gold_coverage_counts,
     ldc_channel_verdict,
     ldc_gold_coverage_verdict,
     us_weights_verdict,
@@ -141,6 +142,9 @@ def _get_doca_mtimes() -> dict[str, float | None]:
 def _get_ldc_gold_coverage() -> tuple[int, int]:
     """Get LDC 1996-2007 apply id count and gold label coverage.
 
+    Gathers I/O (reads LDC corpus and ldc_labeled parquet), then delegates
+    counting logic to pure gold_coverage_counts() function.
+
     Returns:
         (n_apply_ids, n_with_gold_label) tuple
     """
@@ -172,14 +176,8 @@ def _get_ldc_gold_coverage() -> tuple[int, int]:
                 year_df = pl.scan_parquet(str(year_partition / "*.parquet")).select("id").collect()
                 ldc_ids_set.update(year_df.select("id").to_series().to_list())
 
-        # Count gold labels in that range: ids with non-null us_label (conflict rows
-        # have null us_label and don't count as gold). The numerator measures the count
-        # of ids with actual gold us_label values, not merely id-presence.
-        labeled_df_gold = labeled_df.filter(pl.col("us_label").is_not_null())
-        labeled_ids_gold = set(labeled_df_gold.select("id").to_series().to_list())
-        ldc_labeled = ldc_ids_set & labeled_ids_gold
-
-        return len(ldc_ids_set), len(ldc_labeled)
+        # Delegate counting to pure function (no I/O)
+        return gold_coverage_counts(ldc_ids_set, labeled_df)
     except (OSError, pl.exceptions.ComputeError, KeyError):
         # Catch expected I/O and schema issues; unexpected errors propagate
         return 0, 0

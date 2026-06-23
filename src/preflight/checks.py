@@ -11,6 +11,8 @@ from __future__ import annotations
 import dataclasses
 from typing import Literal
 
+import polars as pl
+
 
 @dataclasses.dataclass(frozen=True)
 class Verdict:
@@ -21,6 +23,34 @@ class Verdict:
     status: Literal["PASS", "WARN", "FAIL"]
     detail: str
     remediation: str | None = None
+
+
+def gold_coverage_counts(
+    ldc_ids: set[str], labeled_df: pl.DataFrame
+) -> tuple[int, int]:
+    """Count LDC apply ids and those with non-null gold us_label.
+
+    Pure function: no I/O, operates only on in-memory DataFrame.
+
+    The numerator counts ids with NON-NULL us_label (gold labels), not all
+    id-presence. Conflict rows (null us_label) do not count as gold.
+
+    Args:
+        ldc_ids: set of LDC 1996-2007 apply ids
+        labeled_df: DataFrame with id and us_label columns
+
+    Returns:
+        (n_apply_ids, n_with_gold_label) tuple where:
+        - n_apply_ids: len(ldc_ids)
+        - n_with_gold_label: count of ldc_ids whose id appears in labeled_df
+          rows with non-null us_label
+    """
+    # Count gold: ids with non-null us_label, intersected with ldc_ids
+    labeled_df_gold = labeled_df.filter(pl.col("us_label").is_not_null())
+    labeled_ids_gold = set(labeled_df_gold.select("id").to_series().to_list())
+    ldc_labeled = ldc_ids & labeled_ids_gold
+
+    return len(ldc_ids), len(ldc_labeled)
 
 
 def us_weights_verdict(
