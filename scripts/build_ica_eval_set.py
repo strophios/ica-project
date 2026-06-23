@@ -28,7 +28,6 @@ from src.validation.ica_eval import (
     derive_ica_negatives,
     reconcile_immig_column,
     reserve_anchor_holdout,
-    assemble_holdout_ids,
 )
 from src.validation.build_ica_coding_template import build_ica_template
 from src.validation.schema import validate_gold_set
@@ -68,7 +67,7 @@ def _apply_relevance_scores(scored: pl.DataFrame) -> pl.DataFrame:
     If the relevance weights are absent, emit a clear warning and continue
     without relevance scores (boundary draw will use a dummy relevance_logit=0).
     """
-    relevance_weights_path = config.CCA_DOCA_DIR / "relevance.weights.h5"
+    relevance_weights_path = config.RELEVANCE_DOCA_WEIGHTS
 
     if not relevance_weights_path.exists():
         print(
@@ -87,12 +86,12 @@ def _apply_relevance_scores(scored: pl.DataFrame) -> pl.DataFrame:
 
     # Load cached embeddings for the full pool
     embed_cache_dir = config.CCA_EMBED_CACHE_DIR / "full"
-    cls = load_cache(str(embed_cache_dir))
+    df_cache, cls = load_cache(embed_cache_dir)
 
     # Apply relevance model
     relevance_logits = apply_relevance_model(cls, weights_path=relevance_weights_path)
 
-    # Map back to scored dataframe by row index
+    # Map back to scored dataframe by emb_row alignment
     scored = scored.with_columns(
         pl.Series("relevance_logit", relevance_logits, dtype=pl.Float32)
     )
@@ -142,7 +141,7 @@ def main():
         pl.col("us_event").is_not_null() & pl.col("cca_event").is_not_null()
     ).clone()
 
-    # Re-compute us_event using the current US gate (combine dateline + location)
+    # Re-compute us_event using the current US gate (fused gate + Platt calibration)
     # The coded-500 has headline+lead_paragraph, but we need to construct the
     # text column (headline + "</s>" + lead_paragraph) for the US model
     coded500_valid = coded500_valid.with_columns(
@@ -159,17 +158,15 @@ def main():
 
         texts = coded500_valid["_text_for_us"].to_list()
         us_scores = apply_us_model(texts)
-        recomputed_us_logits = us_scores  # These are calibrated [0,1] scores
-
-        # Convert calibrated scores to binary us_event at threshold 0.5
-        recomputed_us_event = (recomputed_us_logits >= 0.5).to_list()
+        # apply_us_model returns calibrated [0,1] numpy array; threshold at 0.5
+        recomputed_us_event = (us_scores >= 0.5).tolist()
         coded500_valid = coded500_valid.with_columns(
             pl.Series("_recomputed_us_event", recomputed_us_event, dtype=pl.Boolean)
         )
 
-        # Drop rows where imported us_event disagrees with recomputed
+        # Drop rows where imported us_event disagrees with recomputed value
         original_count = coded500_valid.height
-        # Map STRING us_event (FALSE/TRUE) to bool if needed
+        # Ensure imported us_event is cast to boolean for comparison
         coded500_valid = coded500_valid.with_columns(
             pl.col("us_event").cast(pl.Boolean).alias("_imported_us_event")
         )
@@ -177,16 +174,16 @@ def main():
             pl.col("_imported_us_event") == pl.col("_recomputed_us_event")
         )
         dropped_count = original_count - coded500_valid.height
-        print(f"  Dropped {dropped_count} rows where us_event disagreed", flush=True)
+        print(f"  Dropped {dropped_count} rows where us_event disagreed with recomputed value", flush=True)
 
-        # Keep the recomputed value
+        # Keep the recomputed value (always use the current US gate)
         coded500_valid = coded500_valid.with_columns(
             pl.col("_recomputed_us_event").alias("us_event")
         ).drop("_imported_us_event", "_recomputed_us_event", "_text_for_us")
 
     except FileNotFoundError as e:
-        print(f"  WARNING: US filter weights missing ({e}). Keeping imported us_event.", flush=True)
-        coded500_valid = coded500_valid.drop("_text_for_us")
+        print(f"ERROR: US filter artifacts not found ({e}). Cannot re-confirm us_event. Aborting.", flush=True)
+        raise
 
     # =========================================================================
     # STEP 4: Draw the composed-score boundary sample
@@ -210,37 +207,80 @@ def main():
     print(f"  Boundary draw: {template.height} rows", flush=True)
 
     # =========================================================================
-    # STEP 5: Write the boundary-sample template and holdout id list
+    # STEP 5: Merge anchors, coded-500 survivors, and boundary sample
     # =========================================================================
-    print("\n[5/5] Writing outputs...", flush=True)
+    print("\n[5/5] Merging sources...", flush=True)
 
-    # The template is the boundary sample (already schema-conformant with null labels)
-    # Apply ICA label logic: set ica_event=False where us∧cca is False
-    template = derive_ica_negatives(template)
+    # Prepare anchor rows: dedupe by article_id, mark ica_event=True, tag stratum
+    anchor_rows = anchors.filter(
+        pl.col("article_id").is_in(anchor_holdout_ids)
+    ).unique(subset=["article_id"]).with_columns(
+        pl.lit(True).alias("ica_event"),
+        pl.lit("anchor").alias("sample_stratum"),
+    )
+    print(f"  Anchor rows (confirmed positives): {anchor_rows.height}", flush=True)
+
+    # Prepare coded-500 survivors: select schema-required columns, tag stratum
+    # Survivors are us_event==True ∧ cca_event==True ∧ passed us re-confirmation
+    coded_survivor_rows = coded500_valid.filter(
+        (pl.col("us_event")) & (pl.col("cca_event"))
+    ).with_columns(
+        pl.lit("coded_reuse").alias("sample_stratum"),
+    )
+    print(f"  Coded-500 survivors (hand-coding worklist): {coded_survivor_rows.height}", flush=True)
+
+    # Merge all sources into a single frame
+    # Ensure all have schema-conformant columns (some may be missing; fill with nulls)
+    required_cols = set([
+        "id", "corpus", "year", "news_desk", "section_name", "headline",
+        "lead_paragraph", "sample_stratum", "us_event", "event_location",
+        "cca_event", "event_type", "immig_relevant", "ica_event", "alt_corpus_id",
+        "cca_logit", "cca_score", "relevance_logit", "relevance_score",
+    ])
+
+    def pad_frame(df: pl.DataFrame) -> pl.DataFrame:
+        """Add any missing columns as null."""
+        for col in required_cols:
+            if col not in df.columns:
+                df = df.with_columns(pl.lit(None).alias(col))
+        return df.select(sorted(required_cols))
+
+    anchor_rows = pad_frame(anchor_rows)
+    coded_survivor_rows = pad_frame(coded_survivor_rows)
+    template = pad_frame(template)
+
+    # Concatenate all sources
+    full_template = pl.concat([anchor_rows, coded_survivor_rows, template])
+    print(f"  Total merged rows: {full_template.height}", flush=True)
+
+    # Apply ICA label logic: set ica_event=False where us_event==False OR cca_event==False
+    # (Anchors already have ica_event=True; coded survivors keep it null; template has it already set/null)
+    full_template = derive_ica_negatives(full_template)
 
     # Validate against the schema
-    print("  Validating template against gold set schema...", flush=True)
-    validate_gold_set(template)
+    print("  Validating merged template against gold set schema...", flush=True)
+    validate_gold_set(full_template)
 
     # Write outputs
     template_output_path = config.VALIDATION_DIR / "ica_coding_template.parquet"
     holdout_output_path = config.VALIDATION_DIR / "ica_holdout_ids.parquet"
 
-    template.write_parquet(str(template_output_path))
-    print(f"  Wrote {template.height} template rows to {template_output_path}", flush=True)
+    full_template.write_parquet(str(template_output_path))
+    print(f"  Wrote {full_template.height} template rows to {template_output_path}", flush=True)
 
-    # Write holdout_ids as a parquet with id column (union of anchors + coded500)
+    # Write holdout_ids as a parquet with id column (union of anchors + coded500 + boundary)
     # These are the ids to exclude from retraining (Phases 3+)
-    holdout_ids = assemble_holdout_ids(anchor_holdout_ids, coded500_ids)
-    holdout_df = pl.DataFrame({"id": holdout_ids})
+    # Extract all article_ids that are reserved (anchors + coded survivors)
+    all_reserved_ids = sorted(set(anchor_holdout_ids) | set(coded500_ids))
+    holdout_df = pl.DataFrame({"id": all_reserved_ids})
     holdout_df.write_parquet(str(holdout_output_path))
-    print(f"  Wrote {len(holdout_ids)} holdout ids to {holdout_output_path}", flush=True)
+    print(f"  Wrote {len(all_reserved_ids)} holdout ids to {holdout_output_path}", flush=True)
 
     # =========================================================================
     # Print hand-coding worklist count
     # =========================================================================
     # Count rows where us_event==True AND cca_event==True (need hand-coding of ica_event)
-    worklist = template.filter(
+    worklist = full_template.filter(
         (pl.col("us_event")) & (pl.col("cca_event"))
     )
     worklist_count = worklist.height

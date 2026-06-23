@@ -142,6 +142,9 @@ CCA_DOCA_TABLE: Path = CCA_DOCA_DIR / "cca_doca_table.parquet"
 CCA_DOCA_WEIGHTS: Path = CCA_DOCA_DIR / "cca_doca.weights.h5"
 CCA_DOCA_SCORES_DIR: Path = CCA_DOCA_DIR / "api_cca_scores"
 
+# Relevance head artifacts (Phase 3 training output)
+RELEVANCE_DOCA_WEIGHTS: Path = PROJECT_ROOT / "relevance" / "relevance.weights.h5"
+
 
 # ---------------------------------------------------------------------------
 # Compute / precision

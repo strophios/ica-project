@@ -198,16 +198,6 @@ class TestReserveAnchorHoldout:
         assert hold1 == hold2
         assert train1 == train2
 
-    def test_different_seed_may_differ(self):
-        """Different seeds can produce different splits."""
-        df = pl.DataFrame({
-            "article_id": ["a", "b", "c", "d", "e", "f"],
-        })
-        hold1, _ = reserve_anchor_holdout(df, frac=0.5, seed=200)
-        hold2, _ = reserve_anchor_holdout(df, frac=0.5, seed=201)
-        # Not guaranteed to differ, but likely with enough data
-        # (at least one should be different with high probability)
-        # This is a weak test but demonstrates seed effect
 
     def test_frac_30_default(self):
         """Default frac=0.30 reserves ~30% (deterministic rounding)."""

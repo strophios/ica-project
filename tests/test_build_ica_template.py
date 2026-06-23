@@ -177,3 +177,37 @@ class TestBuildIcaTemplate:
         )
 
         assert (template["corpus"] == "api").all()
+
+    def test_build_ica_template_relevance_stratification_spans_both_high_and_low(self):
+        """Relevance stratification produces both high and low bands (guards Critical 1).
+
+        This test guards against the case where relevance scores collapse to a single
+        band (e.g., all zeros), which would break the composed-score stratification.
+        With real relevance logits spanning the range, we should see both relev_high
+        and relev_low strata present in the output.
+        """
+        scored = _make_synthetic_scored()
+        # _make_synthetic_scored spreads relevance logits from -2 to +2,
+        # so it should have both high (>=0.5) and low (<0.5) bands.
+
+        template = build_ica_template(
+            scored,
+            anchor_ids=[],
+            coded500_ids=[],
+            alloc={
+                "cca_high_relev_high": 20,
+                "cca_high_relev_low": 20,
+                "cca_mid_relev_high": 15,
+                "cca_mid_relev_low": 15,
+                "cca_low_relev_high": 15,
+                "cca_low_relev_low": 15,
+            },
+            seed=200
+        )
+
+        strata = set(template["sample_stratum"].unique().to_list())
+        # Both high and low relevance bands must be present
+        high_relev_strata = {s for s in strata if "relev_high" in s}
+        low_relev_strata = {s for s in strata if "relev_low" in s}
+        assert len(high_relev_strata) > 0, f"No high-relevance strata found. Strata: {strata}"
+        assert len(low_relev_strata) > 0, f"No low-relevance strata found. Strata: {strata}"

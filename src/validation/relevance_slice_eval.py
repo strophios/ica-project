@@ -20,7 +20,7 @@ from src.model_setup.assembly import build_feature_inference_model
 
 def apply_relevance_model(
     features: np.ndarray,
-    weights_path: Path | str = None,
+    weights_path: Path | str | None = None,
 ) -> np.ndarray:
     """Score cached feature vectors with the trained relevance head (Pattern 2 reload).
 
