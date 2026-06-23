@@ -29,6 +29,7 @@ def apply_us_model(
     texts: list[str],
     weights_path: Path | str = config.US_FILTER_CLASSIFIER_WEIGHTS,
     backbone=None,
+    skip_mismatch: bool = False,
 ) -> np.ndarray:
     """Apply calibrated US model to texts (Pattern 2: fresh head, loaded weights).
 
@@ -36,7 +37,7 @@ def apply_us_model(
     - Load UsRunConfig sidecar
     - Fresh ClassificationHead
     - build_inference_model
-    - load_weights(skip_mismatch=False)
+    - load_weights(skip_mismatch parameter controls strict vs. permissive load)
     - ClassifierPreprocessor in inference mode
     - predict + assert finite
     - load PlattCalibrator, transform logits -> calibrated us_score
@@ -45,6 +46,8 @@ def apply_us_model(
         texts: List of article texts (headline + lead_paragraph)
         weights_path: Path to trained US model weights
         backbone: Optional pre-built backbone (for testing; if None, loads from config)
+        skip_mismatch: If True, skip layers not in the weights file (for head-only weights).
+                       Default False (strict load, per project convention).
 
     Returns:
         Calibrated probability scores [0, 1], shape (len(texts),)
@@ -71,9 +74,8 @@ def apply_us_model(
         seq_length=run_config.seq_length,
     )
 
-    # Load weights. Use skip_mismatch=True to allow loading head-only weights
-    # (the backbone is separately loaded and frozen, so we only need head weights).
-    inference_model.load_weights(str(weights_path), skip_mismatch=True)
+    # Load weights with configurable skip_mismatch flag (default False for strict load).
+    inference_model.load_weights(str(weights_path), skip_mismatch=skip_mismatch)
 
     # Build preprocessor (inference mode)
     preproc = ClassifierPreprocessor(

@@ -21,12 +21,14 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import numpy as np
 import polars as pl
 
 import src.config as config
 from src.validation.ica_eval import (
     reconcile_immig_column,
     reserve_anchor_holdout,
+    assemble_eval_frame,
 )
 from src.validation.build_ica_coding_template import build_ica_template
 from src.validation.schema import validate_gold_set
@@ -93,7 +95,6 @@ def _apply_relevance_scores(scored: pl.DataFrame) -> pl.DataFrame:
     # Join relevance logits to scored by id (not positional alignment)
     # df_cache carries id column, so we can use it to align with scored
     # Cast relevance_logits to float32 for schema consistency
-    import numpy as np
     relevance_logits_f32 = np.asarray(relevance_logits, dtype=np.float32)
     logits_df = df_cache.select("id").with_columns(
         pl.Series("relevance_logit", relevance_logits_f32, dtype=pl.Float32)
@@ -161,7 +162,9 @@ def main():
         from src.validation.slice_eval import apply_us_model
 
         texts = coded500_valid["_text_for_us"].to_list()
-        us_scores = apply_us_model(texts, weights_path=config.US_FILTER_CLASSIFIER_FULL_WEIGHTS)
+        # Use skip_mismatch=True since US_FILTER_CLASSIFIER_FULL_WEIGHTS contains head-only weights
+        # (the backbone is separately loaded and frozen, so we only need head weights)
+        us_scores = apply_us_model(texts, weights_path=config.US_FILTER_CLASSIFIER_FULL_WEIGHTS, skip_mismatch=True)
         # apply_us_model returns calibrated [0,1] numpy array; threshold at 0.5
         recomputed_us_event = (us_scores >= 0.5).tolist()
         coded500_valid = coded500_valid.with_columns(
@@ -250,86 +253,13 @@ def main():
     )
     print(f"  Coded-500 survivors (hand-coding worklist): {coded_survivor_rows.height}", flush=True)
 
-    # Merge all sources into a single frame
-    # Ensure all have schema-conformant columns (some may be missing; fill with nulls)
-    required_cols = set([
-        "id", "corpus", "year", "news_desk", "section_name", "headline",
-        "lead_paragraph", "sample_stratum", "us_event", "event_location",
-        "cca_event", "event_type", "immig_relevant", "ica_event", "alt_corpus_id",
-        "cca_logit", "cca_score", "relevance_logit", "relevance_score",
-    ])
-
-    def pad_frame(df: pl.DataFrame) -> pl.DataFrame:
-        """Add any missing columns as null, with proper type casting to Float32."""
-        # Define expected types for schema columns (match schema.py)
-        bool_cols = {"us_event", "cca_event", "ica_event", "immig_relevant"}
-        float_cols = {"cca_logit", "cca_score", "relevance_logit", "relevance_score"}
-        int_cols = {"year"}
-        str_cols = {
-            "id", "corpus", "news_desk", "section_name", "headline",
-            "lead_paragraph", "sample_stratum", "event_location", "event_type",
-            "alt_corpus_id"
-        }
-
-        # Add missing columns with correct types, with defaults for required string columns
-        for col in required_cols:
-            if col not in df.columns:
-                if col in bool_cols:
-                    df = df.with_columns(pl.lit(None, dtype=pl.Boolean).alias(col))
-                elif col in float_cols:
-                    df = df.with_columns(pl.lit(None, dtype=pl.Float32).alias(col))
-                elif col in int_cols:
-                    df = df.with_columns(pl.lit(None, dtype=pl.Int64).alias(col))
-                else:  # str_cols
-                    # For corpus, default to "api" (should be set by caller though)
-                    # For other required string columns, default to empty string
-                    if col == "corpus":
-                        df = df.with_columns(pl.lit("api", dtype=pl.Utf8).alias(col))
-                    else:
-                        df = df.with_columns(pl.lit("", dtype=pl.Utf8).alias(col))
-
-        # Fill nulls in corpus with "api" (for rows from scored candidates)
-        if "corpus" in df.columns:
-            df = df.with_columns(pl.col("corpus").fill_null("api"))
-
-        # Fill nulls in lead_paragraph with empty string (required but often missing)
-        if "lead_paragraph" in df.columns:
-            df = df.with_columns(pl.col("lead_paragraph").fill_null(""))
-
-        # Standardize types for concat compatibility
-        for col in float_cols:
-            if col in df.columns and df[col].dtype != pl.Float32:
-                df = df.with_columns(pl.col(col).cast(pl.Float32))
-
-        # Ensure year is Int64
-        if "year" in df.columns:
-            df = df.with_columns(pl.col("year").cast(pl.Int64))
-
-        # Ensure all string columns are actually strings
-        for col in str_cols:
-            if col in df.columns and df[col].dtype != pl.Utf8:
-                df = df.with_columns(pl.col(col).cast(pl.Utf8))
-
-        return df.select(sorted(required_cols))
-
-    anchor_rows = pad_frame(anchor_rows)
-    coded_survivor_rows = pad_frame(coded_survivor_rows)
-    template = pad_frame(template)
-
-    # Concatenate all sources
-    full_template = pl.concat([anchor_rows, coded_survivor_rows, template])
-    print(f"  Total merged rows: {full_template.height}", flush=True)
-
-    # Apply ICA label logic: set ica_event=False where us_event==False OR cca_event==False
-    # Preserve anchors' existing ica_event=True, only set negatives/nulls for other rows
-    full_template = full_template.with_columns(
-        pl.when(
-            (pl.col("ica_event").is_null()) &
-            ((~pl.col("us_event")) | (~pl.col("cca_event")))
-        ).then(False)
-        .otherwise(pl.col("ica_event"))
-        .alias("ica_event")
+    # Assemble the eval frame using the extracted Functional Core helper
+    full_template = assemble_eval_frame(
+        anchor_rows=anchor_rows,
+        coded_survivor_rows=coded_survivor_rows,
+        boundary_rows=template,
     )
+    print(f"  Total merged rows: {full_template.height}", flush=True)
 
     # Validate against the schema
     print("  Validating merged template against gold set schema...", flush=True)
