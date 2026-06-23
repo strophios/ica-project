@@ -122,8 +122,8 @@ def _get_doca_mtimes() -> dict[str, float | None]:
     Returns:
         dict with keys doca_csv, rds, positives; values are mtime or None
     """
-    # doca.csv: r/doca/doca.csv (relative to project root)
-    doca_csv_path = config.PROJECT_ROOT / "r" / "doca" / "doca.csv"
+    # doca.csv: at project root (PROJECT_ROOT is the data dir, not git repo)
+    doca_csv_path = config.PROJECT_ROOT / "doca.csv"
 
     # cca_matches_good.rds: from config
     rds_path = config.DOCA_CCA_MATCHES
@@ -152,35 +152,34 @@ def _get_ldc_gold_coverage() -> tuple[int, int]:
 
     try:
         labeled_df = pl.read_parquet(ldc_labeled_path)
-    except (OSError, Exception):
+    except (OSError, pl.exceptions.ComputeError):
         return 0, 0
 
-    # Filter to LDC 1996-2007 (from the LDC corpus)
-    # The provenance/apply-id filtering is done by reading the LDC corpus
-    # and extracting the 1996-2007 id set
+    # Filter to LDC 1996-2007 (Hive-partitioned by publication_year)
     ldc_corpus_path = config.LDC_CORPUS
 
     if not ldc_corpus_path.exists():
         return 0, 0
 
-    # Load LDC parquet to get the year range
+    # Read the Hive-partitioned dataset for years 1996-2007 only
     try:
-        ldc_parquet = ldc_corpus_path / "data.parquet"
-        if ldc_parquet.exists():
-            ldc_df = pl.read_parquet(ldc_parquet)
+        # Collect ids from each year partition via scan_parquet + filter
+        ldc_ids_set = set()
+        for year in range(1996, 2008):  # 1996-2007 inclusive
+            year_partition = ldc_corpus_path / f"publication_year={year}"
+            if year_partition.exists():
+                # Lazy load and extract unique ids
+                year_df = pl.scan_parquet(str(year_partition / "*.parquet")).select("id").collect()
+                ldc_ids_set.update(year_df.select("id").to_series().to_list())
 
-            # Filter to 1996-2007
-            # Assume there's a year column (needs investigation of actual schema)
-            # For now, get all unique ids from LDC if no year filtering available
-            ldc_ids = set(ldc_df.select("id").to_series().unique().to_list())
+        # Count gold labels in that range
+        labeled_ids = set(labeled_df.select("id").to_series().to_list())
+        ldc_labeled = ldc_ids_set & labeled_ids
 
-            # Count gold labels in that range
-            labeled_ids = set(labeled_df.select("id").to_series().unique().to_list())
-            ldc_labeled = ldc_ids & labeled_ids
-
-            return len(ldc_ids), len(ldc_labeled)
-    except (OSError, Exception):
-        pass
+        return len(ldc_ids_set), len(ldc_labeled)
+    except (OSError, pl.exceptions.ComputeError, KeyError):
+        # Catch expected I/O and schema issues; unexpected errors propagate
+        return 0, 0
 
     return 0, 0
 
@@ -232,6 +231,9 @@ def main() -> int:
     # =====================================================================
 
     # Read ldc_9507 provenance
+    # Note: lead_column is injected post-hoc by embed_corpus.py:339 and thus
+    # not present in older provenance. Older provenance defaults to None → FAIL
+    # (correct, as older runs used raw lead_paragraph, not stripped_text).
     ldc_provenance: dict | None = None
     if cache_dir.exists():
         ldc_9507_cache = cache_dir / "ldc_9507"

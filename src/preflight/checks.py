@@ -231,10 +231,10 @@ def ldc_channel_verdict(provenance: dict) -> Verdict:
 
 
 def ldc_gold_coverage_verdict(n_apply_ids: int, n_with_gold_label: int) -> Verdict:
-    """AC7.5: Informational: LDC gold label coverage over apply ids.
+    """Informational: LDC gold label coverage over apply ids.
 
     Always returns PASS. Detail carries the coverage fraction so Phase 6 can size
-    the gold-vs-ML-fallback split.
+    the gold-vs-ML-fallback split. (Not a numbered AC check.)
 
     Args:
         n_apply_ids: count of LDC 1996-2007 apply ids
