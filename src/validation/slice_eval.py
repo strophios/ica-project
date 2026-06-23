@@ -71,8 +71,9 @@ def apply_us_model(
         seq_length=run_config.seq_length,
     )
 
-    # Load weights
-    inference_model.load_weights(str(weights_path), skip_mismatch=False)
+    # Load weights. Use skip_mismatch=True to allow loading head-only weights
+    # (the backbone is separately loaded and frozen, so we only need head weights).
+    inference_model.load_weights(str(weights_path), skip_mismatch=True)
 
     # Build preprocessor (inference mode)
     preproc = ClassifierPreprocessor(

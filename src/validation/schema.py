@@ -56,13 +56,15 @@ OPTIONAL_COLUMNS = {
 VALID_CORPUS = {"api", "ldc"}
 # US-filter sampling modes ("doca_matched", "random_pre1986", "ambiguous") plus
 # CCA score-band strata for the score-stratified CCA gold set, plus
-# ICA composed strata (CCA strength × relevance band) for the ICA boundary sampler.
+# ICA composed strata (CCA strength × relevance band) for the ICA boundary sampler, plus
+# ICA eval set strata ("anchor" for held-out positives, "coded_reuse" for re-coded rows).
 VALID_SAMPLE_STRATUM = {
     "doca_matched", "random_pre1986", "ambiguous",
     "cca_score_high", "cca_score_mid", "cca_score_low",
     "cca_high_relev_high", "cca_high_relev_low",
     "cca_mid_relev_high", "cca_mid_relev_low",
     "cca_low_relev_high", "cca_low_relev_low",
+    "anchor", "coded_reuse",
 }
 
 
@@ -139,7 +141,11 @@ def validate_gold_set(df: pl.DataFrame) -> None:
             expected_base = expected_dtype.base_type() if hasattr(expected_dtype, 'base_type') else expected_dtype
 
             # Allow Null dtype (all None)
-            if actual_dtype != pl.Null and actual_base != expected_base:
+            # For float columns, accept both Float32 and Float64 (interchange via casting)
+            is_float_type = expected_base in (pl.Float32, pl.Float64)
+            actual_is_float = actual_base in (pl.Float32, pl.Float64)
+
+            if actual_dtype != pl.Null and not (is_float_type and actual_is_float) and actual_base != expected_base:
                 errors.append(
                     f"Column '{col}' has dtype {actual_dtype}, "
                     f"expected {expected_dtype}"

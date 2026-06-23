@@ -153,10 +153,10 @@ def build_ica_template(
         pl.col("section_name").fill_null(""),
         pl.col("headline").fill_null(""),
         pl.col("lead_paragraph").fill_null(""),
-        pl.col("cca_logit").cast(pl.Float64),
-        (1.0 / (1.0 + (-pl.col("cca_logit").cast(pl.Float64)).exp())).alias("cca_score"),
-        pl.col("relevance_logit").cast(pl.Float64),
-        (1.0 / (1.0 + (-pl.col("relevance_logit").cast(pl.Float64)).exp())).alias(
+        pl.col("cca_logit").cast(pl.Float32),
+        (1.0 / (1.0 + (-pl.col("cca_logit").cast(pl.Float32)).exp())).cast(pl.Float32).alias("cca_score"),
+        pl.col("relevance_logit").cast(pl.Float32),
+        (1.0 / (1.0 + (-pl.col("relevance_logit").cast(pl.Float32)).exp())).cast(pl.Float32).alias(
             "relevance_score"
         ),
         pl.lit(None, dtype=pl.Utf8).alias("alt_corpus_id"),
