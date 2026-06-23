@@ -12,6 +12,7 @@ import pytest
 
 from src.build_cca_doca_table import filter_positives_by_form, label_and_restrict
 from src.data_setup.data import create_cca_doca_data, create_relevance_data, assert_holdout_excluded
+from src.preproc.us_location import apply_fused_us_gate
 
 
 def test_filter_positives_by_form_partitions_ids():
@@ -128,6 +129,67 @@ def test_splits_are_disjoint_and_deterministic():
     out2 = create_cca_doca_data(table)
     assert out["train"]["pos"].equals(out2["train"]["pos"])
     assert out["train"]["unl"].equals(out2["train"]["unl"])
+
+
+class TestFusedUSGateInCCA:
+    """Verify fused US gate application in CCA path (harmonized with relevance)."""
+
+    @staticmethod
+    def _synthetic_table_with_location_signals():
+        """Table with location signals: positives (all US), foreign unlabeled, diaspora."""
+        rows = [
+            # US positives (kept by construction, us=T -> us=T)
+            {"id": "us_pos_1", "cca_label": 1, "us": True, "any_us": True, "any_not_us": False},
+            {"id": "us_pos_2", "cca_label": 1, "us": True, "any_us": True, "any_not_us": False},
+            # Clearly foreign unlabeled (us=T but any_not_us=T & ~any_us -> us=F after gate)
+            {"id": "foreign_unl_1", "cca_label": 0, "us": True, "any_us": False, "any_not_us": True},
+            {"id": "foreign_unl_2", "cca_label": 0, "us": True, "any_us": False, "any_not_us": True},
+            # Diaspora unlabeled (us=T & any_us=T -> us=T after gate)
+            {"id": "diaspora_unl_1", "cca_label": 0, "us": True, "any_us": True, "any_not_us": True},
+            {"id": "diaspora_unl_2", "cca_label": 0, "us": True, "any_us": True, "any_not_us": False},
+            # US-only unlabeled (us=T & any_us=T & ~any_not_us -> us=T after gate)
+            {"id": "us_unl_1", "cca_label": 0, "us": True, "any_us": True, "any_not_us": False},
+        ]
+        return pl.DataFrame(rows)
+
+    def test_fused_gate_drops_clearly_foreign(self):
+        """Clearly-foreign articles (any_not_us & ~any_us) are dropped from us pool."""
+        table = self._synthetic_table_with_location_signals()
+        result = apply_fused_us_gate(table)
+        # Clearly-foreign should have us=F after gating
+        foreign = result.filter(pl.col("id").str.contains("foreign"))
+        assert foreign["us"].sum() == 0, "clearly-foreign articles should have us=F"
+
+    def test_fused_gate_keeps_diaspora(self):
+        """Diaspora articles (any_us=T, regardless of any_not_us) are kept in us pool."""
+        table = self._synthetic_table_with_location_signals()
+        result = apply_fused_us_gate(table)
+        # Diaspora should have us=T after gating
+        diaspora = result.filter(pl.col("id").str.contains("diaspora"))
+        assert diaspora["us"].sum() == 2, "diaspora articles should have us=T"
+
+    def test_fused_gate_keeps_us_only(self):
+        """US-only articles (any_us=T & ~any_not_us) are kept in us pool."""
+        table = self._synthetic_table_with_location_signals()
+        result = apply_fused_us_gate(table)
+        # US-only should have us=T after gating
+        us_only = result.filter(pl.col("id").str.contains("us_unl"))
+        assert us_only["us"].sum() == 1, "US-only articles should have us=T"
+
+    def test_fused_gate_preserves_positives(self):
+        """Positives are kept regardless of location signals."""
+        table = self._synthetic_table_with_location_signals()
+        result = apply_fused_us_gate(table)
+        # Positives should be present, with us=T
+        pos = result.filter(pl.col("cca_label") == 1)
+        assert pos.height == 2, "both positives should be present"
+        assert pos["us"].sum() == 2, "all positives should have us=T"
+
+    def test_fused_gate_missing_columns_raises(self):
+        """Missing required columns (us, any_us, any_not_us) raises ValueError."""
+        table = pl.DataFrame({"id": ["a", "b"], "us": [True, False]})
+        with pytest.raises(ValueError, match="requires columns"):
+            apply_fused_us_gate(table)
 
 
 class TestAssertHoldoutExcludedOnRelevance:

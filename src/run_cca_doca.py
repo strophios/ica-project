@@ -28,7 +28,7 @@ import src.cca_config as cca_config
 from src.cca_metrics import make_cca_metrics
 from src.diagnostics.distribution_metrics import make_distribution_metrics
 import polars as pl
-from src.data_setup.data import create_cca_doca_data, dataset_from_embeddings
+from src.data_setup.data import create_cca_doca_data, dataset_from_embeddings, assert_holdout_excluded
 from src.embed_corpus import load_cache
 from src.build_cca_doca_table import filter_positives_by_form, label_and_restrict
 from src.model_setup.heads import ClassificationHead
@@ -37,6 +37,7 @@ from src.model_setup.assembly import (
     build_feature_inference_model,
 )
 from src.loss_functions.loss import FLPULoss
+from src.preproc.us_location import apply_fused_us_gate, load_location_signals
 from src.us_config import UsRunConfig, config_path_for_weights as us_config_path_for_weights
 from src.calibration.sidecar import load_calibration, calibration_path_for_weights
 
@@ -128,9 +129,25 @@ def main(prior, suffix="train250k", threshold=0.0, epochs=7, max_steps=None,
     else:
         positives = pos_df["id"].to_list()
     table = label_and_restrict(meta, positives, threshold)
+
+    # Smarter US gate: replace the dateline-only `us` (us_logit>=threshold) with the
+    # FUSED gate -- ML passes AND not clearly-foreign (a foreign location signal with
+    # no US one). Catches US-datelined foreign news the dateline gate lets through,
+    # while keeping diaspora (which carries a US location). Harmonizes with the
+    # relevance path for a unified retrain population.
+    signals = load_location_signals(table["id"].to_list())
+    table = table.join(signals, on="id", how="left").with_columns(
+        pl.col("any_us").fill_null(False), pl.col("any_not_us").fill_null(False)
+    )
+    n_us_ml = int(table["us"].sum())
+    table = apply_fused_us_gate(table)
+    print(f"fused US gate: {int(table['us'].sum())}/{n_us_ml} of ML-gated kept "
+          f"(clearly-foreign removed)")  # LOG
+
     if holdout_ids:
         print(f"holdout: dropping {len(holdout_ids)} ids from training pool")  # LOG
     splits = create_cca_doca_data(table, holdout_ids=holdout_ids)
+    assert_holdout_excluded(splits, holdout_ids)
 
     pos_tr = _gather(cls, splits["train"]["pos"], 1.0)
     unl_tr = _gather(cls, splits["train"]["unl"], 0.0)
