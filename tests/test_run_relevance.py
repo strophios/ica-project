@@ -47,7 +47,14 @@ class TestRelevanceHeadRename:
         # that path here, just verifying "rel" is valid.
 
     def test_pattern2_load_with_rel_head(self):
-        """Pattern 2: fresh head with 'rel' name loads weights by structure."""
+        """Pattern 2: fresh head with 'rel' name loads weights by structure.
+
+        Note: relevance.weights.h5 is a gitignored data product built by
+        src.run_relevance.main(). This test exercises structural load equivalence
+        by creating synthetic weights and loading them into a fresh 'rel' head,
+        verifying that Pattern 2 (load-by-structure) succeeds when the head name
+        matches what was saved (via dataclasses.replace in run_relevance.py:75).
+        """
         # Create a minimal model with a 'rel'-named head and save weights
         keras.config.set_dtype_policy(config.DTYPE_POLICY)
 

@@ -36,7 +36,11 @@ import src.config as config
 import src.cca_config as cca_config
 from src.build_cca_doca_table import label_and_restrict
 from src.cca_metrics import make_cca_metrics
-from src.data_setup.data import create_relevance_data, dataset_from_embeddings
+from src.data_setup.data import (
+    assert_holdout_excluded,
+    create_relevance_data,
+    dataset_from_embeddings,
+)
 from src.diagnostics.distribution_metrics import make_distribution_metrics
 from src.embed_corpus import load_cache
 from src.loss_functions.loss import FLPULoss
@@ -124,6 +128,7 @@ def main(prior, suffix="relevance_train", threshold=0.5, epochs=7, max_steps=Non
     if holdout_ids:
         print(f"holdout: dropping {len(holdout_ids)} ids from training pool")  # LOG
     splits = create_relevance_data(table, holdout_ids=holdout_ids)
+    assert_holdout_excluded(splits, holdout_ids)
 
     pos_tr = _gather(cls, splits["train"]["pos"], 1.0)
     neg_tr = _gather(cls, splits["train"]["neg"], -1.0)
