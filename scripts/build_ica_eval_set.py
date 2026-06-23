@@ -274,8 +274,9 @@ def main():
 
     # Write holdout_ids as a parquet with id column (union of anchors + coded500 + boundary)
     # These are the ids to exclude from retraining (Phases 3+)
-    # Extract all article_ids that are reserved (anchors + coded survivors)
-    all_reserved_ids = sorted(set(anchor_holdout_ids) | set(coded500_ids))
+    # The full_template contains all three sources; extract all ids from it
+    # This ensures the holdout includes anchors + coded survivors + boundary draw.
+    all_reserved_ids = sorted(set(full_template["id"].to_list()))
     holdout_df = pl.DataFrame({"id": all_reserved_ids})
     holdout_df.write_parquet(str(holdout_output_path))
     print(f"  Wrote {len(all_reserved_ids)} holdout ids to {holdout_output_path}", flush=True)

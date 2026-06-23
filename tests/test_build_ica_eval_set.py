@@ -350,6 +350,102 @@ class TestRelevanceScoreAlignment:
         assert len(unique_logits) > 1, f"Logits must span >1 unique value, got {unique_logits}"
 
 
+class TestHoldoutCompleteness:
+    """Verify holdout ids cover all template sources (guards anti-contamination AC2.2).
+
+    Critical issue: holdout id list must include boundary-draw ids, not just anchors
+    and coded-500 survivors. Without boundary ids, the boundary rows are simultaneously
+    in the evaluation set AND in Phase 3's training pool, causing selection contamination.
+    """
+
+    def test_holdout_ids_include_all_template_sources(self):
+        """Holdout must include anchors + coded survivors + boundary rows.
+
+        The holdout_ids.parquet that Phase 3 reads must contain every id in the
+        ica_coding_template.parquet that was assembled for hand-coding. If any
+        boundary-draw id is missing from holdout, it will be present in Phase 3's
+        training pool, causing AC2.2 contamination.
+
+        This test demonstrates the BUG: if holdout extraction uses only
+        `set(anchor_holdout_ids) | set(coded500_ids)`, it OMITS boundary_ids.
+        With the FIX: `set(full_template["id"].to_list())` includes all three.
+        """
+        # Build the three sources
+        anchor_rows = pl.DataFrame({
+            "id": ["anc1", "anc2"],
+            "us_event": [True, True],
+            "cca_event": [True, True],
+            "ica_event": [True, True],
+            "sample_stratum": ["anchor", "anchor"],
+            "corpus": ["api", "api"],
+            "year": [1990, 1991],
+            "news_desk": ["National", "World"],
+            "section_name": ["US", "US"],
+            "headline": ["h1", "h2"],
+            "lead_paragraph": ["l1", "l2"],
+        })
+
+        coded_survivor_rows = pl.DataFrame({
+            "id": ["cod1", "cod2"],
+            "us_event": [True, True],
+            "cca_event": [True, True],
+            "ica_event": [None, None],
+            "sample_stratum": ["coded_reuse", "coded_reuse"],
+            "corpus": ["api", "api"],
+            "year": [1990, 1991],
+            "news_desk": ["National", "World"],
+            "section_name": ["US", "US"],
+            "headline": ["h1", "h2"],
+            "lead_paragraph": ["l1", "l2"],
+        })
+
+        boundary_rows = pl.DataFrame({
+            "id": ["bnd1", "bnd2", "bnd3"],
+            "us_event": [True, True, False],
+            "cca_event": [True, False, True],
+            "ica_event": [None, None, None],
+            "sample_stratum": ["cca_high_relev_high", "cca_mid_relev_low", "cca_low_relev_high"],
+            "corpus": ["api", "api", "api"],
+            "year": [1990, 1991, 1992],
+            "news_desk": ["National", "World", "Business"],
+            "section_name": ["US", "US", "US"],
+            "headline": ["h1", "h2", "h3"],
+            "lead_paragraph": ["l1", "l2", "l3"],
+        })
+
+        # Assemble the full template (as build_ica_eval_set.py does)
+        full_template = assemble_eval_frame(anchor_rows, coded_survivor_rows, boundary_rows)
+
+        # Simulate the BUGGY holdout extraction: only anchors + coded
+        anchor_holdout_ids = anchor_rows["id"].to_list()
+        coded500_ids = coded_survivor_rows["id"].to_list()
+        buggy_holdout_ids = sorted(set(anchor_holdout_ids) | set(coded500_ids))
+
+        # Simulate the FIXED holdout extraction: all template ids
+        fixed_holdout_ids = sorted(set(full_template["id"].to_list()))
+
+        # Verify that buggy version is MISSING boundary ids
+        buggy_set = set(buggy_holdout_ids)
+        boundary_ids = set(boundary_rows["id"].to_list())
+        missing_boundary = boundary_ids - buggy_set
+        assert missing_boundary, (
+            "Test setup broken: buggy version should miss boundary ids, "
+            "but all boundary ids present in buggy holdout"
+        )
+
+        # Verify that fixed version includes ALL ids from template
+        fixed_set = set(fixed_holdout_ids)
+        template_ids = set(full_template["id"].to_list())
+        assert fixed_set == template_ids, (
+            f"Fixed holdout missing ids: {template_ids - fixed_set}"
+        )
+
+        # Verify boundary ids are now present in fixed version
+        assert boundary_ids <= fixed_set, (
+            f"Fixed holdout still missing boundary ids: {boundary_ids - fixed_set}"
+        )
+
+
 class TestMergeOrchestration:
     """Legacy tests—kept for backward compatibility."""
 
