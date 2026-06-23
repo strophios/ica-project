@@ -43,7 +43,7 @@ keras.utils.set_random_seed(200)
 def main(suffix="us_train_ldc", weights_path=None,
          fit_population="ldc_labeled_val_natural_balance"):
     weights_path = (
-        config.US_FILTER_DIR / "us_classifier_full.weights.h5"
+        config.US_FILTER_FULL_WEIGHTS
         if weights_path is None
         else Path(weights_path)
     )

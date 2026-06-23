@@ -31,7 +31,7 @@ import src.config as config
 from src.embed_corpus import load_cache, write_shard
 from src.run_cca_doca import _rescore_us_restriction
 
-US_FULL_WEIGHTS = config.US_FILTER_DIR / "us_classifier_full.weights.h5"
+US_FULL_WEIGHTS = config.US_FILTER_FULL_WEIGHTS
 RELEVANCE_DIR = config.PROJECT_ROOT / "relevance"
 RELEVANCE_CACHE = config.CCA_EMBED_CACHE_DIR / "relevance_train"
 

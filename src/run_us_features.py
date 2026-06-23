@@ -60,7 +60,7 @@ def _gather(cls: np.ndarray, group: pl.DataFrame):
 
 def main(suffix="us_train_ldc", epochs=10, max_steps=None, weights_path=None):
     weights_path = (
-        config.US_FILTER_DIR / "us_classifier_full.weights.h5"
+        config.US_FILTER_FULL_WEIGHTS
         if weights_path is None
         else Path(weights_path)
     )
