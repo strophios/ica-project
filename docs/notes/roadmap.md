@@ -29,16 +29,26 @@ multi-head ICA model.
 
 ## A. Active thread — multi-head ICA assembly (next major piece)
 
-Pieces all exist now: fused US gate, CCA head, relevance head. Assembly =
-`fused US gate → {CCA head, relevance head} → final fusion head` ("is this a CCA
-event of special relevance to immigrants?"). Open design questions to work
-through (the deliberate pause is here):
-- **Fusion-head training labels.** The 466 ICA anchors are the only joint
-  US∩CCA∩relevance gold — thin. How to train the fusion head on that.
-- **Shared vs. separate encoder.** Each head is currently a standalone
-  frozen-DAPT backbone + single head; whether to unify onto a shared encoder.
-- **Binary vs. typed relevance.** Assemble with the binary relevance head now, or
-  wait for the typed multi-label heads (B4)?
+**DESIGN DECIDED (2026-06-19): `docs/design-plans/2026-06-19-multi-head-ica-assembly.md`**
+(6 phases + pre-flight checklist; implementation plan next). Pieces all exist:
+fused US gate, CCA head, relevance head. Assembly =
+`fused US gate → {CCA head, relevance head} → calibrated composition`. The three
+open questions are now resolved in the design doc:
+- **Fusion-head training labels** → no heavy fusion head: per-head-calibrated
+  AND baseline vs. a ≤3-param LR challenger (EPV-capped at 466 anchors), chosen
+  empirically; the anchors are spent on a clean held-out eval, not on training a
+  combiner.
+- **Shared vs. separate encoder** → shared *frozen* encoder (already de-facto, via
+  the one CLS cache). Frozen kills negative transfer; top-N joint fine-tune is a
+  tracked, separately-measured ceiling-lift experiment (deferred, not in scope).
+- **Binary vs. typed relevance** → assemble with the binary head now; typed
+  multi-label heads (B4) folded in later.
+
+Key design move: a **harmonized retrain** of CCA + relevance (same fused gate,
+same held-out joint-ICA eval ids) to kill anchor contamination by construction;
+US is a recall-tuned **gate**, not a fusion term (the heads are conditional-on-US
+estimators). Apply targets: `api_corpus` 1960–1995 + LDC 1996–2007 (the
+out-of-DoCA expansion test).
 
 ## B. Relevance head — deferred (from `relevance-head-handoff.md`)
 

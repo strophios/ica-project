@@ -58,8 +58,11 @@ contaminated by the data choices that produced the heads being combined.
   retrain aborts rather than training on it.
 
 ### multi-head-ica-assembly.AC2: Clean joint-ICA evaluation set
-- **multi-head-ica-assembly.AC2.1 Success:** The eval set carries a joint-ICA label
-  (US ∩ CCA ∩ immigrant-relevant) per row and validates against a documented schema.
+- **multi-head-ica-assembly.AC2.1 Success:** The eval set carries a **holistically hand-coded**
+  `ica_event` label per row (auto-`False` only where `us_event` or `cca_event` is False; hand-coded
+  across the whole `us_event ∧ cca_event` region so contextual ICA outside marginal immigrant-
+  relevance is captured) and validates against a documented schema. `ica_event` is NOT derived as
+  the AND of the marginal components — that independence is what lets Phase 4 test the fusion.
 - **multi-head-ica-assembly.AC2.2 Success:** Boundary candidates were drawn stratified near the
   current heads' decision boundary (selection-by-old-score does not contaminate the retrain).
 - **multi-head-ica-assembly.AC2.3 Failure:** Rows missing any of the three component judgments
@@ -94,10 +97,15 @@ contaminated by the data choices that produced the heads being combined.
 ### multi-head-ica-assembly.AC6: Apply and dataset expansion
 - **multi-head-ica-assembly.AC6.1 Success:** Scoring `api_corpus` (1960–1995) writes
   `us_filter/api_us_scores/` + `cca_doca/api_cca_scores/` and a ranked `ica_candidates` parquet.
-- **multi-head-ica-assembly.AC6.2 Success:** Scoring LDC 1996–2007 (`ldc_9507` cache) yields
-  out-of-DoCA-period ICA candidates.
-- **multi-head-ica-assembly.AC6.3 Edge:** LDC US gating uses the dateline-stripped text channel
-  consistent with US-head training (datelines exist on LDC, unlike the API corpus).
+- **multi-head-ica-assembly.AC6.2 Success:** Scoring LDC 1996–2007 (a `stripped_text` re-embed,
+  `ldc_9607_stripped`, distinct from the raw `ldc_9507` predecessor) yields out-of-DoCA-period
+  ICA candidates.
+- **multi-head-ica-assembly.AC6.3 Edge:** LDC US gating prefers the gold dateline-derived
+  `us_label` (`us_filter/ldc_labeled.parquet`, from `build_labels.R`) where available, falling back
+  to the ML US head only for ids without a gold label. CCA/relevance scoring (and the ML fallback)
+  use a `stripped_text` re-embed of `ldc_9507`, so the dateline does not leak into those heads'
+  inputs. (Datelines survive on LDC, unlike the API corpus — so the gold signal the ML head only
+  approximates is directly available here.)
 
 ### multi-head-ica-assembly.AC7: Pre-flight verifications (cross-cutting)
 - **multi-head-ica-assembly.AC7.1:** The cached `us_logit` is confirmed produced by
@@ -371,13 +379,16 @@ Tests verify AC5.1–AC5.4.
 - Finish `embed_cache/full` part 2 (1976–1995) so the in-period corpus is fully cached.
 - Apply over `api_corpus` (1960–1995): per-head scores → gate → composed ICA → write
   `us_filter/api_us_scores/`, `cca_doca/api_cca_scores/`, ranked `ica_candidates`.
-- Apply over LDC 1996–2007 (`ldc_9507` cache), using the dateline-stripped channel for US gating.
+- Re-embed `ldc_9507` with `stripped_text` (current cache is raw `lead_paragraph`); apply over LDC
+  1996–2007 gating on gold dateline `us_label` where available, ML US head (on the stripped re-embed)
+  as fallback.
 - Fold in the `run_us_classification.py` greedy-glob fix if that path is touched.
 
 **Dependencies:** Phase 5 (assembled artifact).
 
-**Done when:** Score outputs and ranked candidate sets exist for both corpora; the LDC pass uses
-the stripped channel. Tests verify output schema and the LDC channel selection.
+**Done when:** Score outputs and ranked candidate sets exist for both corpora; the LDC pass uses a
+`stripped_text` re-embed and gates on gold `us_label` (ML fallback). Tests verify output schema and
+the LDC gold-first gating selection.
 
 **Covers:** AC6.1, AC6.2, AC6.3.
 <!-- END_PHASE_6 -->
