@@ -66,11 +66,14 @@ def main(prior, suffix="relevance_train", threshold=0.5, epochs=7, max_steps=Non
     run_config = _config_with_prior(prior, epochs)
     # Set the nnPNU mixing weight on the (frozen) loss config so it is recorded in
     # the run sidecar. eta=0 leaves the head as pure nnPU (CCA-identical).
+    # Also rename the head from "cca" to "rel" for multi-head assembly.
     head0 = run_config.heads[0]
     run_config = dataclasses.replace(
         run_config,
         heads=(dataclasses.replace(
-            head0, loss=dataclasses.replace(head0.loss, nnpnu_eta=nnpnu_eta)
+            head0,
+            name="rel",  # Rename from "cca" to "rel" for multi-head assembly
+            loss=dataclasses.replace(head0.loss, nnpnu_eta=nnpnu_eta)
         ),),
     )
     head_cfg = run_config.heads[0]
