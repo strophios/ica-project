@@ -11,7 +11,7 @@ import polars as pl
 import pytest
 
 from src.build_cca_doca_table import filter_positives_by_form, label_and_restrict
-from src.data_setup.data import create_cca_doca_data
+from src.data_setup.data import create_cca_doca_data, create_relevance_data, assert_holdout_excluded
 
 
 def test_filter_positives_by_form_partitions_ids():
@@ -128,3 +128,84 @@ def test_splits_are_disjoint_and_deterministic():
     out2 = create_cca_doca_data(table)
     assert out["train"]["pos"].equals(out2["train"]["pos"])
     assert out["train"]["unl"].equals(out2["train"]["unl"])
+
+
+class TestAssertHoldoutExcludedOnRelevance:
+    """Verify assert_holdout_excluded works correctly on relevance splits (pos/neg/unl)."""
+
+    @staticmethod
+    def _make_relevance_splits():
+        """Build a realistic relevance-data table and split it."""
+        rows = []
+        r = 0
+        # 50 positives
+        for i in range(50):
+            rows.append({
+                "emb_row": r, "id": f"p{i}",
+                "cca_label": 1, "reliable_neg": False, "us": True
+            })
+            r += 1
+        # 30 reliable negatives
+        for i in range(30):
+            rows.append({
+                "emb_row": r, "id": f"rn{i}",
+                "cca_label": 0, "reliable_neg": True, "us": True
+            })
+            r += 1
+        # 500 unlabeled US-only
+        for i in range(500):
+            rows.append({
+                "emb_row": r, "id": f"u{i}",
+                "cca_label": 0, "reliable_neg": False, "us": True
+            })
+            r += 1
+        table = pl.DataFrame(rows)
+        return create_relevance_data(table)
+
+    def test_clean_relevance_split_passes(self):
+        """Clean split with no holdout should pass."""
+        splits = self._make_relevance_splits()
+        assert_holdout_excluded(splits, None)
+        assert_holdout_excluded(splits, set())
+
+    def test_relevance_holdout_in_train_pos_raises(self):
+        """Holdout id in train[pos] should raise."""
+        splits = self._make_relevance_splits()
+        # Get an actual positive id from train
+        actual_pos_id = splits["train"]["pos"]["id"][0]
+        with pytest.raises(ValueError, match="leaked"):
+            assert_holdout_excluded(splits, [actual_pos_id])
+
+    def test_relevance_holdout_in_train_neg_raises(self):
+        """Holdout id in train[neg] should raise."""
+        splits = self._make_relevance_splits()
+        # Get an actual negative id from train
+        actual_neg_id = splits["train"]["neg"]["id"][0]
+        with pytest.raises(ValueError, match="leaked"):
+            assert_holdout_excluded(splits, [actual_neg_id])
+
+    def test_relevance_holdout_in_train_unl_raises(self):
+        """Holdout id in train[unl] should raise."""
+        splits = self._make_relevance_splits()
+        # Get an actual unlabeled id from train
+        actual_unl_id = splits["train"]["unl"]["id"][0]
+        with pytest.raises(ValueError, match="leaked"):
+            assert_holdout_excluded(splits, [actual_unl_id])
+
+    def test_relevance_holdout_in_val_raises(self):
+        """Holdout ids in val (any group) should raise."""
+        splits = self._make_relevance_splits()
+        actual_val_id = splits["val"]["pos"]["id"][0]
+        with pytest.raises(ValueError, match="leaked"):
+            assert_holdout_excluded(splits, [actual_val_id])
+
+    def test_relevance_holdout_in_test_is_safe(self):
+        """Holdout ids in test (evaluation only) should not raise."""
+        splits = self._make_relevance_splits()
+        test_ids = list(
+            set(splits["test"]["pos"]["id"].to_list())
+            | set(splits["test"]["neg"]["id"].to_list())
+            | set(splits["test"]["unl"]["id"].to_list())
+        )[:3]
+        # Should not raise
+        assert_holdout_excluded(splits, test_ids)

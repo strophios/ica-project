@@ -185,6 +185,62 @@ def create_us_filter_data(dataset):
     }
 
 
+def assert_holdout_excluded(splits: dict, holdout_ids: set[str] | None) -> None:
+    """Verify no holdout id appears in any train/val pool.
+
+    Raises ValueError enumerating offending ids if any holdout appears in
+    train or val pools (test is fine — it's meant for evaluation only).
+    Validates structure and raises if splits are malformed.
+    No-op when holdout_ids is None or empty.
+
+    Handles both CCA-doca splits (pos/unl) and relevance splits (pos/neg/unl).
+
+    # pattern: Functional Core (pure, no side effects, raises on violation)
+    """
+    if not holdout_ids:
+        return
+
+    holdout_set = set(holdout_ids)
+    leaked = set()
+
+    for split_name in ("train", "val"):  # Only train/val matter; test is evaluation-only
+        if split_name not in splits:
+            raise ValueError(f"split '{split_name}' not found in splits dict")
+
+        split_dict = splits[split_name]
+        if not isinstance(split_dict, dict):
+            raise ValueError(
+                f"splits['{split_name}'] is not a dict: {type(split_dict)}"
+            )
+
+        # Guard both CCA (pos/unl) and relevance (pos/neg/unl) shapes.
+        # pos and unl are always required; neg is optional (relevance only).
+        for group_name in ("pos", "unl", "neg"):
+            if group_name not in split_dict:
+                # It's OK if "neg" doesn't exist (CCA splits have no neg).
+                # But every split must have "pos" and "unl".
+                if group_name in ("pos", "unl"):
+                    raise ValueError(
+                        f"group '{group_name}' not found in splits['{split_name}']"
+                    )
+                continue
+
+            group_df = split_dict[group_name]
+            if not isinstance(group_df, pl.DataFrame):
+                raise ValueError(
+                    f"splits['{split_name}']['{group_name}'] is not a DataFrame: "
+                    f"{type(group_df)}"
+                )
+
+            group_ids = set(group_df["id"].to_list())
+            leaked |= group_ids & holdout_set
+
+    if leaked:
+        raise ValueError(
+            f"holdout ids leaked into train/val pools: {sorted(leaked)}"
+        )
+
+
 def create_cca_doca_data(table, seed=200, holdout_ids=None):
     """PU split for the CCA/DoCA retrain over cached embeddings.
 
