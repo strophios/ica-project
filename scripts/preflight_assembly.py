@@ -181,8 +181,6 @@ def _get_ldc_gold_coverage() -> tuple[int, int]:
         # Catch expected I/O and schema issues; unexpected errors propagate
         return 0, 0
 
-    return 0, 0
-
 
 def main() -> int:
     """Gather real inputs and print verdict table.
