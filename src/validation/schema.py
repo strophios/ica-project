@@ -46,15 +46,23 @@ OPTIONAL_COLUMNS = {
     # for human readability.
     "cca_logit": pl.Float64,
     "cca_score": pl.Float64,
+    # Relevance-head model scores (for ICA boundary sampling). Like CCA scores,
+    # the logit is raw and score is sigmoid.
+    "relevance_logit": pl.Float64,
+    "relevance_score": pl.Float64,
 }
 
 # Enumeration values for categorical columns
 VALID_CORPUS = {"api", "ldc"}
 # US-filter sampling modes ("doca_matched", "random_pre1986", "ambiguous") plus
-# CCA score-band strata for the score-stratified CCA gold set.
+# CCA score-band strata for the score-stratified CCA gold set, plus
+# ICA composed strata (CCA strength × relevance band) for the ICA boundary sampler.
 VALID_SAMPLE_STRATUM = {
     "doca_matched", "random_pre1986", "ambiguous",
     "cca_score_high", "cca_score_mid", "cca_score_low",
+    "cca_high_relev_high", "cca_high_relev_low",
+    "cca_mid_relev_high", "cca_mid_relev_low",
+    "cca_low_relev_high", "cca_low_relev_low",
 }
 
 
