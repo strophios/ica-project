@@ -17,6 +17,7 @@ import numpy as np
 from src.validation.ica_eval import (
     assemble_eval_frame,
     derive_ica_negatives,
+    holdout_ids_from_template,
 )
 from src.validation.schema import validate_gold_set
 
@@ -413,36 +414,27 @@ class TestHoldoutCompleteness:
             "lead_paragraph": ["l1", "l2", "l3"],
         })
 
-        # Assemble the full template (as build_ica_eval_set.py does)
+        # Assemble the full template (as build_ica_eval_set.py does), then derive
+        # the holdout via the REAL production helper (not a re-implementation).
         full_template = assemble_eval_frame(anchor_rows, coded_survivor_rows, boundary_rows)
+        holdout_set = set(holdout_ids_from_template(full_template))
 
-        # Simulate the BUGGY holdout extraction: only anchors + coded
-        anchor_holdout_ids = anchor_rows["id"].to_list()
-        coded500_ids = coded_survivor_rows["id"].to_list()
-        buggy_holdout_ids = sorted(set(anchor_holdout_ids) | set(coded500_ids))
-
-        # Simulate the FIXED holdout extraction: all template ids
-        fixed_holdout_ids = sorted(set(full_template["id"].to_list()))
-
-        # Verify that buggy version is MISSING boundary ids
-        buggy_set = set(buggy_holdout_ids)
         boundary_ids = set(boundary_rows["id"].to_list())
-        missing_boundary = boundary_ids - buggy_set
-        assert missing_boundary, (
-            "Test setup broken: buggy version should miss boundary ids, "
-            "but all boundary ids present in buggy holdout"
-        )
-
-        # Verify that fixed version includes ALL ids from template
-        fixed_set = set(fixed_holdout_ids)
+        anchor_ids = set(anchor_rows["id"].to_list())
+        coded_ids = set(coded_survivor_rows["id"].to_list())
         template_ids = set(full_template["id"].to_list())
-        assert fixed_set == template_ids, (
-            f"Fixed holdout missing ids: {template_ids - fixed_set}"
-        )
 
-        # Verify boundary ids are now present in fixed version
-        assert boundary_ids <= fixed_set, (
-            f"Fixed holdout still missing boundary ids: {boundary_ids - fixed_set}"
+        # The production holdout must cover every template id — in particular every
+        # boundary-draw id (the contamination locus AC2.2 guards). If the production
+        # line regressed to `anchors | coded` only, boundary_ids would be missing
+        # here and this assertion would fail.
+        assert boundary_ids <= holdout_set, (
+            f"Holdout omits boundary ids (AC2.2 contamination): {boundary_ids - holdout_set}"
+        )
+        assert anchor_ids <= holdout_set
+        assert coded_ids <= holdout_set
+        assert holdout_set == template_ids, (
+            f"Holdout != template id set; missing: {template_ids - holdout_set}"
         )
 
 

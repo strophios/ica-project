@@ -228,3 +228,21 @@ def assemble_eval_frame(
     )
 
     return full_template
+
+
+def holdout_ids_from_template(full_template: pl.DataFrame) -> list[str]:
+    """Derive the Phase-3 holdout id set from the assembled eval template.
+
+    The assembled template contains every row that must be held out of the
+    retrain pool: reserved anchors + reused coded survivors + the boundary
+    draw. Returning the full set of its ids (deduped, sorted) is therefore the
+    complete anti-contamination holdout (AC2.2): any boundary id left out here
+    would re-enter Phase 3's training pool while also being an eval row.
+
+    Args:
+        full_template: the frame returned by ``assemble_eval_frame``.
+
+    Returns:
+        Sorted, de-duplicated list of holdout ids covering all template sources.
+    """
+    return sorted(set(full_template["id"].to_list()))

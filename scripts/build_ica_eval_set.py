@@ -29,6 +29,7 @@ from src.validation.ica_eval import (
     reconcile_immig_column,
     reserve_anchor_holdout,
     assemble_eval_frame,
+    holdout_ids_from_template,
 )
 from src.validation.build_ica_coding_template import build_ica_template
 from src.validation.schema import validate_gold_set
@@ -272,11 +273,11 @@ def main():
     full_template.write_parquet(str(template_output_path))
     print(f"  Wrote {full_template.height} template rows to {template_output_path}", flush=True)
 
-    # Write holdout_ids as a parquet with id column (union of anchors + coded500 + boundary)
-    # These are the ids to exclude from retraining (Phases 3+)
-    # The full_template contains all three sources; extract all ids from it
-    # This ensures the holdout includes anchors + coded survivors + boundary draw.
-    all_reserved_ids = sorted(set(full_template["id"].to_list()))
+    # Write holdout_ids as a parquet with id column (anchors + coded survivors +
+    # boundary draw). These are the ids to exclude from retraining (Phases 3+).
+    # holdout_ids_from_template derives them from the assembled template so the
+    # holdout provably covers every eval row (anti-contamination AC2.2).
+    all_reserved_ids = holdout_ids_from_template(full_template)
     holdout_df = pl.DataFrame({"id": all_reserved_ids})
     holdout_df.write_parquet(str(holdout_output_path))
     print(f"  Wrote {len(all_reserved_ids)} holdout ids to {holdout_output_path}", flush=True)
