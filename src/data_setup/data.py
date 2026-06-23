@@ -1,3 +1,5 @@
+from collections.abc import Collection
+
 import polars as pl
 import tensorflow as tf
 
@@ -185,7 +187,9 @@ def create_us_filter_data(dataset):
     }
 
 
-def assert_holdout_excluded(splits: dict, holdout_ids: set[str] | None) -> None:
+def assert_holdout_excluded(
+    splits: dict, holdout_ids: Collection[str] | None
+) -> None:
     """Verify no holdout id appears in any train/val pool.
 
     Raises ValueError enumerating offending ids if any holdout appears in
