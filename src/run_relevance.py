@@ -26,7 +26,6 @@ from __future__ import annotations
 import argparse
 import dataclasses
 import datetime
-import glob
 import math
 
 import keras
@@ -46,7 +45,7 @@ from src.model_setup.assembly import (
     build_feature_inference_model,
 )
 from src.model_setup.heads import ClassificationHead
-from src.preproc.us_location import compute_location_signals
+from src.preproc.us_location import apply_fused_us_gate, load_location_signals
 from src.run_cca_doca import (
     BATCH_SIZE,
     SHUFFLE_BUFFER,
@@ -59,19 +58,6 @@ RELEVANCE_DIR = config.PROJECT_ROOT / "relevance"
 DEFAULT_WEIGHTS = RELEVANCE_DIR / "relevance.weights.h5"
 
 
-def _load_location_signals(ids: list[str]) -> pl.DataFrame:
-    """Shell: read the API corpus rows for `ids` and compute (id, any_us,
-    any_not_us) via the location heuristic. (Shared candidate when the apply /
-    CCA table-build paths adopt the fused gate.)"""
-    want = set(ids)
-    parts = []
-    for f in sorted(glob.glob(str(config.API_CORPUS_DIR / "*.parquet"))):
-        d = pl.read_parquet(
-            f, columns=["id", "keywords", "news_desk", "section_name"]
-        ).filter(pl.col("id").is_in(list(want)))
-        if d.height:
-            parts.append(d)
-    return compute_location_signals(pl.concat(parts))
 
 
 def main(prior, suffix="relevance_train", threshold=0.5, epochs=7, max_steps=None,
@@ -104,14 +90,12 @@ def main(prior, suffix="relevance_train", threshold=0.5, epochs=7, max_steps=Non
     # FUSED gate -- ML passes AND not clearly-foreign (a foreign location signal with
     # no US one). Catches US-datelined foreign news the dateline gate lets through,
     # while keeping diaspora (which carries a US location). See src/preproc/us_location.
-    signals = _load_location_signals(table["id"].to_list())
+    signals = load_location_signals(table["id"].to_list())
     table = table.join(signals, on="id", how="left").with_columns(
         pl.col("any_us").fill_null(False), pl.col("any_not_us").fill_null(False)
     )
     n_us_ml = int(table["us"].sum())
-    table = table.with_columns(
-        us=(pl.col("us") & ~(pl.col("any_not_us") & ~pl.col("any_us")))
-    )
+    table = apply_fused_us_gate(table)
     print(f"fused US gate: {int(table['us'].sum())}/{n_us_ml} of ML-gated kept "
           f"(clearly-foreign removed)")  # LOG
     # Relevance differs from CCA here: positives must ALSO be US. CCA keeps

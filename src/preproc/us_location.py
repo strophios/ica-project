@@ -1,4 +1,4 @@
-# pattern: Functional Core (pure predicates; one cached gazetteer load)
+# pattern: Mixed (Functional Core predicates + one Imperative Shell I/O helper)
 """US/not-US LOCATION signal from NYT glocation keywords + desk/section.
 
 A Python port of the vendored `r/vendored/us_assign.R` location heuristic, used to
@@ -21,6 +21,7 @@ other. Gazetteers are the shared CSVs under `r/dateline/gazetteers/`.
 from __future__ import annotations
 
 import functools
+import glob
 import re
 from dataclasses import dataclass
 from pathlib import Path
@@ -178,3 +179,49 @@ def passes_us_gate(
 ) -> bool:
     """Fused US gate: the ML filter passes AND the event is not clearly foreign."""
     return us_logit >= threshold and not is_clearly_foreign(any_us, any_not_us)
+
+
+def apply_fused_us_gate(table: pl.DataFrame) -> pl.DataFrame:
+    """Pure: apply the fused US gate to a table with columns (us, any_us, any_not_us).
+
+    Returns the table with `us` column replaced by:
+        us = us & ~(any_not_us & ~any_us)
+
+    This gates out clearly-foreign articles (any_not_us=True AND any_us=False) while
+    keeping diaspora (which has any_us=True). The `us` column encodes the ML filter's
+    pass/fail; the fused gate adds the location heuristic on top.
+    """
+    if not all(col in table.columns for col in ["us", "any_us", "any_not_us"]):
+        missing = [col for col in ["us", "any_us", "any_not_us"] if col not in table.columns]
+        raise ValueError(f"apply_fused_us_gate requires columns {missing}; got {table.columns}")
+
+    return table.with_columns(
+        us=(pl.col("us") & ~(pl.col("any_not_us") & ~pl.col("any_us")))
+    )
+
+
+# pattern: Imperative Shell (I/O: reads from API_CORPUS_DIR)
+def load_location_signals(ids: list[str]) -> pl.DataFrame:
+    """Shell: read the API corpus rows for `ids` and compute (id, any_us, any_not_us)
+    via the location heuristic.
+
+    Reads matching rows from each year's parquet file in the API corpus directory,
+    then calls compute_location_signals to extract location signals.
+
+    Args:
+        ids: list of article ids to read.
+
+    Returns:
+        DataFrame with columns (id, any_us, any_not_us).
+    """
+    from src import config
+
+    want = set(ids)
+    parts = []
+    for f in sorted(glob.glob(str(config.API_CORPUS_DIR / "*.parquet"))):
+        d = pl.read_parquet(
+            f, columns=["id", "keywords", "news_desk", "section_name"]
+        ).filter(pl.col("id").is_in(list(want)))
+        if d.height:
+            parts.append(d)
+    return compute_location_signals(pl.concat(parts)) if parts else pl.DataFrame({"id": [], "any_us": [], "any_not_us": []})
