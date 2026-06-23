@@ -11,6 +11,7 @@ from src.preproc.us_location import (
     is_us_place,
     load_place_sets,
     location_signals,
+    load_location_signals,
     passes_us_gate,
 )
 
@@ -167,3 +168,57 @@ class TestApplyFusedUSGate:
         # ml_reject: F & ~(F & F) = F & ~F = F & T = F
         # When sorted by id: ["clearly_foreign", "diaspora", "ml_reject", "us_only"]
         assert out.sort("id")["us"].to_list() == [False, True, False, True]
+
+
+class TestLoadLocationSignals:
+    """Test load_location_signals empty-overlap case (no API-corpus rows match the given ids).
+
+    When no table ids match any API-corpus row, the function returns an empty DataFrame
+    with correct typed schema (string id, boolean any_us/any_not_us), not a Null-typed
+    id that would crash the downstream join.
+    """
+
+    def test_empty_overlap_returns_typed_empty_frame(self):
+        """No ids match API corpus -> returns typed-empty frame suitable for join."""
+        # Use ids that definitely won't exist in the API corpus (negative test)
+        nonexistent_ids = ["nonexistent_id_xyz_123", "another_fake_id_999"]
+
+        result = load_location_signals(nonexistent_ids)
+
+        # Verify structure: empty but with correct dtypes
+        assert result.height == 0
+        assert result.width == 3
+        assert set(result.columns) == {"id", "any_us", "any_not_us"}
+
+        # Verify dtypes are correct (not Null)
+        schema = result.schema
+        assert schema["id"] == pl.String
+        assert schema["any_us"] == pl.Boolean
+        assert schema["any_not_us"] == pl.Boolean
+
+    def test_empty_overlap_join_succeeds(self):
+        """Empty-overlap result joins without crashing (schema mismatch prevented)."""
+        nonexistent_ids = ["nonexistent_id_xyz_123"]
+        signals = load_location_signals(nonexistent_ids)
+
+        # Simulate the join that happens in run_relevance.py and run_cca_doca.py
+        test_table = pl.DataFrame({
+            "id": ["a", "b", "c"],
+            "value": [1, 2, 3],
+        })
+
+        # This should not crash with "cannot join on str vs null" error
+        result = test_table.join(signals, on="id", how="left")
+
+        # All rows should be present (left join), with nulls filled
+        assert result.height == 3
+        assert "any_us" in result.columns
+        assert "any_not_us" in result.columns
+
+        # After fill_null(False), location signals default to no-signal
+        result = result.with_columns(
+            pl.col("any_us").fill_null(False),
+            pl.col("any_not_us").fill_null(False),
+        )
+        assert result["any_us"].to_list() == [False, False, False]
+        assert result["any_not_us"].to_list() == [False, False, False]

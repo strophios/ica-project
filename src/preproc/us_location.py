@@ -28,6 +28,8 @@ from pathlib import Path
 
 import polars as pl
 
+import src.config as config
+
 _GAZETTEER_DIR = Path(__file__).resolve().parents[2] / "r" / "dateline" / "gazetteers"
 
 # Desk/section US-signal lists (us_assign.R lines 33-50, str_to_lower'd).
@@ -214,8 +216,6 @@ def load_location_signals(ids: list[str]) -> pl.DataFrame:
     Returns:
         DataFrame with columns (id, any_us, any_not_us).
     """
-    from src import config
-
     want = set(ids)
     parts = []
     for f in sorted(glob.glob(str(config.API_CORPUS_DIR / "*.parquet"))):
@@ -224,4 +224,6 @@ def load_location_signals(ids: list[str]) -> pl.DataFrame:
         ).filter(pl.col("id").is_in(list(want)))
         if d.height:
             parts.append(d)
-    return compute_location_signals(pl.concat(parts)) if parts else pl.DataFrame({"id": [], "any_us": [], "any_not_us": []})
+    return compute_location_signals(pl.concat(parts)) if parts else pl.DataFrame(
+        schema={"id": pl.String, "any_us": pl.Boolean, "any_not_us": pl.Boolean}
+    )
