@@ -107,3 +107,54 @@ class TestRelevanceHeadRename:
         assert "rel" in rel_out
         assert "rel" not in cca_out
         assert "cca" not in rel_out
+
+
+class TestRelevanceDatasetHeadNameContract:
+    """End-to-end guard for the head-name <-> target-key contract (Phase 3 Task 5).
+
+    Renaming the relevance head to "rel" (Task 5) means the endpoint model
+    expects a "rel_targets" input. The dataset MUST be built with the matching
+    head_name, else fit() fails with "Missing data for input 'rel_targets'".
+    run_relevance.py threads head_cfg.name into dataset_from_embeddings; these
+    tests fail if that wiring (or the rename) regresses.
+    """
+
+    def _build_rel_model(self, hidden_dim=8):
+        from src.model_setup.heads import ClassificationHead
+        from src.model_setup.assembly import build_feature_endpoint_model
+        from src.loss_functions.loss import FLPULoss
+
+        head = ClassificationHead(
+            hidden_dim=hidden_dim,
+            loss_fn=FLPULoss(prior=0.05),
+            name="rel",
+        )
+        model = build_feature_endpoint_model({"rel": head}, hidden_dim=hidden_dim)
+        model.compile(optimizer=keras.optimizers.Adam(1e-3))
+        return model
+
+    def _dataset(self, head_name, hidden_dim=8, n=32):
+        from src.data_setup.data import dataset_from_embeddings
+
+        rng = np.random.default_rng(0)
+        feats = rng.standard_normal((n, hidden_dim)).astype("float32")
+        labels = rng.integers(0, 2, size=n).astype("float32")
+        # No weights -> data is a single (features, labels) group.
+        return dataset_from_embeddings(
+            shuffle_buffer=8, batch_size=8, data=(feats, labels),
+            head_name=head_name,
+        )
+
+    def test_fit_succeeds_when_head_name_matches(self):
+        model = self._build_rel_model()
+        ds = self._dataset(head_name="rel")
+        # One step must run without a "Missing data for input" error.
+        model.fit(ds, steps_per_epoch=1, epochs=1, verbose=0)
+
+    def test_fit_fails_when_head_name_mismatches(self):
+        import pytest
+
+        model = self._build_rel_model()
+        ds = self._dataset(head_name="cca")  # the old default -> "cca_targets"
+        with pytest.raises(ValueError, match="rel_targets"):
+            model.fit(ds, steps_per_epoch=1, epochs=1, verbose=0)

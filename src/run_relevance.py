@@ -144,13 +144,18 @@ def main(prior, suffix="relevance_train", threshold=0.5, epochs=7, max_steps=Non
     # the reliable-neg stream is small (neg_weight) but guaranteed-present so the
     # PN term gets signal every batch when eta>0.
     tp, vp = run_config.ratio_batch.train_pos, run_config.ratio_batch.val_pos
+    # Pass head_name so the emitted target dict key (f"{head_name}_targets")
+    # matches the renamed "rel" head's endpoint-input name; the default "cca"
+    # would emit "cca_targets" and break fit against a "rel" head.
     train_set = dataset_from_embeddings(
         SHUFFLE_BUFFER, BATCH_SIZE, data=[pos_tr, neg_tr, unl_tr],
         weights=[tp, neg_weight, 1 - tp - neg_weight],
+        head_name=head_cfg.name,
     )
     val_set = dataset_from_embeddings(
         SHUFFLE_BUFFER, BATCH_SIZE, data=[pos_va, neg_va, unl_va],
         weights=[vp, neg_weight, 1 - vp - neg_weight],
+        head_name=head_cfg.name,
     )
     steps_per_epoch = math.floor(n_pos_tr / (BATCH_SIZE * run_config.ratio_batch.train_pos))
     validation_steps = max(1, math.floor(n_pos_va / (BATCH_SIZE * run_config.ratio_batch.val_pos)))
