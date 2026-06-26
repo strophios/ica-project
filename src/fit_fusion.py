@@ -129,7 +129,6 @@ def main(
     us_thresholds: list[float] | None = None,
     n_splits: int = 5,
     random_state: int = 42,
-    include_us_in_lr: bool = False,
     output_dir: Path | str | None = None,
 ) -> dict:
     """Orchestrate fusion selection + composed calibration (conditional-on-US population).
@@ -146,7 +145,6 @@ def main(
         us_thresholds: Thresholds to evaluate for recall recipe (e.g., linspace(0.02, 0.7, ...))
         n_splits: Folds for StratifiedKFold CV (default 5)
         random_state: Seed for determinism
-        include_us_in_lr: If True, fit LR with z_cca + z_rel + z_us (default False)
         output_dir: Directory for fusion.json + metrics.json (default uses cca_doca dir)
 
     Returns:
@@ -234,20 +232,24 @@ def main(
     logger.info(f"Feature matrix: {features.shape}")
 
     # Build texts for US model (headline + "</s>" + lead_paragraph)
-    headline_col = "headline" if "headline" in eval_df_join.columns else None
-    lead_col = "lead_paragraph" if "lead_paragraph" in eval_df_join.columns else None
+    missing_cols = []
+    if "headline" not in eval_df_join.columns:
+        missing_cols.append("headline")
+    if "lead_paragraph" not in eval_df_join.columns:
+        missing_cols.append("lead_paragraph")
 
-    if headline_col and lead_col:
-        headlines = eval_df_join[headline_col].to_list()
-        leads = eval_df_join[lead_col].to_list()
-        texts_list = [
-            f"{h if h else ''}</s>{lead if lead else ''}"
-            for h, lead in zip(headlines, leads)
-        ]
-    else:
-        # Fallback: use whatever text columns are available
-        logger.warning("⚠️  headline or lead_paragraph columns missing; using fallback")
-        texts_list = [""] * eval_df_join.shape[0]
+    if missing_cols:
+        raise KeyError(
+            f"Cannot score US head: required text columns missing: {missing_cols}. "
+            f"Available columns: {list(eval_df_join.columns)}"
+        )
+
+    headlines = eval_df_join["headline"].to_list()
+    leads = eval_df_join["lead_paragraph"].to_list()
+    texts_list = [
+        f"{h if h else ''}</s>{lead if lead else ''}"
+        for h, lead in zip(headlines, leads)
+    ]
 
     # ========================================================================
     # Step 2: Score calibrated heads
@@ -392,6 +394,15 @@ def main(
     p_cca_us_true = p_cca[us_true_indices]
     p_rel_us_true = p_rel[us_true_indices]
     ica_event_us_true = ica_event[us_true_indices]
+
+    # Guard: ensure no null ica_event in combiner fit population (would silently coerce to False)
+    null_ica_rows = us_true_survivors.filter(pl.col("ica_event").is_null())
+    assert null_ica_rows.is_empty(), (
+        f"Combiner fit population contains {null_ica_rows.shape[0]} rows with null ica_event; "
+        "these would silently coerce to False and poison the fit. "
+        "All us_event==True rows must have coded (non-null) ica_event labels."
+    )
+
     n_pos_us_true = int(ica_event_us_true.sum())
     n_neg_us_true = int((~ica_event_us_true).sum())
     logger.info(
@@ -428,10 +439,6 @@ def main(
         # Features: z_cca, z_rel (probabilities)
         lr_features_train = np.column_stack([p_cca_train, p_rel_train])
         lr_features_val = np.column_stack([p_cca_val, p_rel_val])
-
-        # TODO: add include_us_in_lr option if needed (requires tracking original row indices)
-        if include_us_in_lr:
-            logger.warning("⚠️  include_us_in_lr=True not yet implemented; skipping")
 
         lr = fit_logistic_combiner(lr_features_train, y_train, random_state=random_state)
         lr_scores_val = apply_logistic_combiner(lr, lr_features_val)
