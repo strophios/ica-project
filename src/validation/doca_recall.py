@@ -64,3 +64,78 @@ def doca_recall(scored_df: pl.DataFrame, threshold: float = 0.5) -> dict[str, fl
         "recall": float(recall),
         "n": int(n_doca),
     }
+
+
+class ThresholdPickResult:
+    """Result of picking a threshold from the recall recipe.
+
+    Attributes:
+        threshold: The selected threshold (largest meeting target_recall, or
+                   lowest if none qualify).
+        qualified: Whether the selected threshold meets or exceeds target_recall.
+    """
+
+    def __init__(self, threshold: float, qualified: bool):
+        self.threshold = threshold
+        self.qualified = qualified
+
+    def __eq__(self, other: object) -> bool:
+        if not isinstance(other, ThresholdPickResult):
+            return NotImplemented
+        return self.threshold == other.threshold and self.qualified == other.qualified
+
+    def __repr__(self) -> str:
+        return f"ThresholdPickResult(threshold={self.threshold}, qualified={self.qualified})"
+
+
+def pick_us_threshold(
+    scored_df: pl.DataFrame,
+    target_recall: float,
+    thresholds: list[float],
+) -> ThresholdPickResult:
+    """Pick the largest threshold whose DoCA recall >= target_recall.
+
+    Implements the CCA-consumer recall recipe from docs/notes/us-filter-threshold-recipe.md:
+    evaluate doca_recall over a threshold grid, return the largest threshold
+    whose recall meets the target. If none qualify, return the lowest threshold
+    with qualified=False.
+
+    Args:
+        scored_df: DataFrame with columns doca_id (str, nullable) and us_score
+                   (float [0, 1]). Rows with doca_id=null are ignored.
+        target_recall: Target recall level (e.g., 0.98 to preserve 98% of
+                       DoCA-matched articles).
+        thresholds: List of thresholds to evaluate. Must be non-empty.
+                    Typically sorted ascending for clarity, but order doesn't
+                    affect the result.
+
+    Returns:
+        ThresholdPickResult with:
+        - threshold: Largest threshold meeting target_recall, or lowest
+                     threshold if none qualify.
+        - qualified: True if the selected threshold achieves ≥ target_recall,
+                     False otherwise.
+
+    Raises:
+        ValueError: If thresholds is empty.
+    """
+    if not thresholds:
+        raise ValueError("thresholds must be non-empty")
+
+    # Evaluate recall at each threshold
+    recalls = {}
+    for t in thresholds:
+        result = doca_recall(scored_df, threshold=t)
+        recalls[t] = result["recall"]
+
+    # Find the largest threshold whose recall >= target_recall
+    qualifying = [t for t in thresholds if recalls[t] >= target_recall]
+
+    if qualifying:
+        # Return the largest qualifying threshold
+        selected_threshold = max(qualifying)
+        return ThresholdPickResult(threshold=selected_threshold, qualified=True)
+    else:
+        # None qualify: return the lowest threshold with qualified=False
+        selected_threshold = min(thresholds)
+        return ThresholdPickResult(threshold=selected_threshold, qualified=False)
