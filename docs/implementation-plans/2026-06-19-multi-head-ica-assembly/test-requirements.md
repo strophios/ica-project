@@ -38,7 +38,7 @@ All operational commands run from the project root with `uv run`.
 | AC4.3 | ✅ `tests/test_fit_fusion.py` (`select_combiner` 1-SE rule) | ✅ rule applied to real CV result |
 | AC5.1 | ✅ `tests/test_assemble_ica.py` | — |
 | AC5.2 | ✅ `tests/test_assemble_ica.py` | — |
-| AC5.3 | ✅ `tests/test_artifact_check.py` | — |
+| AC5.3 | ✅ `tests/test_artifact_check_ica.py` | — |
 | AC5.4 | ✅ `tests/test_assemble_ica.py` | — |
 | AC6.1 | ✅ `tests/test_apply_ica.py` (output schema) | ✅ API full-corpus apply |
 | AC6.2 | — (covered by AC6.1 schema test) | ✅ LDC 1996–2007 apply |
@@ -253,7 +253,7 @@ standalone single-head scores on a fixture (weights correctly transferred); comp
 0.0 for gated-out rows and in [0,1] for survivors.
 
 ### AC5.3 — Cross-process reload reproduces scores within tolerance (artifact_check analogue)
-**Automated:** `tests/test_artifact_check.py` (Phase 5 Task 2) — `reload_and_score_ica` output matches
+**Automated:** `tests/test_artifact_check_ica.py` (Phase 5 Task 2) — `reload_and_score_ica` output matches
 `IcaModel.predict_ica_from_features` within tolerance (bitwise on the frozen-feature path) on a
 fixture artifact set written to `tmp_path` (3× weights+config+calibration + `fusion.json`), proving
 cross-process reproduction.
