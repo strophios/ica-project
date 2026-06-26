@@ -1,11 +1,15 @@
 # CLAUDE.md
 
-> ⚠️ **STALE as of the `cca-doca-retrain` branch (2026-06-10 content).** This file
-> predates the CCA/DoCA retrain, the immigrant-relevance head, and the smarter US
-> gate, and is out of date on the data layout, label sources, and model state.
-> **For current state: `docs/notes/project-state-and-data-map.md` (data/artifact
-> map) and `docs/notes/roadmap.md` (what's next / deferred).** Full reconciliation
-> of this file is a deferred roadmap item (after a working multi-head model lands).
+> ⚠️ **PARTIALLY RECONCILED (2026-06-26).** The "Planned Architecture" and "Current
+> Status and Open Work" sections below were updated for the `cca-doca-retrain` arc:
+> the multi-head `IcaModel` now exists and produces ICA candidates (CCA + relevance
+> `rel` heads, the fused US gate, fusion, and apply are all real). The **rest** of
+> this file (the older single-head CCA / standalone US-filter narrative, the data
+> counts, label sources) still carries 2026-06-10 content and is stale on the
+> retrain specifics. **For authoritative current state: `docs/notes/project-state-
+> and-data-map.md` (data/artifact map) and `docs/notes/roadmap.md` (what's next /
+> deferred).** A full line-by-line rewrite of the remaining sections is still
+> deferred.
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
@@ -22,15 +26,33 @@ The "haystack" problem: finding the tiny fraction of NYT articles reporting ICA 
 2. **Severe class imbalance**: ICA articles are a vanishingly small minority.
 3. **The project assumes SCAR** (Selected Completely At Random) for the labeling mechanism — labeled positives are treated as a random sample of all positives. This is a simplifying assumption; alternative PU approaches exist if it proves inadequate.
 
-### Planned Architecture (not yet fully implemented)
+### Architecture: the assembled multi-head ICA model (implemented 2026-06-26)
 
-The end goal is a **multi-headed classifier**: a shared DAPT RoBERTa encoder feeding separate classification heads for:
-- CCA event identification (implemented)
-- Immigrant involvement (not yet implemented)
-- US events (implemented as a standalone pre-filter — see "US/not-US Pre-Filter" below; not yet unified into a shared-encoder multi-head)
-- Combined ICA output head, fed by the above three + the shared encoder representation (not yet implemented)
+The system is a **multi-head ICA classifier** over a shared frozen DAPT RoBERTa
+encoder. It is assembled in `src/assemble_ica.py` (`IcaModel`) from three heads
+that share the 768-d CLS feature, each trained features-mode on cached embeddings:
+- **US** (`us`) — the US/not-US pre-filter (BCE), used as a hard gate.
+- **CCA** (`cca`) — collective-action event identification (FLPU / focal-nnPU).
+- **relevance** (`rel`) — immigrant relevance (FLPU). This is the head the older
+  text below calls "immigration"; it was built, then renamed `cca`→`rel` in the
+  Phase 3 harmonized retrain (its sidecar records `head.name=="rel"`).
 
-This decomposition lets us leverage the larger labeled datasets for CCA and immigration separately, making the sparse ICA labeling problem tractable. Currently the CCA head and a standalone US/not-US filter exist (each as its own frozen-DAPT-backbone + single-head model); the multi-head unification is future work.
+`IcaModel.predict_ica_from_features((n,768))` returns calibrated `{us, cca, rel}`
+probabilities plus an `ica_score`, composed as: **US gate** (`calib_us ≥ τ_us`, or a
+`gate_override` mask) → **combine** calibrated CCA·rel (product-AND, or a ≤3-param LR
+chosen empirically by a 1-SE rule — `src/fusion/`) → **composed Platt** →
+`ica_score` (0.0 for gated-out rows). The fusion is persisted as
+`cca_doca/ica_fusion.fusion.json`. `src/apply_ica.py` runs the assembled model over
+the API (1960–1995, ML gate) and LDC (1996–2007, gold-first gate) corpora to produce
+`cca_doca/ica_candidates/{api_1960_1995,ldc_1996_2007}.parquet`.
+
+This decomposition leverages the larger CCA and relevance labeled datasets
+separately, making the sparse ICA problem tractable. The standalone US/not-US filter
+(documented below) is the same head, now consumed as the assembled gate rather than a
+separate model. For full current state see `docs/notes/project-state-and-data-map.md`;
+the multi-head design/assembly reasoning is in the docs linked under "Current Status"
+below. **Known ceiling:** the US head misses diaspora collective action and caps
+system recall — a scoped-but-deferred retrain (`docs/notes/us-head-retrain-plan.md`).
 
 ## Development Setup
 
@@ -177,7 +199,26 @@ Permanent observability for training runs (the tooling for the deferred empirica
 
 ## Current Status and Open Work
 
-**Done:**
+> **The sections below this banner describe the pre-`cca-doca-retrain` state and are
+> retained for the Tier-1–5 / US-filter-phase history. They are NOT current on the
+> multi-head model.** As of 2026-06-26 the multi-head `IcaModel` is assembled and
+> producing ICA candidates (see "Architecture" above), the CCA + relevance (`rel`)
+> heads were retrained features-mode on a harmonized population, all three heads are
+> Platt-calibrated, the fusion is fit and persisted, and `apply_ica.py` has run on
+> the API and LDC caches. Authoritative current state + open work:
+> `docs/notes/project-state-and-data-map.md` and `docs/notes/roadmap.md`.
+
+**Done (multi-head ICA assembly, Phases 1–6, 2026-06-26):**
+- `IcaModel` assembled (`src/assemble_ica.py`); fusion module `src/fusion/`; apply
+  (`src/apply_ica.py`) → `cca_doca/ica_candidates/`. CCA + relevance (`rel`)
+  harmonized retrain; three Platt calibrators; clean hand-coded eval set
+  (`validation/ica_coding_template_coded.csv`, 214 ICA positives).
+- Two captured findings: the US head's diaspora-recall ceiling
+  (`docs/notes/us-head-retrain-plan.md`, a deferred retrain) and the apply results +
+  raw-vs-stripped channel correction + cluster runbook
+  (`docs/notes/ica-apply-results-and-cluster-runbook.md`).
+
+**Done (pre-retrain history):**
 - DAPT on headline/lede pairs
 - CCA classifier (single-head) with FLPU loss
 - Class prior estimation via DEDPUL
@@ -197,11 +238,11 @@ Permanent observability for training runs (the tooling for the deferred empirica
 - Benchmarking and comparative testing (FLPU vs. ALUM, etc.)
 - Refine NYT indexer tag definitions for CCA and immigration labels (current definitions are too generous)
 - Pull DoCA article headlines (1960-1984) via NYT Archive API to expand training data
-- Build additional classification heads (immigration, combined ICA); unify the standalone US filter into the shared-encoder multi-head
+- ~~Build additional classification heads (immigration, combined ICA); unify the standalone US filter into the shared-encoder multi-head~~ — **DONE 2026-06-26**: the relevance (`rel`) head and the combined ICA composition exist; the US filter is consumed as the assembled gate (see "Architecture" above).
 - Hyperparameter search
-- Output calibration (decision threshold, not just raw .5)
-- Hand-label a small PN test set (~200-1000 articles) for proper evaluation
-- Retrain CCA classifier with the corrected prior (π_pos ≈ 0.02 rather than 0.03)
+- Output calibration (decision threshold, not just raw .5) — **partly done**: all three heads + the composed ICA score are now Platt-calibrated; τ_us picked via `doca_recall.pick_us_threshold`.
+- Hand-label a small PN test set (~200-1000 articles) for proper evaluation — **partly done**: a 214-positive hand-coded ICA eval set exists (`validation/ica_coding_template_coded.csv`); a 500-row CCA gold set also exists.
+- ~~Retrain CCA classifier with the corrected prior (π_pos ≈ 0.02 rather than 0.03)~~ — **DONE**: CCA retrained features-mode at π=0.02 on the DoCA-matched population.
 
 **Handoff docs for picking up mid-work:**
 - `docs/notes/tiers-and-checkpoints.md` — tier plan, commit-level status, and "how to pick up" instructions. Operational doc — read at the start of each piece, updated at piece close.

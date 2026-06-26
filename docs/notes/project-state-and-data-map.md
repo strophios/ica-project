@@ -1,12 +1,13 @@
 # Project state and data map
 
-*Last updated: 2026-06-19. The **data/artifact MAP** — where things live and what
+*Last updated: 2026-06-26. The **data/artifact MAP** — where things live and what
 state they're in. For **what's next / deferred**, see `docs/notes/roadmap.md` (the
-live roadmap + index). The top-level `CLAUDE.md` (2026-06-10) and `README.md`
-(April) predate the entire `cca-doca-retrain` arc and are stale; full reconciliation
-is deferred (a roadmap item). This note is a snapshot, not a contract — lead facts
-are verified against the filesystem on the date above. Updated 06-19 after the
-relevance head + smarter US gate landed (see below).*
+live roadmap + index). The top-level `CLAUDE.md` was reconciled 2026-06-26 for the
+multi-head assembly; `README.md` (April) still predates the `cca-doca-retrain` arc.
+This note is a snapshot, not a contract — lead facts are verified against the
+filesystem on the date above. Updated 06-26 after the multi-head ICA assembly
+(Phases 1–6) landed: harmonized CCA + relevance retrain, three calibrators, fusion,
+and the assembled `IcaModel` producing ICA candidates (see below).*
 
 ## The one-paragraph version
 
@@ -49,7 +50,13 @@ The repo holds code; the data and trained artifacts do not. Three levels matter.
   `cca`/`immig` descriptor labels.
 - `cca_doca/` — retrained CCA artifacts: weights + config sidecars, per-run metrics CSVs,
   `experiments/` (eval + corpus-score JSON), `prior_estimate.json`, `embed_cache/`, plus
-  `scored_candidates.parquet` and the `face_validity_*.csv` dumps.
+  `scored_candidates.parquet` and the `face_validity_*.csv` dumps. Now also carries the
+  **fusion sidecar** `ica_fusion.fusion.json` (+ its `ica_fusion_metrics.json`) and the
+  **`ica_candidates/`** directory (`api_1960_1995.parquet`, `ldc_1996_2007.parquet` — the
+  assembled-model apply outputs; see the multi-head section below).
+- `relevance/` — relevance (`rel`) head artifacts: `relevance.weights.h5` + `.config.json`
+  (its head `name=="rel"`) + `.calibration.json`, plus the `candidates`/`ica_anchors`/
+  `reliable_negatives` parquets that defined its training population.
 - `us_filter/` — US classifier: `us_classifier.weights.h5` (the smoke-test weights, see below),
   `ldc_labeled.parquet` (the training source: `us_label` + `stripped_text`), `audit/`, `logs/`,
   `classifier/`, `us_set/`.
@@ -101,7 +108,8 @@ re-run; if incidental, ignore. Worth a one-line confirmation before the final re
 **Embedding caches** (`cca_doca/embed_cache/`):
 - `train250k/` — the CCA training cache. Done.
 - `full/` — corpus-wide API embed; part 1 (1960–1975) done, part 2 pending, non-blocking.
-- `ldc_9507/` — LDC 1995–2007, for the out-of-sample generalization check. Done; not yet scored.
+- `ldc_9507/` — LDC 1996–2007 (raw `headline_with_lead`), for the out-of-sample generalization
+  check. Done, and now scored by the assembled `IcaModel` → `ica_candidates/ldc_1996_2007.parquet`.
 - `us_train_ldc/` — the 630,663 labeled rows of `ldc_labeled.parquet` (stripped_text channel,
   us_label carried), the reusable cache that retrains the US head features-mode in minutes.
 
@@ -137,21 +145,57 @@ applied to the full API corpus (`us_filter/api_us_scores/` absent — that's the
 - Collaborator memo finalized: `docs/reports/cca-collaborator-memo.md`.
 
 **Done 2026-06-19 (relevance head + smarter US gate):**
-- **Immigrant-relevance head — built** (`relevance.weights.h5`, η=0, fused-gated).
-  Positives = curated immigration-content descriptors ∪ 466 ICA anchors, US-restricted,
-  FLPU features-mode; gold AUC ≈ 0.94. The nnPNU reliable-negative experiment was a
-  clean negative result (η=0 canonical). See `relevance-head-handoff.md`.
+- **Immigrant-relevance head — built** (η=0, fused-gated). Positives = curated immigration-content
+  descriptors ∪ 466 ICA anchors, US-restricted, FLPU features-mode; gold AUC ≈ 0.94. The nnPNU
+  reliable-negative experiment was a clean negative result (η=0 canonical). See
+  `relevance-head-handoff.md`. (Superseded by the Phase 3 harmonized retrain below — the head is
+  now named `rel` and trained on the shared population.)
 - **Smarter US gate** — `src/preproc/us_location.py` fuses the dateline ML filter with
   a location signal (`any_us`/`any_not_us`); the fused gate halves the foreign-event
   leak. Threaded into `run_relevance`. Deferred gate options B/C in `roadmap.md`.
-- New data products (gitignored): `relevance/{candidates,ica_anchors,reliable_negatives}.parquet`,
-  `cca_doca/embed_cache/relevance_{pos,train}/`, `relevance/relevance*.weights.h5`.
+
+**Done 2026-06-26 (multi-head ICA assembly, Phases 1–6):**
+- **`IcaModel` assembled and producing candidates** (`src/assemble_ica.py`). Frozen DAPT encoder
+  + calibrated `{us, cca, rel}` heads (features-mode, Pattern-2 weight transfer + Pattern-A in-process
+  sharing) + a fusion composition: US gate (`calib_us ≥ τ_us`, or a `gate_override` mask) →
+  product-AND combine of calibrated CCA·rel → composed Platt → `ica_score` (0.0 for gated-out rows).
+  `predict_ica_from_features((n,768)) → {us, cca, rel, ica_score}`. Reload-proof in
+  `src/validation/artifact_check.py:reload_and_score_ica`.
+- **Fusion module `src/fusion/`** (`combiner.py`: `combine_and`, `fit_/apply_logistic_combiner`,
+  `FusionConfig`; `sidecar.py`: `save_/load_fusion`, `fusion_path_for_weights`). The combiner choice
+  (product-AND vs ≤3-param LR over calibrated CCA·rel) is made empirically by a pre-registered 1-SE
+  CV rule on the conditional-on-US population (`src/fit_fusion.py`); a composed Platt calibrates the
+  product. Persisted as `cca_doca/ica_fusion.fusion.json` (+ `ica_fusion_metrics.json`).
+- **Phase 3 harmonized retrain.** CCA (`run_cca_doca.py`) and relevance (`run_relevance.py`) heads
+  retrained on a shared population — same `us_classifier_full` weights, the same **fused** US gate
+  (`us_location.apply_fused_us_gate`), and the same Phase-2 clean-ICA holdout excluded from both
+  (leakage guard `src/data_setup/data.assert_holdout_excluded`). The relevance head was **renamed
+  `cca`→`rel`** (its sidecar records `head.name=="rel"`).
+- **Phase 4 calibration.** All three heads now carry Platt calibrators (added
+  `src/calibrate_relevance.py`); `src/validation/doca_recall.py:pick_us_threshold` is the τ_us
+  recall recipe (anchor DoCA positives).
+- **Phase 2 clean eval set.** `src/validation/ica_eval.py` (`assemble_eval_frame`,
+  `apply_us_scope_to_ica`, `holdout_ids_from_template`, `reserve_anchor_holdout`),
+  `build_ica_coding_template.py`, `scripts/build_ica_eval_set.py` → the hand-coded
+  `validation/ica_coding_template_coded.csv` (**214 ICA positives**).
+- **Apply (`src/apply_ica.py`).** Runs `IcaModel` over the API cache (1960–1995, ML US gate) and the
+  LDC cache (1996–2007, **gold-first** US gate via `us_location.gold_first_us_gate`) → ranked
+  `cca_doca/ica_candidates/{api_1960_1995,ldc_1996_2007}.parquet`. **Channel fact:** CCA and rel were
+  trained on **raw** `headline_with_lead`, so the apply uses the raw `ldc_9507` cache (NOT the
+  dateline-`stripped_text` channel, which is the US head's training channel only). Results +
+  outstanding cluster work: `docs/notes/ica-apply-results-and-cluster-runbook.md`.
+- **New config consts:** `US_FILTER_FULL_WEIGHTS` (alias of `us_classifier_full`),
+  `RELEVANCE_DOCA_WEIGHTS`, `ICA_CANDIDATES_DIR`.
+- **Known ceiling (deferred):** the US head misses diaspora collective action — it drops ~27% of ICA
+  positives at τ_us=0.3, capping system recall. A retrain is scoped but not done; see
+  `docs/notes/us-head-retrain-plan.md`.
 
 **Open gaps (full live list in `roadmap.md`):**
-- Multi-head ICA model (US gate → CCA + relevance → ICA): not assembled — the next major piece.
-- No full-corpus apply outputs (`api_cca_scores/`, `api_us_scores/` absent) — the Saturday apply step.
+- US head diaspora-recall retrain (the system-recall ceiling above) — `us-head-retrain-plan.md`.
+- Cluster work for the apply / full-corpus runs — `ica-apply-results-and-cluster-runbook.md`.
 - Larger hand-coded gold set (only 500 of 2,553 drawn; street-dominated) to tighten precision SEs.
-- Full CLAUDE.md/README reconciliation (banners added 06-19; full rewrite deferred).
+- Text-mode `IcaModel.predict_ica_from_text` is unimplemented (features-mode is the path).
+- README reconciliation (still predates the `cca-doca-retrain` arc).
 
 **Latent bug fixed this session:** `data_from_parquet` globbed `us_filter/**/*.parquet` greedily,
 pulling in `audit/api_ldc_matched.parquet` (no `id` column → crash). Fixed with an additive `pattern`
