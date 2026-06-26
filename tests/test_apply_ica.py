@@ -235,7 +235,7 @@ def synthetic_cache_ldc():
 # =============================================================================
 
 
-def test_apply_ica_api_output_schema(tiny_ica_model, synthetic_cache_api):
+def test_apply_ica_api_output_schema(synthetic_cache_api):
     """Verify API apply produces correct schema and dtypes."""
     from src.apply_ica import apply_ica_api
 
@@ -303,7 +303,7 @@ def test_apply_ica_api_output_schema(tiny_ica_model, synthetic_cache_api):
         assert (candidates["ica_score"] <= 1).all()
 
 
-def test_apply_ica_ldc_output_schema(tiny_ica_model, synthetic_cache_ldc):
+def test_apply_ica_ldc_output_schema(synthetic_cache_ldc):
     """Verify LDC apply produces correct schema and dtypes, including gate_source."""
     from src.apply_ica import apply_ica_ldc
 

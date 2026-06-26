@@ -179,6 +179,14 @@ def apply_ica_ldc(
         config.US_FILTER_LABELED_PARQUET, columns=["id", "us_label"]
     )
 
+    # Guard against duplicate ids in gold labels (would misalign scores on join)
+    n_rows = gold_labels_df.height
+    n_unique = gold_labels_df.select(pl.col("id").unique().count()).item()
+    if n_unique < n_rows:
+        raise ValueError(
+            f"gold labels parquet has duplicate ids: {n_rows} rows, {n_unique} unique ids"
+        )
+
     # Join gold labels to metadata (outer join to keep all rows, unmatched get null)
     meta_with_gold = meta.select("id").join(gold_labels_df, on="id", how="left")
 
@@ -246,8 +254,6 @@ def main(
     corpus: Literal["api", "ldc"] = "api",
     cache_suffix: str | None = None,
     limit: int | None = None,
-    year_min: int | None = None,
-    year_max: int | None = None,
 ) -> None:
     """Apply IcaModel over API or LDC corpus.
 
@@ -255,8 +261,6 @@ def main(
         corpus: "api" or "ldc"
         cache_suffix: cache subdirectory name (auto-default based on corpus)
         limit: optional row limit for smoke testing
-        year_min: optional minimum year filter
-        year_max: optional maximum year filter
     """
     logging.basicConfig(level=logging.INFO)
 
@@ -294,24 +298,10 @@ if __name__ == "__main__":
         default=None,
         help="Limit rows for smoke testing",
     )
-    parser.add_argument(
-        "--year-min",
-        type=int,
-        default=None,
-        help="Minimum year filter (not yet implemented)",
-    )
-    parser.add_argument(
-        "--year-max",
-        type=int,
-        default=None,
-        help="Maximum year filter (not yet implemented)",
-    )
 
     args = parser.parse_args()
     main(
         corpus=args.corpus,
         cache_suffix=args.cache_suffix,
         limit=args.limit,
-        year_min=args.year_min,
-        year_max=args.year_max,
     )

@@ -292,3 +292,14 @@ class TestGoldFirstUSGate:
         final_gate, coverage = gold_first_us_gate(gold, ml)
         assert final_gate == []
         assert coverage == 0.0  # 0 / 0 → 0.0
+
+    def test_length_mismatch_raises(self):
+        """Length mismatch between gold and ml lists raises ValueError.
+
+        The zip(strict=True) guard catches misaligned inputs that would
+        silently truncate and produce incorrect results.
+        """
+        gold = [True, None, False, None]  # 4 elements
+        ml = [False, True, False]  # 3 elements: mismatch!
+        with pytest.raises(ValueError, match="zip\\(\\) argument .* is shorter"):
+            gold_first_us_gate(gold, ml)

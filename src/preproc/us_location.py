@@ -235,9 +235,10 @@ def gold_first_us_gate(
         ml_list = list(ml_pass)
 
     # Elementwise: gold wins if non-null, else ML
+    # strict=True ensures length mismatch is caught (Python 3.10+)
     final_gate = [
         g if g is not None else m
-        for g, m in zip(gold_list, ml_list)
+        for g, m in zip(gold_list, ml_list, strict=True)
     ]
 
     # Coverage: fraction of non-null gold labels
