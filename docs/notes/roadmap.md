@@ -13,6 +13,7 @@ what's next and what's deferred. The root `CLAUDE.md` and `README.md` are stale
 | CCA/DoCA retrain arc (detail/reasoning) | `cca-doca-handoff.md`, `cca-doca-retrain-design.md`, `cca-model-characterization.md` |
 | Relevance-head arc (detail/reasoning) | `relevance-head-handoff.md` |
 | US filter / dateline pipeline | `us-filter-*.md`, `r/CLAUDE.md` |
+| **US head retrain (diaspora recall)** | `us-head-retrain-plan.md` |
 | Tier 1–5 audit/refactor history | `tiers-and-checkpoints.md`, `tier{2,3,4,5}-design.md` |
 | Deferred substantive questions | `pinned-questions.md` |
 | Process / engineering patterns | `process-patterns.md`, `engineering-patterns.md` |
@@ -49,6 +50,22 @@ same held-out joint-ICA eval ids) to kill anchor contamination by construction;
 US is a recall-tuned **gate**, not a fusion term (the heads are conditional-on-US
 estimators). Apply targets: `api_corpus` 1960–1995 + LDC 1996–2007 (the
 out-of-DoCA expansion test).
+
+## A2. US head retrain — deferred follow-up to the assembly (2026-06-26)
+
+The Phase-4 fusion fit surfaced a hard recall ceiling: the US gate misses
+**diaspora/solidarity protests** (US-soil collective action about foreign topics —
+e.g. Haitian exiles marching in NYC), which are the highest-value ICA category. It
+drops 27% of held-out ICA positives; 19% of the DoCA anchors score `p_us < 0.2`.
+Ruled out era/dateline/sparsity — the cause is content (foreign-topic text swamps
+the US-location signal), rooted in dateline labels encoding *filing* location, not
+*event* location. The fused gate can't rescue ML-negatives.
+
+The assembly ships on the current head with **gold-first gating** (trust DoCA /
+dateline `us_label` over the ML head) — fine for known positives, leaves a
+documented ceiling for novel diaspora events. The retrain (DoCA + section labels,
+nnPNU, strip-vs-no-strip experiment, validate-before-swap) is a substantial
+follow-up: full findings + design in **`us-head-retrain-plan.md`**.
 
 ## B. Relevance head — deferred (from `relevance-head-handoff.md`)
 
