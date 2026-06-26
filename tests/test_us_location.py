@@ -6,6 +6,7 @@ import pytest
 from src.preproc.us_location import (
     apply_fused_us_gate,
     compute_location_signals,
+    gold_first_us_gate,
     is_clearly_foreign,
     is_foreign_place,
     is_us_place,
@@ -222,3 +223,72 @@ class TestLoadLocationSignals:
         )
         assert result["any_us"].to_list() == [False, False, False]
         assert result["any_not_us"].to_list() == [False, False, False]
+
+
+class TestGoldFirstUSGate:
+    """Test gold-first US gate: gold label overrides ML when non-null, fallback otherwise."""
+
+    def test_gold_true_overrides_ml_false(self):
+        """Gold True beats ML False → True."""
+        gold = [True, False]
+        ml = [False, False]
+        final_gate, coverage = gold_first_us_gate(gold, ml)
+        assert final_gate == [True, False]
+        assert coverage == 1.0  # All gold non-null
+
+    def test_gold_false_overrides_ml_true(self):
+        """Gold False beats ML True → False."""
+        gold = [False, True]
+        ml = [True, True]
+        final_gate, coverage = gold_first_us_gate(gold, ml)
+        assert final_gate == [False, True]
+        assert coverage == 1.0  # All gold non-null
+
+    def test_gold_null_falls_back_to_ml(self):
+        """Gold null → use ML pass/fail (both True and False cases)."""
+        gold = [None, None, True, False]
+        ml = [True, False, False, False]
+        final_gate, coverage = gold_first_us_gate(gold, ml)
+        # First two rows use ML since gold is null; last two use gold
+        assert final_gate == [True, False, True, False]
+        assert coverage == 0.5  # 2/4 gold non-null
+
+    def test_mixed_gold_ml_coverage(self):
+        """Coverage fraction computed correctly for mixed cases."""
+        gold = [True, None, False, None, True]
+        ml = [False, True, True, False, False]
+        final_gate, coverage = gold_first_us_gate(gold, ml)
+        assert final_gate == [True, True, False, False, True]
+        assert coverage == 3.0 / 5.0  # 3/5 gold non-null
+
+    def test_all_gold_null_coverage_zero(self):
+        """All gold null → coverage is 0.0."""
+        gold = [None, None, None]
+        ml = [True, False, True]
+        final_gate, coverage = gold_first_us_gate(gold, ml)
+        assert final_gate == [True, False, True]
+        assert coverage == 0.0
+
+    def test_all_gold_present_coverage_one(self):
+        """All gold non-null → coverage is 1.0."""
+        gold = [True, False, True, False]
+        ml = [False, True, False, True]  # ML ignored
+        final_gate, coverage = gold_first_us_gate(gold, ml)
+        assert final_gate == [True, False, True, False]
+        assert coverage == 1.0
+
+    def test_polars_series_input(self):
+        """Accepts polars Series as input."""
+        gold_series = pl.Series("gold", [True, None, False])
+        ml_series = pl.Series("ml", [False, True, False])
+        final_gate, coverage = gold_first_us_gate(gold_series, ml_series)
+        assert final_gate == [True, True, False]
+        assert coverage == 2.0 / 3.0
+
+    def test_empty_input_coverage_zero(self):
+        """Empty input → coverage is 0.0."""
+        gold = []
+        ml = []
+        final_gate, coverage = gold_first_us_gate(gold, ml)
+        assert final_gate == []
+        assert coverage == 0.0  # 0 / 0 → 0.0

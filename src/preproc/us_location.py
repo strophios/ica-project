@@ -202,6 +202,51 @@ def apply_fused_us_gate(table: pl.DataFrame) -> pl.DataFrame:
     )
 
 
+# pattern: Functional Core
+def gold_first_us_gate(
+    gold_label: list[bool | None] | pl.Series | list[bool],
+    ml_pass: list[bool] | pl.Series,
+) -> tuple[list[bool], float]:
+    """Pure: elementwise US gate preferring gold labels over ML fallback.
+
+    For each row, use the gold_label if non-null (both True→US and False→not-US),
+    otherwise fall back to ml_pass. Also return the gold-coverage fraction (fraction
+    of rows where gold_label is non-null).
+
+    Args:
+        gold_label: list or Series of bool | None (e.g., from a join with ldc_labeled.us_label).
+                   None means "no gold signal → use ML".
+        ml_pass: list or Series of bool (the ML US gate score, 0.0 or 1.0 after thresholding).
+
+    Returns:
+        (final_gate, gold_coverage): final_gate is a list of bools; gold_coverage is
+        the fraction of rows where gold_label is non-null.
+    """
+    # Convert to lists for uniform handling
+    if isinstance(gold_label, pl.Series):
+        gold_list = gold_label.to_list()
+    else:
+        gold_list = list(gold_label)
+
+    if isinstance(ml_pass, pl.Series):
+        ml_list = ml_pass.to_list()
+    else:
+        ml_list = list(ml_pass)
+
+    # Elementwise: gold wins if non-null, else ML
+    final_gate = [
+        g if g is not None else m
+        for g, m in zip(gold_list, ml_list)
+    ]
+
+    # Coverage: fraction of non-null gold labels
+    n_total = len(gold_list)
+    n_gold = sum(1 for g in gold_list if g is not None)
+    gold_coverage = n_gold / n_total if n_total > 0 else 0.0
+
+    return final_gate, gold_coverage
+
+
 # pattern: Imperative Shell (I/O: reads from API_CORPUS_DIR)
 def load_location_signals(ids: list[str]) -> pl.DataFrame:
     """Shell: read the API corpus rows for `ids` and compute (id, any_us, any_not_us)
