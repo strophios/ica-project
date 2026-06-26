@@ -255,15 +255,17 @@ def test_reload_and_score_ica_matches_ica_model(tiny_ica_artifact_set):
 
     This test proves cross-process reproduction: construct the model fresh from disk,
     score the same features, and verify the outputs match bit-for-bit (or within float32
-    tolerance).
+    tolerance). AC5.3 contract: both paths accept and use fusion_path parameter.
     """
     artifact_set = tiny_ica_artifact_set
 
-    # Construct IcaModel fresh from the fixture artifacts
+    # Construct IcaModel fresh from the fixture artifacts, passing fusion_path
+    # to ensure both in-process and cross-process paths use the same fusion config
     model = IcaModel(
         us_weights_path=artifact_set["us_weights"],
         cca_weights_path=artifact_set["cca_weights"],
         rel_weights_path=artifact_set["rel_weights"],
+        fusion_path=artifact_set["fusion_path"],  # AC5.3: thread fusion_path
     )
 
     # Score via predict_ica_from_features (in-process)
@@ -274,7 +276,7 @@ def test_reload_and_score_ica_matches_ica_model(tiny_ica_artifact_set):
         us_weights=artifact_set["us_weights"],
         cca_weights=artifact_set["cca_weights"],
         rel_weights=artifact_set["rel_weights"],
-        fusion_path=artifact_set["fusion_path"],
+        fusion_path=artifact_set["fusion_path"],  # AC5.3: thread fusion_path
         features=artifact_set["features"],
     )
 
