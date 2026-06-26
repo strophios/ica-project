@@ -149,27 +149,27 @@ class TestSaveLoadRoundTripProduct:
 class TestSaveLoadRoundTripLogReg:
     """Test save_fusion / load_fusion round-trip for logreg config."""
 
-    def test_save_logreg_2coefs_creates_json(self):
-        """save_fusion creates JSON file for logreg config (2 coefs, no US)."""
+    def test_save_logreg_3coefs_no_us_creates_json(self):
+        """save_fusion creates JSON file for logreg config (3 coefs: 2 slopes + intercept, no US)."""
         with tempfile.TemporaryDirectory() as tmpdir:
             cfg = FusionConfig(
                 gate_threshold=0.5,
                 combine="logreg",
-                coefs=[0.5, 0.3],
-                score_space="logit",
+                coefs=[0.5, 0.3, -0.1],  # 2 slopes + intercept
+                score_space="prob",
                 includes_us=False,
             )
             path = Path(tmpdir) / "fusion.json"
             save_fusion(cfg, path)
             assert path.exists()
 
-    def test_save_logreg_3coefs_creates_json(self):
-        """save_fusion creates JSON file for logreg config (3 coefs, with US)."""
+    def test_save_logreg_4coefs_with_us_creates_json(self):
+        """save_fusion creates JSON file for logreg config (4 coefs: 3 slopes + intercept, with US)."""
         with tempfile.TemporaryDirectory() as tmpdir:
             cfg = FusionConfig(
                 gate_threshold=0.6,
                 combine="logreg",
-                coefs=[0.5, 0.3, 0.1],
+                coefs=[0.5, 0.3, 0.2, -0.1],  # 3 slopes + intercept
                 score_space="prob",
                 includes_us=True,
             )
@@ -177,30 +177,30 @@ class TestSaveLoadRoundTripLogReg:
             save_fusion(cfg, path)
             assert path.exists()
 
-    def test_save_logreg_json_values_2coefs(self):
-        """Saved JSON preserves logreg coefs (2-param)."""
+    def test_save_logreg_json_values_3coefs_no_us(self):
+        """Saved JSON preserves logreg coefs (3-param: slopes+intercept, no US)."""
         with tempfile.TemporaryDirectory() as tmpdir:
             cfg = FusionConfig(
                 gate_threshold=0.5,
                 combine="logreg",
-                coefs=[0.5, 0.3],
-                score_space="logit",
+                coefs=[0.5, 0.3, -0.1],
+                score_space="prob",
                 includes_us=False,
             )
             path = Path(tmpdir) / "fusion.json"
             save_fusion(cfg, path)
             payload = json.loads(path.read_text())
             assert payload["combine"] == "logreg"
-            assert payload["coefs"] == [0.5, 0.3]
+            assert payload["coefs"] == [0.5, 0.3, -0.1]
             assert payload["includes_us"] is False
 
-    def test_save_logreg_json_values_3coefs(self):
-        """Saved JSON preserves logreg coefs (3-param)."""
+    def test_save_logreg_json_values_4coefs_with_us(self):
+        """Saved JSON preserves logreg coefs (4-param: slopes+intercept, with US)."""
         with tempfile.TemporaryDirectory() as tmpdir:
             cfg = FusionConfig(
                 gate_threshold=0.5,
                 combine="logreg",
-                coefs=[0.5, 0.3, 0.1],
+                coefs=[0.5, 0.3, 0.2, -0.1],
                 score_space="prob",
                 includes_us=True,
             )
@@ -208,49 +208,49 @@ class TestSaveLoadRoundTripLogReg:
             save_fusion(cfg, path)
             payload = json.loads(path.read_text())
             assert payload["combine"] == "logreg"
-            assert payload["coefs"] == [0.5, 0.3, 0.1]
+            assert payload["coefs"] == [0.5, 0.3, 0.2, -0.1]
             assert payload["includes_us"] is True
 
-    def test_load_logreg_from_json_2coefs(self):
-        """load_fusion reconstructs logreg config (2 coefs)."""
+    def test_load_logreg_from_json_3coefs_no_us(self):
+        """load_fusion reconstructs logreg config (3 coefs, no US)."""
         with tempfile.TemporaryDirectory() as tmpdir:
             cfg_orig = FusionConfig(
                 gate_threshold=0.5,
                 combine="logreg",
-                coefs=[0.5, 0.3],
-                score_space="logit",
+                coefs=[0.5, 0.3, -0.1],
+                score_space="prob",
                 includes_us=False,
             )
             path = Path(tmpdir) / "fusion.json"
             save_fusion(cfg_orig, path)
             cfg_loaded = load_fusion(path)
-            assert cfg_loaded.coefs == [0.5, 0.3]
+            assert cfg_loaded.coefs == [0.5, 0.3, -0.1]
             assert cfg_loaded.includes_us is False
 
-    def test_load_logreg_from_json_3coefs(self):
-        """load_fusion reconstructs logreg config (3 coefs)."""
+    def test_load_logreg_from_json_4coefs_with_us(self):
+        """load_fusion reconstructs logreg config (4 coefs, with US)."""
         with tempfile.TemporaryDirectory() as tmpdir:
             cfg_orig = FusionConfig(
                 gate_threshold=0.6,
                 combine="logreg",
-                coefs=[0.5, 0.3, 0.1],
+                coefs=[0.5, 0.3, 0.2, -0.1],
                 score_space="prob",
                 includes_us=True,
             )
             path = Path(tmpdir) / "fusion.json"
             save_fusion(cfg_orig, path)
             cfg_loaded = load_fusion(path)
-            assert cfg_loaded.coefs == [0.5, 0.3, 0.1]
+            assert cfg_loaded.coefs == [0.5, 0.3, 0.2, -0.1]
             assert cfg_loaded.includes_us is True
 
-    def test_roundtrip_logreg_2coefs_equality(self):
-        """Logreg config round-trip (2 coefs): save → load → identical."""
+    def test_roundtrip_logreg_3coefs_no_us_equality(self):
+        """Logreg config round-trip (3 coefs, no US): save → load → identical."""
         with tempfile.TemporaryDirectory() as tmpdir:
             cfg_orig = FusionConfig(
                 gate_threshold=0.5,
                 combine="logreg",
-                coefs=[0.5, 0.3],
-                score_space="logit",
+                coefs=[0.5, 0.3, -0.1],
+                score_space="prob",
                 includes_us=False,
             )
             path = Path(tmpdir) / "fusion.json"
@@ -258,13 +258,13 @@ class TestSaveLoadRoundTripLogReg:
             cfg_loaded = load_fusion(path)
             assert cfg_loaded == cfg_orig
 
-    def test_roundtrip_logreg_3coefs_equality(self):
-        """Logreg config round-trip (3 coefs): save → load → identical."""
+    def test_roundtrip_logreg_4coefs_with_us_equality(self):
+        """Logreg config round-trip (4 coefs, with US): save → load → identical."""
         with tempfile.TemporaryDirectory() as tmpdir:
             cfg_orig = FusionConfig(
                 gate_threshold=0.6,
                 combine="logreg",
-                coefs=[0.5, 0.3, 0.1],
+                coefs=[0.5, 0.3, 0.2, -0.1],
                 score_space="prob",
                 includes_us=True,
             )
@@ -445,8 +445,8 @@ class TestAC42FusionJsonPersistence:
             cfg_orig = FusionConfig(
                 gate_threshold=0.6,
                 combine="logreg",
-                coefs=[0.5, 0.3, 0.1],
-                score_space="logit",
+                coefs=[0.5, 0.3, 0.2, -0.1],  # 3 slopes + intercept for includes_us=True
+                score_space="prob",
                 includes_us=True,
             )
             path = Path(tmpdir) / "weights.weights.h5.fusion.json"
@@ -520,8 +520,8 @@ class TestComposedPlattAndHeadCalibrators:
             cfg_orig = FusionConfig(
                 gate_threshold=0.6,
                 combine="logreg",
-                coefs=[0.5, 0.3],
-                score_space="logit",
+                coefs=[0.5, 0.3, -0.1],  # 2 slopes + intercept for includes_us=False
+                score_space="prob",
                 includes_us=False,
                 composed_platt=[0.9, -0.2],
                 head_calibrators={"cca": "cca_cal", "rel": "rel_cal", "us": "us_cal"},

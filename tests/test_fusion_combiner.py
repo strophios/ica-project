@@ -288,29 +288,29 @@ class TestFusionConfig:
         assert cfg.combine == "product"
         assert cfg.coefs is None
 
-    def test_config_logreg_valid_2coefs(self):
-        """Valid logreg config with 2 coefs (no US)."""
+    def test_config_logreg_valid_3coefs_no_us(self):
+        """Valid logreg config with 3 coefs (2 slopes + intercept, no US)."""
         cfg = FusionConfig(
             gate_threshold=0.5,
             combine="logreg",
-            coefs=[0.5, 0.3],
-            score_space="logit",
+            coefs=[0.5, 0.3, -0.1],  # slope_cca, slope_rel, intercept
+            score_space="prob",
             includes_us=False,
         )
         assert cfg.combine == "logreg"
-        assert cfg.coefs is not None and len(cfg.coefs) == 2
+        assert cfg.coefs is not None and len(cfg.coefs) == 3
 
-    def test_config_logreg_valid_3coefs(self):
-        """Valid logreg config with 3 coefs (with US)."""
+    def test_config_logreg_valid_4coefs_with_us(self):
+        """Valid logreg config with 4 coefs (3 slopes + intercept, with US)."""
         cfg = FusionConfig(
             gate_threshold=0.5,
             combine="logreg",
-            coefs=[0.5, 0.3, 0.1],
-            score_space="logit",
+            coefs=[0.5, 0.3, 0.2, -0.1],  # slope_cca, slope_rel, slope_us, intercept
+            score_space="prob",
             includes_us=True,
         )
         assert cfg.combine == "logreg"
-        assert cfg.coefs is not None and len(cfg.coefs) == 3
+        assert cfg.coefs is not None and len(cfg.coefs) == 4
 
     def test_config_rejects_unknown_combine(self):
         """Unknown combine value raises ValueError."""
@@ -345,24 +345,24 @@ class TestFusionConfig:
                 includes_us=False,
             )
 
-    def test_config_rejects_wrong_coef_count_2vs3(self):
-        """Wrong coef count (2 instead of 3) raises ValueError when includes_us=True."""
-        with pytest.raises(ValueError, match="3 elements"):
+    def test_config_rejects_wrong_coef_count_3vs4(self):
+        """Wrong coef count (3 instead of 4) raises ValueError when includes_us=True."""
+        with pytest.raises(ValueError, match="4 elements"):
             FusionConfig(
                 gate_threshold=0.5,
                 combine="logreg",
-                coefs=[0.5, 0.3],  # Only 2, but includes_us=True requires 3
+                coefs=[0.5, 0.3, 0.2],  # Only 3, but includes_us=True requires 4
                 score_space="prob",
                 includes_us=True,
             )
 
-    def test_config_rejects_wrong_coef_count_3vs2(self):
-        """Wrong coef count (3 instead of 2) raises ValueError when includes_us=False."""
-        with pytest.raises(ValueError, match="2 elements"):
+    def test_config_rejects_wrong_coef_count_4vs3(self):
+        """Wrong coef count (4 instead of 3) raises ValueError when includes_us=False."""
+        with pytest.raises(ValueError, match="3 elements"):
             FusionConfig(
                 gate_threshold=0.5,
                 combine="logreg",
-                coefs=[0.5, 0.3, 0.1],  # 3, but includes_us=False requires 2
+                coefs=[0.5, 0.3, 0.2, -0.1],  # 4, but includes_us=False requires 3
                 score_space="prob",
                 includes_us=False,
             )
