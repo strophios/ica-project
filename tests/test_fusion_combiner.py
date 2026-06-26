@@ -141,8 +141,13 @@ class TestFitLogisticCombiner:
         labels = np.array([0, 0, 1, 1])
         model1 = fit_logistic_combiner(scores, labels, random_state=42)
         model2 = fit_logistic_combiner(scores, labels, random_state=42)
-        np.testing.assert_array_equal(model1.coef_, model2.coef_)
-        np.testing.assert_array_equal(model1.intercept_, model2.intercept_)
+        # Convert sparse matrices to dense for comparison
+        coef1 = model1.coef_ if isinstance(model1.coef_, np.ndarray) else model1.coef_.toarray()
+        coef2 = model2.coef_ if isinstance(model2.coef_, np.ndarray) else model2.coef_.toarray()
+        np.testing.assert_array_equal(coef1, coef2)
+        intercept1 = model1.intercept_ if isinstance(model1.intercept_, np.ndarray) else model1.intercept_.toarray()
+        intercept2 = model2.intercept_ if isinstance(model2.intercept_, np.ndarray) else model2.intercept_.toarray()
+        np.testing.assert_array_equal(intercept1, intercept2)
 
     def test_fit_different_random_states_may_differ(self):
         """Different random_state values may yield different results (no guarantee, but allowed)."""
@@ -292,7 +297,7 @@ class TestFusionConfig:
             includes_us=False,
         )
         assert cfg.combine == "logreg"
-        assert len(cfg.coefs) == 2
+        assert cfg.coefs is not None and len(cfg.coefs) == 2
 
     def test_config_logreg_valid_3coefs(self):
         """Valid logreg config with 3 coefs (with US)."""
@@ -304,12 +309,12 @@ class TestFusionConfig:
             includes_us=True,
         )
         assert cfg.combine == "logreg"
-        assert len(cfg.coefs) == 3
+        assert cfg.coefs is not None and len(cfg.coefs) == 3
 
     def test_config_rejects_unknown_combine(self):
         """Unknown combine value raises ValueError."""
         with pytest.raises(ValueError, match="product.*logreg"):
-            FusionConfig(
+            FusionConfig(  # pyright: ignore[call-arg]  # intentionally invalid combine
                 gate_threshold=0.5,
                 combine="invalid",
                 coefs=None,
@@ -405,7 +410,7 @@ class TestFusionConfig:
     def test_config_rejects_unknown_score_space(self):
         """Unknown score_space raises ValueError."""
         with pytest.raises(ValueError, match="prob.*logit"):
-            FusionConfig(
+            FusionConfig(  # pyright: ignore[call-arg]  # intentionally invalid score_space
                 gate_threshold=0.5,
                 combine="product",
                 coefs=None,
@@ -422,5 +427,7 @@ class TestFusionConfig:
             score_space="prob",
             includes_us=False,
         )
-        with pytest.raises((AttributeError, dataclasses.FrozenInstanceError)):
-            cfg.gate_threshold = 0.7
+        # FusionConfig should be frozen per dataclass definition
+        assert dataclasses.is_dataclass(cfg)
+        # Verify it's actually frozen by checking __dataclass_fields__
+        assert cfg.__dataclass_params__.frozen is True
