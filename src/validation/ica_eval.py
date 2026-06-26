@@ -119,6 +119,60 @@ def assemble_holdout_ids(*id_sets: list[str]) -> list[str]:
     return sorted(list(all_ids))
 
 
+def apply_us_scope_to_ica(df: pl.DataFrame) -> pl.DataFrame:
+    """Apply US-scope rule to ICA labels: non-US rows cannot be ICA by definition.
+
+    The project defines ICA (immigrant collective action) as US-soil events by
+    construction. This function encodes that scope rule: set ica_event=False
+    wherever us_event==False, preserving the original judgment in ica_event_intl
+    for reference.
+
+    Contract (idempotence): running this twice on the same frame is a no-op on
+    ica_event; ica_event_intl is set from the first canonical-or-raw value and
+    a second call does not overwrite it.
+
+    Args:
+        df: DataFrame with us_event (bool or nullable bool) and ica_event (bool
+            or nullable bool) columns.
+
+    Returns:
+        DataFrame with:
+        - ica_event_intl: copy of the original ica_event (preserves operator judgment)
+        - ica_event: False where us_event==False (scope derivation); unchanged
+          where us_event==True or null (preserves hand-coded null and positives)
+
+    Raises:
+        ValueError: if us_event or ica_event columns are missing.
+    """
+    if "us_event" not in df.columns:
+        raise ValueError("us_event column required")
+    if "ica_event" not in df.columns:
+        raise ValueError("ica_event column required")
+
+    result = df.clone()
+
+    # Preserve original ica_event as ica_event_intl (idempotence guard).
+    # If ica_event_intl already exists (second call), it was set in the first call;
+    # don't overwrite.
+    if "ica_event_intl" not in result.columns:
+        result = result.with_columns(
+            pl.col("ica_event").alias("ica_event_intl")
+        )
+
+    # Apply scope rule: set ica_event=False where us_event==False.
+    # Where us_event==True or null, leave ica_event unchanged.
+    # Polars nullable booleans: == False matches only explicit False, not null.
+    # (negation operator ~ doesn't work on nullable bools with null values.)
+    result = result.with_columns(
+        pl.when(pl.col("us_event").eq(False))
+        .then(False)
+        .otherwise(pl.col("ica_event"))
+        .alias("ica_event")
+    )
+
+    return result
+
+
 def assemble_eval_frame(
     anchor_rows: pl.DataFrame,
     coded_survivor_rows: pl.DataFrame,

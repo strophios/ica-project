@@ -10,6 +10,7 @@ from src.validation.ica_eval import (
     reconcile_immig_column,
     reserve_anchor_holdout,
     assemble_holdout_ids,
+    apply_us_scope_to_ica,
 )
 from src.validation.schema import validate_gold_set
 
@@ -272,6 +273,117 @@ class TestAssembleHoldoutIds:
             ["m", "b"],
         )
         assert result == ["a", "b", "m", "z"]
+
+
+class TestApplyUsScopeToIca:
+    """US-scope ICA label rule: non-US events cannot be ICA by construction."""
+
+    def test_us_false_sets_ica_false(self):
+        """us_event=False ⟹ ica_event=False (scope rule)."""
+        df = pl.DataFrame({
+            "us_event": [False, False, False, False],
+            "ica_event": [True, False, None, True],
+        })
+        result = apply_us_scope_to_ica(df)
+        # All should be False (four rows ica=True/False/null/True -> False)
+        assert result["ica_event"].to_list() == [False, False, False, False]
+
+    def test_us_true_preserves_ica_event(self):
+        """us_event=True ⟹ ica_event unchanged (scope applies only to negatives)."""
+        df = pl.DataFrame({
+            "us_event": [True, True, True],
+            "ica_event": [True, False, None],
+        })
+        result = apply_us_scope_to_ica(df)
+        # All should remain unchanged
+        assert result["ica_event"].to_list() == [True, False, None]
+
+    def test_us_null_preserves_ica_event(self):
+        """us_event=null ⟹ ica_event unchanged (scope applies only to False)."""
+        df = pl.DataFrame({
+            "us_event": [None, None],
+            "ica_event": [True, False],
+        })
+        result = apply_us_scope_to_ica(df)
+        assert result["ica_event"].to_list() == [True, False]
+
+    def test_ica_event_intl_preserves_original(self):
+        """ica_event_intl column contains original ica_event (operator judgment)."""
+        df = pl.DataFrame({
+            "us_event": [True, False, False],
+            "ica_event": [True, True, False],
+        })
+        result = apply_us_scope_to_ica(df)
+        # ica_event_intl should be the original values
+        assert result["ica_event_intl"].to_list() == [True, True, False]
+        # ica_event should be scope-adjusted
+        assert result["ica_event"].to_list() == [True, False, False]
+
+    def test_idempotence_running_twice_is_noop(self):
+        """Running apply_us_scope_to_ica twice is idempotent on ica_event."""
+        df = pl.DataFrame({
+            "us_event": [True, False, False, True],
+            "ica_event": [True, True, False, None],
+        })
+        result1 = apply_us_scope_to_ica(df)
+        result2 = apply_us_scope_to_ica(result1)
+        # ica_event should be identical
+        assert result1["ica_event"].to_list() == result2["ica_event"].to_list()
+        # ica_event_intl should not change (guard against overwrite)
+        assert result1["ica_event_intl"].to_list() == result2["ica_event_intl"].to_list()
+
+    def test_mixed_us_scope(self):
+        """Multiple rows with various us_event/ica_event combinations."""
+        df = pl.DataFrame({
+            "us_event": [True, True, False, False, None, None],
+            "ica_event": [True, False, True, False, True, False],
+        })
+        result = apply_us_scope_to_ica(df)
+        # us=T, ica=T -> T (preserve)
+        # us=T, ica=F -> F (preserve)
+        # us=F, ica=T -> F (scope rule)
+        # us=F, ica=F -> F (preserve)
+        # us=null, ica=T -> T (preserve)
+        # us=null, ica=F -> F (preserve)
+        expected = [True, False, False, False, True, False]
+        assert result["ica_event"].to_list() == expected
+        # ica_event_intl preserves originals
+        expected_intl = [True, False, True, False, True, False]
+        assert result["ica_event_intl"].to_list() == expected_intl
+
+    def test_raises_on_missing_us_event(self):
+        """ValueError if us_event column missing."""
+        df = pl.DataFrame({
+            "ica_event": [True],
+        })
+        try:
+            apply_us_scope_to_ica(df)
+            assert False, "should raise ValueError"
+        except ValueError as e:
+            assert "us_event" in str(e)
+
+    def test_raises_on_missing_ica_event(self):
+        """ValueError if ica_event column missing."""
+        df = pl.DataFrame({
+            "us_event": [True],
+        })
+        try:
+            apply_us_scope_to_ica(df)
+            assert False, "should raise ValueError"
+        except ValueError as e:
+            assert "ica_event" in str(e)
+
+    def test_preserves_other_columns(self):
+        """Function doesn't drop or modify other columns."""
+        df = pl.DataFrame({
+            "id": ["a", "b", "c"],
+            "us_event": [True, False, True],
+            "ica_event": [True, False, None],
+            "headline": ["h1", "h2", "h3"],
+        })
+        result = apply_us_scope_to_ica(df)
+        assert result["id"].to_list() == ["a", "b", "c"]
+        assert result["headline"].to_list() == ["h1", "h2", "h3"]
 
 
 class TestSchemaValidation:
