@@ -60,6 +60,7 @@ class IcaModel:
         us_weights_path=config.US_FILTER_FULL_WEIGHTS,
         cca_weights_path=config.CCA_DOCA_WEIGHTS,
         rel_weights_path=config.PROJECT_ROOT / "relevance" / "relevance.weights.h5",
+        fusion_path=None,
     ):
         """Load configs, construct heads, transfer weights, assemble model.
 
@@ -67,10 +68,12 @@ class IcaModel:
             us_weights_path: path to US head weights (features-mode, head-only)
             cca_weights_path: path to CCA head weights (features-mode, head-only)
             rel_weights_path: path to relevance head weights (features-mode, head-only)
+            fusion_path: path to fusion config (.fusion.json); if None, defaults to
+                         config.CCA_DOCA_DIR / "ica_fusion.fusion.json"
 
         Raises:
             ValueError: if head configs don't load, or weight transfer fails
-            FileNotFoundError: if weights or config sidecars don't exist
+            FileNotFoundError: if weights, config sidecars, or fusion config don't exist
         """
         from src.cca_config import config_path_for_weights
 
@@ -78,6 +81,11 @@ class IcaModel:
         us_weights_path = str(us_weights_path)
         cca_weights_path = str(cca_weights_path)
         rel_weights_path = str(rel_weights_path)
+
+        # Default fusion_path if not provided
+        if fusion_path is None:
+            fusion_path = config.CCA_DOCA_DIR / "ica_fusion.fusion.json"
+        fusion_path = str(fusion_path)
 
         logger.info("Constructing IcaModel: loading configs and heads")
 
@@ -185,7 +193,6 @@ class IcaModel:
         # Load fusion config
         # ====================================================================
         logger.info("Loading fusion config")
-        fusion_path = config.CCA_DOCA_DIR / "ica_fusion.fusion.json"
         self.fusion_config = load_fusion(fusion_path)
 
         logger.info(
@@ -253,18 +260,9 @@ class IcaModel:
         }
 
     def predict_ica_from_text(self, texts: list[str]) -> dict:
-        """Optional text-mode prediction: load DAPT backbone + build token-mode model.
+        """Optional text-mode prediction.
 
-        Args:
-            texts: list of text strings (headline + "</s>" + lead recommended)
-
-        Returns:
-            dict with same keys as predict_ica_from_features
-
-        Note:
-            This path loads the DAPT backbone and builds a fresh token-mode model.
-            The US head requires skip_mismatch=True (like Phase 2/4 head-only paths).
-            CCA and rel similarly require skip_mismatch=True.
+        Not implemented; see Phase 6.
         """
         raise NotImplementedError(
             "Text-mode prediction (predict_ica_from_text) not yet implemented. "
@@ -284,22 +282,25 @@ class IcaModel:
         if self.fusion_config.combine == "product":
             return combine_and(calib_cca, calib_rel)
         elif self.fusion_config.combine == "logreg":
-            # Features are [z_cca, z_rel] in logit space
-            # Convert probabilities to logits
-            calib_cca_clip = np.clip(calib_cca, 1e-10, 1.0 - 1e-10)
-            calib_rel_clip = np.clip(calib_rel, 1e-10, 1.0 - 1e-10)
-            logit_cca = np.log(calib_cca_clip / (1.0 - calib_cca_clip))
-            logit_rel = np.log(calib_rel_clip / (1.0 - calib_rel_clip))
-            scores = np.column_stack([logit_cca, logit_rel])
+            # CRITICAL: LR was fit on PROBABILITY features (not logits).
+            # The coefs encode the learned linear combination in probability space.
+            # Input features are [p_cca, p_rel] (calibrated probabilities)
+            # coefs = [slope_cca, slope_rel, intercept] (last element is intercept)
+            scores = np.column_stack([calib_cca, calib_rel])
             if self.fusion_config.coefs is None:
                 raise ValueError("coefs must be set for logreg combiner")
+            if len(self.fusion_config.coefs) < 3:
+                raise ValueError(
+                    f"logreg coefs must have ≥3 elements (slopes+intercept), got {len(self.fusion_config.coefs)}"
+                )
             # Type cast coefs list to tuple for apply_logistic_combiner
+            # Format: (slopes_array, intercept)
             coefs_tuple: tuple[np.ndarray, float] = (
                 np.asarray(self.fusion_config.coefs[:-1]),
                 float(self.fusion_config.coefs[-1]),
             )
             return apply_logistic_combiner(coefs_tuple, scores)
-        else:
+        else:  # pragma: no cover  # unreachable: FusionConfig.combine is Literal["product", "logreg"]
             raise ValueError(
                 f"unknown combine method: {self.fusion_config.combine}"
             )

@@ -472,8 +472,12 @@ def main(
     lr_full = fit_logistic_combiner(
         lr_features_full, ica_event_us_true.astype(int), random_state=random_state
     )
-    lr_coefs = lr_full.coef_[0].tolist()
-    logger.info(f"Full LR coefficients: {lr_coefs}")
+    # CRITICAL: persist both slopes (coef_[0]) and intercept (intercept_[0])
+    # to match apply_logistic_combiner's expected format: (coef, intercept)
+    lr_slopes = lr_full.coef_[0].tolist()
+    lr_intercept = float(lr_full.intercept_[0])
+    lr_coefs = lr_slopes + [lr_intercept]  # [slope_cca, slope_rel, intercept]
+    logger.info(f"Full LR coefficients (slopes + intercept): {lr_coefs}")
 
     # ========================================================================
     # Step 9: Compute composed score and calibration

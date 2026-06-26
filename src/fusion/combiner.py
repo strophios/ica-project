@@ -155,12 +155,15 @@ class FusionConfig:
                 raise ValueError(
                     "coefs is required when combine=='logreg'"
                 )
-            # Check coefficient count: 2 for CCA+rel, 3 for CCA+rel+US
-            expected_count = 3 if self.includes_us else 2
+            # Check coefficient count: must include slopes (n_features) + intercept (1)
+            # For CCA+rel (2 features): 3 elements (2 slopes + intercept)
+            # For CCA+rel+US (3 features): 4 elements (3 slopes + intercept)
+            n_features = 3 if self.includes_us else 2
+            expected_count = n_features + 1  # slopes + intercept
             if len(self.coefs) != expected_count:
                 raise ValueError(
-                    f"coefs must have {expected_count} elements (includes_us={self.includes_us}), "
-                    f"got {len(self.coefs)}"
+                    f"coefs must have {expected_count} elements (slopes+intercept for {n_features} features, "
+                    f"includes_us={self.includes_us}), got {len(self.coefs)}"
                 )
 
         if self.combine == "product" and self.coefs is not None:
