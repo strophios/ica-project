@@ -126,7 +126,7 @@ class TestVerdictDataclass:
             remediation=None,
         )
         with pytest.raises(AttributeError):
-            v.status = "FAIL"
+            v.status = "FAIL"  # ty: ignore[invalid-assignment]  # asserts frozen
 
 
 class TestUsWeightsVerdict:
@@ -225,7 +225,7 @@ class TestDocaFreshnessVerdict:
 
     def test_pass_when_monotone(self):
         """PASS: monotone mtime ordering (doca_csv ≤ rds ≤ positives)."""
-        mtimes = {
+        mtimes: dict[str, float | None] = {
             "doca_csv": 100.0,
             "rds": 150.0,
             "positives": 200.0,
@@ -235,7 +235,7 @@ class TestDocaFreshnessVerdict:
 
     def test_warn_when_doca_csv_newer_than_rds(self):
         """WARN: doca_csv > rds (match potentially stale)."""
-        mtimes = {
+        mtimes: dict[str, float | None] = {
             "doca_csv": 200.0,
             "rds": 100.0,
             "positives": 250.0,
@@ -246,7 +246,7 @@ class TestDocaFreshnessVerdict:
 
     def test_warn_when_rds_newer_than_positives(self):
         """WARN: rds > positives (positives stale)."""
-        mtimes = {
+        mtimes: dict[str, float | None] = {
             "doca_csv": 100.0,
             "rds": 200.0,
             "positives": 150.0,
@@ -257,7 +257,7 @@ class TestDocaFreshnessVerdict:
 
     def test_warn_when_mtime_none(self):
         """WARN: missing mtime (file not found)."""
-        mtimes = {
+        mtimes: dict[str, float | None] = {
             "doca_csv": 100.0,
             "rds": None,
             "positives": 200.0,
@@ -268,7 +268,7 @@ class TestDocaFreshnessVerdict:
 
     def test_pass_when_equal_mtimes(self):
         """PASS: equal mtimes are acceptable (monotone)."""
-        mtimes = {
+        mtimes: dict[str, float | None] = {
             "doca_csv": 100.0,
             "rds": 100.0,
             "positives": 100.0,
