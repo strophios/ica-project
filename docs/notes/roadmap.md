@@ -14,6 +14,7 @@ what's next and what's deferred. The root `CLAUDE.md` and `README.md` are stale
 | Relevance-head arc (detail/reasoning) | `relevance-head-handoff.md` |
 | US filter / dateline pipeline | `us-filter-*.md`, `r/CLAUDE.md` |
 | **US head retrain (diaspora recall)** | `us-head-retrain-plan.md` |
+| **ICA apply results + cluster runbook** | `ica-apply-results-and-cluster-runbook.md` |
 | Tier 1–5 audit/refactor history | `tiers-and-checkpoints.md`, `tier{2,3,4,5}-design.md` |
 | Deferred substantive questions | `pinned-questions.md` |
 | Process / engineering patterns | `process-patterns.md`, `engineering-patterns.md` |
