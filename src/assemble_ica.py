@@ -204,11 +204,16 @@ class IcaModel:
 
         logger.info("IcaModel construction complete")
 
-    def predict_ica_from_features(self, features: np.ndarray) -> dict:
+    def predict_ica_from_features(
+        self, features: np.ndarray, gate_override: np.ndarray | None = None
+    ) -> dict:
         """Score cached CLS features, returning per-head probs + composed ICA score.
 
         Args:
             features: shape (n, 768) float32 array of CLS embeddings
+            gate_override: optional shape (n,) boolean array override for the US gate.
+                When provided, use this as the survivor mask instead of (calib_us >= tau_us).
+                When None (default), use the ML US gate.
 
         Returns:
             dict with keys:
@@ -216,7 +221,7 @@ class IcaModel:
               - "cca": (n,) calibrated CCA probabilities in [0, 1]
               - "rel": (n,) calibrated relevance probabilities in [0, 1]
               - "ica_score": (n,) composed ICA score in [0, 1],
-                  0.0 for gated-out rows (us < tau_us), composed score otherwise
+                  0.0 for gated-out rows, composed score for survivors
         """
         features = np.asarray(features, dtype=np.float32)
         if features.ndim != 2 or features.shape[1] != 768:
@@ -236,9 +241,17 @@ class IcaModel:
         calib_cca = self.cca_calibrator.transform(cca_logits)
         calib_rel = self.rel_calibrator.transform(rel_logits)
 
-        # Gate: survivors = calib_us >= tau_us
-        tau_us = self.fusion_config.gate_threshold
-        survivors = calib_us >= tau_us
+        # Gate: survivors (ML or overridden)
+        if gate_override is not None:
+            gate_override = np.asarray(gate_override, dtype=bool)
+            if gate_override.shape[0] != features.shape[0]:
+                raise ValueError(
+                    f"gate_override shape {gate_override.shape[0]} does not match features shape {features.shape[0]}"
+                )
+            survivors = gate_override
+        else:
+            tau_us = self.fusion_config.gate_threshold
+            survivors = calib_us >= tau_us
 
         # Combine on survivors
         combined = self._combine_scores(calib_cca, calib_rel)
