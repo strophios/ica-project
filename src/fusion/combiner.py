@@ -129,6 +129,8 @@ class FusionConfig:
         coefs: logistic regression coefficients (required when combine=="logreg"), or None
         score_space: whether scores/logits are in "prob" or "logit" space (for schema clarity)
         includes_us: whether the US head is included in the combiner (affects feature count)
+        composed_platt: final 2-param Platt [A, B] fit on composed score (None if not fit)
+        head_calibrators: per-head calibrator references (e.g., {"cca": "...", "rel": "...", "us": "..."})
     """
 
     gate_threshold: float
@@ -136,6 +138,8 @@ class FusionConfig:
     coefs: list[float] | None
     score_space: Literal["prob", "logit"]
     includes_us: bool
+    composed_platt: list[float] | None = None
+    head_calibrators: dict[str, str] | None = None
 
     def __post_init__(self) -> None:
         """Validate configuration on construction."""
@@ -175,3 +179,17 @@ class FusionConfig:
             raise ValueError(
                 f"score_space must be 'prob' or 'logit', got {self.score_space!r}"
             )
+
+        # Validate composed_platt: if present, must be a 2-element list
+        if self.composed_platt is not None:
+            if not isinstance(self.composed_platt, list) or len(self.composed_platt) != 2:
+                raise ValueError(
+                    f"composed_platt must be a 2-element list or None, got {self.composed_platt!r}"
+                )
+
+        # Validate head_calibrators: if present, must be a dict
+        if self.head_calibrators is not None:
+            if not isinstance(self.head_calibrators, dict):
+                raise ValueError(
+                    f"head_calibrators must be a dict or None, got type {type(self.head_calibrators)}"
+                )

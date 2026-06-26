@@ -34,6 +34,8 @@ def save_fusion(cfg: FusionConfig, path: Path | str) -> None:
         "coefs": cfg.coefs,
         "score_space": cfg.score_space,
         "includes_us": cfg.includes_us,
+        "composed_platt": cfg.composed_platt,
+        "head_calibrators": cfg.head_calibrators,
     }
     Path(path).write_text(json.dumps(payload, indent=2))
 
@@ -66,4 +68,6 @@ def load_fusion(path: Path | str) -> FusionConfig:
         coefs=d["coefs"],
         score_space=d["score_space"],
         includes_us=d["includes_us"],
+        composed_platt=d.get("composed_platt"),  # Optional, defaults to None
+        head_calibrators=d.get("head_calibrators"),  # Optional, defaults to None
     )

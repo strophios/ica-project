@@ -30,6 +30,7 @@ from sklearn.model_selection import StratifiedKFold
 from sklearn.metrics import average_precision_score
 
 import src.config as config
+from src.calibration.calibrator import platt_fit, platt_transform
 from src.calibration.report import calibration_report
 from src.calibration.sidecar import (
     calibration_path_for_weights,
@@ -44,7 +45,7 @@ from src.fusion.combiner import (
 )
 from src.fusion.sidecar import fusion_path_for_weights, save_fusion
 from src.validation.cca_slice_eval import apply_cca_model
-from src.validation.doca_recall import pick_us_threshold
+from src.validation.doca_recall import doca_recall, pick_us_threshold
 from src.validation.ica_eval import apply_us_scope_to_ica
 from src.validation.relevance_slice_eval import apply_relevance_model
 from src.validation.slice_eval import apply_us_model
@@ -353,7 +354,9 @@ def main(
     )
     tau_us = threshold_result.threshold
     tau_us_qualified = threshold_result.qualified
-    tau_us_achieved_recall = threshold_result.achieved_recall
+    # ThresholdPickResult carries only threshold + qualified; recompute the
+    # achieved recall at the picked threshold for logging/metrics.
+    tau_us_achieved_recall = float(doca_recall(recall_df, tau_us)["recall"])
     logger.info(
         f"Selected τ_us={tau_us:.3f}, qualified={tau_us_qualified}, "
         f"achieved_recall={tau_us_achieved_recall:.3f} "
@@ -482,7 +485,74 @@ def main(
     )
 
     # ========================================================================
-    # Step 10: Save fusion.json
+    # Step 9.5: Optionally fit composed-score Platt (AC3.3 label-budget rule)
+    # ========================================================================
+    # Per label-budget: fit only if (1) composed score is mis-calibrated (ECE > threshold)
+    # AND (2) positive count supports 2 params (EPV > 10). Here: EPV = n_pos / 2.
+    # n_pos_us_true positives available; if EPV >= 10, fit.
+    composed_platt_ab = None
+    composed_platt_fitted = False
+    epv_threshold = 10
+    epv_composed = n_pos_us_true / 2  # 2 params for Platt
+    ece_threshold = 0.12  # mis-calibrated signal (tunable)
+
+    if n_pos_us_true > 0 and epv_composed >= epv_threshold:
+        if composed_cal["ece"] > ece_threshold:
+            # Fit Platt on the composed score (as logit, not probability)
+            # First convert probability to logit for Platt fitting
+            composed_score_clipped = np.clip(composed_score, 1e-10, 1.0 - 1e-10)
+            composed_logits = np.log(composed_score_clipped / (1.0 - composed_score_clipped))
+            A, B = platt_fit(composed_logits, ica_event_us_true)
+            composed_platt_ab = [float(A), float(B)]
+            composed_platt_fitted = True
+
+            # Re-calibrate with Platt and report post-Platt calibration
+            composed_score_calibrated = platt_transform(composed_logits, A, B)
+            composed_cal_post = calibration_report(
+                composed_score_calibrated, ica_event_us_true, n_bins=15
+            )
+            logger.info(
+                f"Composed Platt fit (EPV={epv_composed:.1f} >= {epv_threshold}): "
+                f"ECE {composed_cal['ece']:.4f} → {composed_cal_post['ece']:.4f}, "
+                f"Brier {composed_cal['brier']:.4f} → {composed_cal_post['brier']:.4f}"
+            )
+            composed_cal = composed_cal_post  # Use post-Platt metrics
+        else:
+            logger.info(
+                f"Composed ECE {composed_cal['ece']:.4f} below threshold ({ece_threshold}); "
+                f"Platt not needed"
+            )
+    else:
+        decision_note = (
+            f"(EPV={epv_composed:.1f} < {epv_threshold} or n_pos={n_pos_us_true})"
+        )
+        logger.info(
+            f"Composed Platt not fit: insufficient label budget {decision_note}"
+        )
+
+    # ========================================================================
+    # Step 10: Gather calibrator references for head_calibrators
+    # ========================================================================
+    # Record references to the per-head calibrators this fusion composition uses.
+    # These are typically the sidecar stems (without .calibration.json).
+    cca_cal_stem = str(calibration_path_for_weights(config.CCA_DOCA_WEIGHTS)).replace(
+        ".calibration.json", ""
+    )
+    rel_cal_stem = str(calibration_path_for_weights(config.RELEVANCE_DOCA_WEIGHTS)).replace(
+        ".calibration.json", ""
+    )
+    us_cal_stem = str(calibration_path_for_weights(config.US_FILTER_FULL_WEIGHTS)).replace(
+        ".calibration.json", ""
+    )
+
+    head_calibrators = {
+        "cca": cca_cal_stem,
+        "rel": rel_cal_stem,
+        "us": us_cal_stem,
+    }
+
+    # ========================================================================
+    # Step 11: Save fusion.json
     # ========================================================================
     # Type cast needed because select_combiner returns str
     fusion_cfg = FusionConfig(
@@ -491,6 +561,8 @@ def main(
         coefs=lr_coefs_to_save,
         score_space="prob",
         includes_us=False,
+        composed_platt=composed_platt_ab,
+        head_calibrators=head_calibrators,
     )
     fusion_path = fusion_path_for_weights(output_dir / "ica_fusion.weights.h5")
     save_fusion(fusion_cfg, fusion_path)
@@ -501,10 +573,12 @@ def main(
     fusion_cfg_loaded = load_fusion(fusion_path)
     assert fusion_cfg_loaded.gate_threshold == tau_us
     assert fusion_cfg_loaded.combine == chosen_combiner
-    logger.info("✓ fusion.json round-trip verified")
+    assert fusion_cfg_loaded.composed_platt == composed_platt_ab
+    assert fusion_cfg_loaded.head_calibrators == head_calibrators
+    logger.info("✓ fusion.json round-trip verified (including new fields)")
 
     # ========================================================================
-    # Step 11: Save metrics JSON (with gate_note documenting gold-first + ceiling)
+    # Step 12: Save metrics JSON (with gate_note documenting gold-first + ceiling)
     # ========================================================================
     gate_note = (
         f"Gold-first gating: at apply, DoCA/dateline-labeled rows bypass the ML gate "
@@ -525,6 +599,7 @@ def main(
         "lr_pr_auc_se": lr_se,
         "composed_ece": composed_cal["ece"],
         "composed_brier": composed_cal["brier"],
+        "composed_platt_fitted": composed_platt_fitted,
         "n_us_true": n_us_true,
         "n_positive_us_true": n_pos_us_true,
         "n_negative_us_true": n_neg_us_true,

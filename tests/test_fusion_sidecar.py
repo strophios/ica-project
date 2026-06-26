@@ -471,3 +471,82 @@ class TestAC42FusionJsonPersistence:
             save_fusion(cfg, fusion_path)
             cfg_loaded = load_fusion(fusion_path)
             assert cfg_loaded == cfg
+
+
+class TestComposedPlattAndHeadCalibrators:
+    """Test persistence of composed_platt and head_calibrators (AC3.3, AC4.2)."""
+
+    def test_save_with_composed_platt_and_head_calibrators(self):
+        """save_fusion preserves composed_platt and head_calibrators in JSON."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            cfg = FusionConfig(
+                gate_threshold=0.5,
+                combine="product",
+                coefs=None,
+                score_space="prob",
+                includes_us=False,
+                composed_platt=[0.8, -0.5],
+                head_calibrators={"cca": "cca_stem", "rel": "rel_stem", "us": "us_stem"},
+            )
+            path = Path(tmpdir) / "fusion.json"
+            save_fusion(cfg, path)
+            payload = json.loads(path.read_text())
+            assert "composed_platt" in payload
+            assert "head_calibrators" in payload
+            assert payload["composed_platt"] == [0.8, -0.5]
+            assert payload["head_calibrators"] == {"cca": "cca_stem", "rel": "rel_stem", "us": "us_stem"}
+
+    def test_load_with_composed_platt_and_head_calibrators(self):
+        """load_fusion reconstructs composed_platt and head_calibrators."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            cfg_orig = FusionConfig(
+                gate_threshold=0.5,
+                combine="product",
+                coefs=None,
+                score_space="prob",
+                includes_us=False,
+                composed_platt=[0.8, -0.5],
+                head_calibrators={"cca": "cca_stem", "rel": "rel_stem", "us": "us_stem"},
+            )
+            path = Path(tmpdir) / "fusion.json"
+            save_fusion(cfg_orig, path)
+            cfg_loaded = load_fusion(path)
+            assert cfg_loaded.composed_platt == [0.8, -0.5]
+            assert cfg_loaded.head_calibrators == {"cca": "cca_stem", "rel": "rel_stem", "us": "us_stem"}
+
+    def test_roundtrip_with_all_new_fields(self):
+        """Roundtrip save/load preserves all fields including new ones."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            cfg_orig = FusionConfig(
+                gate_threshold=0.6,
+                combine="logreg",
+                coefs=[0.5, 0.3],
+                score_space="logit",
+                includes_us=False,
+                composed_platt=[0.9, -0.2],
+                head_calibrators={"cca": "cca_cal", "rel": "rel_cal", "us": "us_cal"},
+            )
+            path = Path(tmpdir) / "fusion.json"
+            save_fusion(cfg_orig, path)
+            cfg_loaded = load_fusion(path)
+            assert cfg_loaded == cfg_orig
+
+    def test_backward_compat_missing_new_fields(self):
+        """Old .fusion.json without new fields loads with None (backward compat)."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            # Simulate an old .fusion.json without composed_platt and head_calibrators
+            path = Path(tmpdir) / "fusion.json"
+            old_payload = {
+                "gate_threshold": 0.5,
+                "combine": "product",
+                "coefs": None,
+                "score_space": "prob",
+                "includes_us": False,
+                # composed_platt and head_calibrators are missing
+            }
+            path.write_text(json.dumps(old_payload))
+            cfg_loaded = load_fusion(path)
+            assert cfg_loaded.composed_platt is None
+            assert cfg_loaded.head_calibrators is None
+            assert cfg_loaded.gate_threshold == 0.5
+            assert cfg_loaded.combine == "product"

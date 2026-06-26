@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import dataclasses
+from typing import Any, cast
 
 import numpy as np
 import pytest
@@ -314,9 +315,9 @@ class TestFusionConfig:
     def test_config_rejects_unknown_combine(self):
         """Unknown combine value raises ValueError."""
         with pytest.raises(ValueError, match="product.*logreg"):
-            FusionConfig(  # pyright: ignore[call-arg]  # intentionally invalid combine
+            FusionConfig(
                 gate_threshold=0.5,
-                combine="invalid",
+                combine=cast(Any, "invalid"),  # type: ignore[arg-type]  # intentionally invalid
                 coefs=None,
                 score_space="prob",
                 includes_us=False,
@@ -410,11 +411,11 @@ class TestFusionConfig:
     def test_config_rejects_unknown_score_space(self):
         """Unknown score_space raises ValueError."""
         with pytest.raises(ValueError, match="prob.*logit"):
-            FusionConfig(  # pyright: ignore[call-arg]  # intentionally invalid score_space
+            FusionConfig(
                 gate_threshold=0.5,
                 combine="product",
                 coefs=None,
-                score_space="unknown",
+                score_space=cast(Any, "unknown"),  # type: ignore[arg-type]  # intentionally invalid
                 includes_us=False,
             )
 
@@ -431,3 +432,84 @@ class TestFusionConfig:
         assert dataclasses.is_dataclass(cfg)
         # Verify it's actually frozen by checking __dataclass_fields__
         assert cfg.__dataclass_params__.frozen is True
+
+    def test_config_composed_platt_optional(self):
+        """composed_platt defaults to None; can be provided as a 2-element list."""
+        # Without composed_platt
+        cfg_no_platt = FusionConfig(
+            gate_threshold=0.5,
+            combine="product",
+            coefs=None,
+            score_space="prob",
+            includes_us=False,
+        )
+        assert cfg_no_platt.composed_platt is None
+
+        # With valid composed_platt
+        cfg_with_platt = FusionConfig(
+            gate_threshold=0.5,
+            combine="product",
+            coefs=None,
+            score_space="prob",
+            includes_us=False,
+            composed_platt=[0.8, -0.5],
+        )
+        assert cfg_with_platt.composed_platt == [0.8, -0.5]
+
+    def test_config_rejects_invalid_composed_platt_length(self):
+        """composed_platt must have exactly 2 elements if present."""
+        with pytest.raises(ValueError, match="composed_platt.*2-element"):
+            FusionConfig(
+                gate_threshold=0.5,
+                combine="product",
+                coefs=None,
+                score_space="prob",
+                includes_us=False,
+                composed_platt=[0.8],  # Only 1 element
+            )
+
+        with pytest.raises(ValueError, match="composed_platt.*2-element"):
+            FusionConfig(
+                gate_threshold=0.5,
+                combine="product",
+                coefs=None,
+                score_space="prob",
+                includes_us=False,
+                composed_platt=[0.8, -0.5, 0.1],  # 3 elements
+            )
+
+    def test_config_head_calibrators_optional(self):
+        """head_calibrators defaults to None; can be provided as a dict."""
+        # Without head_calibrators
+        cfg_no_cals = FusionConfig(
+            gate_threshold=0.5,
+            combine="product",
+            coefs=None,
+            score_space="prob",
+            includes_us=False,
+        )
+        assert cfg_no_cals.head_calibrators is None
+
+        # With valid head_calibrators
+        cals = {"cca": "cca_stem", "rel": "rel_stem", "us": "us_stem"}
+        cfg_with_cals = FusionConfig(
+            gate_threshold=0.5,
+            combine="product",
+            coefs=None,
+            score_space="prob",
+            includes_us=False,
+            head_calibrators=cals,
+        )
+        assert cfg_with_cals.head_calibrators == cals
+
+    def test_config_rejects_invalid_head_calibrators_type(self):
+        """head_calibrators must be a dict if present."""
+        with pytest.raises(ValueError, match="head_calibrators.*dict"):
+            FusionConfig(
+                gate_threshold=0.5,
+                combine="product",
+                coefs=None,
+                score_space="prob",
+                includes_us=False,
+                head_calibrators=cast(Any, "not_a_dict"),  # type: ignore[arg-type]  # intentionally invalid
+            )
