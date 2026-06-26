@@ -77,18 +77,20 @@ def reload_and_score_ica(
     """
     from src.assemble_ica import IcaModel
 
+    # Validate that the fusion config path is accessible before constructing IcaModel
+    # (early check avoids slow model construction if fusion is missing)
+    fusion_path_obj = Path(fusion_path)
+    if not fusion_path_obj.exists():
+        raise FileNotFoundError(f"fusion config does not exist: {fusion_path}")
+
     # Fresh construction: no shared instances. IcaModel loads all artifacts from disk
-    # by path and assembles them internally.
+    # by path and assembles them internally, including fusion config via the fusion_path parameter.
     model = IcaModel(
         us_weights_path=us_weights,
         cca_weights_path=cca_weights,
         rel_weights_path=rel_weights,
+        fusion_path=fusion_path,
     )
-
-    # Validate that the fusion config path is accessible (defensive check)
-    fusion_path = Path(fusion_path)
-    if not fusion_path.exists():
-        raise FileNotFoundError(f"fusion config does not exist: {fusion_path}")
 
     # Use the fresh model's predict_ica_from_features to score
     return model.predict_ica_from_features(features)
