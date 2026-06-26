@@ -23,6 +23,7 @@ from __future__ import annotations
 import functools
 import glob
 import re
+from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -204,8 +205,8 @@ def apply_fused_us_gate(table: pl.DataFrame) -> pl.DataFrame:
 
 # pattern: Functional Core
 def gold_first_us_gate(
-    gold_label: list[bool | None] | pl.Series | list[bool],
-    ml_pass: list[bool] | pl.Series,
+    gold_label: Sequence[bool | None] | pl.Series,
+    ml_pass: Sequence[bool] | pl.Series,
 ) -> tuple[list[bool], float]:
     """Pure: elementwise US gate preferring gold labels over ML fallback.
 
