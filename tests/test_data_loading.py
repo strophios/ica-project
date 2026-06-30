@@ -32,11 +32,16 @@ from src.data_setup.data import data_from_parquet
 # Helpers
 # -----------------------------------------------------------------------------
 
-def _write_parquet(tmp_path, rows: list[dict], db_folder: str = "ldc_corpus") -> None:
+def _write_parquet(
+    tmp_path,
+    rows: list[dict],
+    db_folder: str = "ldc_corpus",
+    lead_column: str = "lead_paragraph",
+) -> None:
     """Write a list of row-dicts to a parquet file under
     `tmp_path / db_folder / test_data.parquet`.
 
-    Each dict must have keys: id, headline, lead_paragraph.
+    Each dict must have keys: id, headline, and the specified lead_column name.
     Use None for a true polars null.
     """
     corpus_dir = tmp_path / db_folder
@@ -47,9 +52,9 @@ def _write_parquet(tmp_path, rows: list[dict], db_folder: str = "ldc_corpus") ->
             "headline": pl.Series(
                 "headline", [r["headline"] for r in rows], dtype=pl.Utf8
             ),
-            "lead_paragraph": pl.Series(
-                "lead_paragraph",
-                [r["lead_paragraph"] for r in rows],
+            lead_column: pl.Series(
+                lead_column,
+                [r[lead_column] for r in rows],
                 dtype=pl.Utf8,
             ),
         }
@@ -197,3 +202,60 @@ class TestHeadlineWithLeadConcatenation:
         assert _row_by_id(result, "r1")["headline_with_lead"][0] == "Title A</s>Lead A."
         assert _row_by_id(result, "r2")["headline_with_lead"][0] == "</s>Lead B."
         assert _row_by_id(result, "r3")["headline_with_lead"][0] == "Title C</s>"
+
+
+class TestLeadColumnParameterization:
+    """Tests for the lead_column parameter in `data_from_parquet`.
+
+    The function now accepts a `lead_column` parameter (keyword, default 'lead_paragraph')
+    to enable assembly from alternate lead sources like `stripped_text`.
+    """
+
+    def test_default_lead_column_is_lead_paragraph(self, tmp_path):
+        """Calling without lead_column parameter uses "lead_paragraph" by default
+        (regression test to ensure backward compatibility)."""
+        _write_parquet(
+            tmp_path,
+            [{"id": "r1", "headline": "Title", "lead_paragraph": "Lead text."}],
+        )
+        result = data_from_parquet(tmp_path, db_folder="ldc_corpus")
+        row = _row_by_id(result, "r1")
+        assert row["headline_with_lead"][0] == "Title</s>Lead text."
+        # Verify the column name is still there
+        assert "lead_paragraph" in result.columns
+
+    def test_stripped_text_column_parameter(self, tmp_path):
+        """Calling with lead_column="stripped_text" assembles from that column."""
+        _write_parquet(
+            tmp_path,
+            [{"id": "r1", "headline": "Title", "stripped_text": "Stripped lead."}],
+            db_folder="us_filter",
+            lead_column="stripped_text",
+        )
+        result = data_from_parquet(
+            tmp_path, db_folder="us_filter", lead_column="stripped_text"
+        )
+        row = _row_by_id(result, "r1")
+        assert row["headline_with_lead"][0] == "Title</s>Stripped lead."
+        # Verify the stripped_text column is present
+        assert "stripped_text" in result.columns
+
+    def test_stripped_text_with_null_handling(self, tmp_path):
+        """Null and "NA" in stripped_text are handled the same as lead_paragraph."""
+        _write_parquet(
+            tmp_path,
+            [
+                {"id": "r1", "headline": "Title A", "stripped_text": None},
+                {"id": "r2", "headline": "Title B", "stripped_text": "NA"},
+                {"id": "r3", "headline": "Title C", "stripped_text": "Real text."},
+            ],
+            db_folder="us_filter",
+            lead_column="stripped_text",
+        )
+        result = data_from_parquet(
+            tmp_path, db_folder="us_filter", lead_column="stripped_text"
+        )
+        assert _row_by_id(result, "r1")["headline_with_lead"][0] == "Title A</s>"
+        assert _row_by_id(result, "r2")["headline_with_lead"][0] == "Title B</s>"
+        assert _row_by_id(result, "r3")["headline_with_lead"][0] == "Title C</s>Real text."
+

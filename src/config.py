@@ -87,6 +87,8 @@ else:
 
 # Data sources
 LDC_CORPUS: Path = PROJECT_ROOT / "ldc_corpus"
+# NYT Archive API corpus (dateline-less; application target for the US filter)
+API_CORPUS_DIR: Path = PROJECT_ROOT / "api_corpus"
 
 # DAPT-phase artifacts
 DAPT_TRAINING_SET: Path = PROJECT_ROOT / "dapt_training_set.tf"
@@ -106,6 +108,45 @@ CCA_LOGS_DIR: Path = PROJECT_ROOT / "cca_logs"
 # Prior-estimation artifacts
 LU_CLASSIFIER_MODEL: Path = PROJECT_ROOT / "lu_classifier.keras"
 LU_PREDS_DIR: Path = CCA_SET_DIR / "lu"
+
+# US/not-US pre-filter artifacts
+US_FILTER_DIR: Path = PROJECT_ROOT / "us_filter"
+US_FILTER_LABELED_PARQUET: Path = US_FILTER_DIR / "ldc_labeled.parquet"
+US_FILTER_SET_DIR: Path = US_FILTER_DIR / "us_set"
+US_FILTER_CLASSIFIER_DIR: Path = US_FILTER_DIR / "classifier"
+US_FILTER_CLASSIFIER_WEIGHTS: Path = US_FILTER_DIR / "us_classifier.weights.h5"
+US_FILTER_CLASSIFIER_FULL_WEIGHTS: Path = US_FILTER_DIR / "us_classifier_full.weights.h5"
+US_FILTER_FULL_WEIGHTS: Path = US_FILTER_CLASSIFIER_FULL_WEIGHTS  # Phase 3 alias for harmonized retrains
+US_FILTER_LOGS_DIR: Path = US_FILTER_DIR / "logs"
+US_FILTER_SCORES_DIR: Path = US_FILTER_DIR / "api_us_scores"
+
+# Validation (gold-set) artifacts
+VALIDATION_DIR: Path = PROJECT_ROOT / "validation"
+
+# CCA/DoCA retrain artifacts (2026-06-15 retrain on the NYT API corpus with
+# DoCA-confirmed positives; see docs/notes/cca-doca-retrain-design.md).
+#
+# `DOCA_CCA_MATCHES` is an EXTERNAL, non-checked-in R artifact (the DoCA->NYT
+# fuzzy match, keyed by `article_id` in `nyt://article/...` form). Locally it
+# lives beside the LDC corpus source tree, one level above PROJECT_ROOT
+# (`.../00_ML_data_expansion/LDC2008T19/data`). The cluster path is a best
+# guess until the maintenance window ends — verify it then.
+if IS_CLUSTER:
+    DOCA_CCA_MATCHES: Path = PROJECT_ROOT / "LDC2008T19" / "data" / "cca_matches_good.rds"
+else:
+    DOCA_CCA_MATCHES = PROJECT_ROOT.parent / "LDC2008T19" / "data" / "cca_matches_good.rds"
+
+# Derived data products (gitignored, like the us_filter family).
+CCA_DOCA_DIR: Path = PROJECT_ROOT / "cca_doca"
+CCA_DOCA_POSITIVES: Path = CCA_DOCA_DIR / "cca_doca_positives.parquet"
+CCA_EMBED_CACHE_DIR: Path = CCA_DOCA_DIR / "embed_cache"
+CCA_DOCA_TABLE: Path = CCA_DOCA_DIR / "cca_doca_table.parquet"
+CCA_DOCA_WEIGHTS: Path = CCA_DOCA_DIR / "cca_doca.weights.h5"
+CCA_DOCA_SCORES_DIR: Path = CCA_DOCA_DIR / "api_cca_scores"
+ICA_CANDIDATES_DIR: Path = CCA_DOCA_DIR / "ica_candidates"
+
+# Relevance head artifacts (Phase 3 training output)
+RELEVANCE_DOCA_WEIGHTS: Path = PROJECT_ROOT / "relevance" / "relevance.weights.h5"
 
 
 # ---------------------------------------------------------------------------

@@ -1,8 +1,19 @@
 # CLAUDE.md
 
+> ⚠️ **PARTIALLY RECONCILED (2026-06-26).** The "Planned Architecture" and "Current
+> Status and Open Work" sections below were updated for the `cca-doca-retrain` arc:
+> the multi-head `IcaModel` now exists and produces ICA candidates (CCA + relevance
+> `rel` heads, the fused US gate, fusion, and apply are all real). The **rest** of
+> this file (the older single-head CCA / standalone US-filter narrative, the data
+> counts, label sources) still carries 2026-06-10 content and is stale on the
+> retrain specifics. **For authoritative current state: `docs/notes/project-state-
+> and-data-map.md` (data/artifact map) and `docs/notes/roadmap.md` (what's next /
+> deferred).** A full line-by-line rewrite of the remaining sections is still
+> deferred.
+
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
-*Last updated: 2026-06-04. Orientation doc for the project as a whole — current state and contracts. For tier-by-tier history (what landed when, commit-level), see `docs/notes/tiers-and-checkpoints.md`; for per-tier design reasoning, the `docs/notes/tier{2,3,4,5}-design.md` docs.*
+*Last updated: 2026-06-10. Orientation doc for the project as a whole — current state and contracts. For tier-by-tier history (what landed when, commit-level), see `docs/notes/tiers-and-checkpoints.md`; for per-tier design reasoning, the `docs/notes/tier{2,3,4,5}-design.md` docs. For the US/not-US pre-filter (the second classification head, plus its R dateline-labeling pipeline), see the "US/not-US Pre-Filter" section below and `r/CLAUDE.md`.*
 
 ## Project Overview
 
@@ -15,15 +26,33 @@ The "haystack" problem: finding the tiny fraction of NYT articles reporting ICA 
 2. **Severe class imbalance**: ICA articles are a vanishingly small minority.
 3. **The project assumes SCAR** (Selected Completely At Random) for the labeling mechanism — labeled positives are treated as a random sample of all positives. This is a simplifying assumption; alternative PU approaches exist if it proves inadequate.
 
-### Planned Architecture (not yet fully implemented)
+### Architecture: the assembled multi-head ICA model (implemented 2026-06-26)
 
-The end goal is a **multi-headed classifier**: a shared DAPT RoBERTa encoder feeding separate classification heads for:
-- CCA event identification (implemented)
-- Immigrant involvement (not yet implemented)
-- US events (not yet implemented)
-- Combined ICA output head, fed by the above three + the shared encoder representation (not yet implemented)
+The system is a **multi-head ICA classifier** over a shared frozen DAPT RoBERTa
+encoder. It is assembled in `src/assemble_ica.py` (`IcaModel`) from three heads
+that share the 768-d CLS feature, each trained features-mode on cached embeddings:
+- **US** (`us`) — the US/not-US pre-filter (BCE), used as a hard gate.
+- **CCA** (`cca`) — collective-action event identification (FLPU / focal-nnPU).
+- **relevance** (`rel`) — immigrant relevance (FLPU). This is the head the older
+  text below calls "immigration"; it was built, then renamed `cca`→`rel` in the
+  Phase 3 harmonized retrain (its sidecar records `head.name=="rel"`).
 
-This decomposition lets us leverage the larger labeled datasets for CCA and immigration separately, making the sparse ICA labeling problem tractable. Currently only the CCA head exists.
+`IcaModel.predict_ica_from_features((n,768))` returns calibrated `{us, cca, rel}`
+probabilities plus an `ica_score`, composed as: **US gate** (`calib_us ≥ τ_us`, or a
+`gate_override` mask) → **combine** calibrated CCA·rel (product-AND, or a ≤3-param LR
+chosen empirically by a 1-SE rule — `src/fusion/`) → **composed Platt** →
+`ica_score` (0.0 for gated-out rows). The fusion is persisted as
+`cca_doca/ica_fusion.fusion.json`. `src/apply_ica.py` runs the assembled model over
+the API (1960–1995, ML gate) and LDC (1996–2007, gold-first gate) corpora to produce
+`cca_doca/ica_candidates/{api_1960_1995,ldc_1996_2007}.parquet`.
+
+This decomposition leverages the larger CCA and relevance labeled datasets
+separately, making the sparse ICA problem tractable. The standalone US/not-US filter
+(documented below) is the same head, now consumed as the assembled gate rather than a
+separate model. For full current state see `docs/notes/project-state-and-data-map.md`;
+the multi-head design/assembly reasoning is in the docs linked under "Current Status"
+below. **Known ceiling:** the US head misses diaspora collective action and caps
+system recall — a scoped-but-deferred retrain (`docs/notes/us-head-retrain-plan.md`).
 
 ## Development Setup
 
@@ -32,12 +61,12 @@ This decomposition lets us leverage the larger labeled datasets for CCA and immi
 - Install/sync dependencies: `uv sync` (runtime + default dev group). Add a dependency with `uv add <pkg>` — never `pip install` into the venv.
 - No `__init__.py` files exist (implicit namespace packages)
 - All scripts must be run from the **project root** (imports use `src.*` paths, e.g., `import src.model_setup.dapt_setup`)
-- **Configuration**: `src/config.py` is the single source of truth for platform-conditional values. Detects cluster vs. local via `Path("/projects/ahd").exists()` (override with `ICA_ENV=cluster|local`); exports `IS_CLUSTER`, `PROJECT_ROOT`, granular paths (`CCA_SET_DIR`, `DAPT_BACKBONE_WEIGHTS`, `LDC_CORPUS`, etc.), and `DTYPE_POLICY` (`mixed_float16` on cluster, `float32` locally — MPS mixed-precision support is patchy). Scripts apply the dtype policy explicitly: `keras.config.set_dtype_policy(config.DTYPE_POLICY)`.
+- **Configuration**: `src/config.py` is the single source of truth for platform-conditional values. Detects cluster vs. local via `Path("/projects/ahd").exists()` (override with `ICA_ENV=cluster|local`); exports `IS_CLUSTER`, `PROJECT_ROOT`, granular paths (`CCA_SET_DIR`, `DAPT_BACKBONE_WEIGHTS`, `LDC_CORPUS`, the US-filter `US_FILTER_*` family, `API_CORPUS_DIR`, `VALIDATION_DIR`, etc.), and `DTYPE_POLICY` (`mixed_float16` on cluster, `float32` locally — MPS mixed-precision support is patchy). Scripts apply the dtype policy explicitly: `keras.config.set_dtype_policy(config.DTYPE_POLICY)`.
 - **Reproducibility**: training scripts call `keras.utils.set_random_seed(200)` to match the `seed=200` used by the polars `.sample()` splits in `src/data_setup/data.py`.
 
 ### Tests
 
-pytest is configured (`pyproject.toml [tool.pytest.ini_options]`, `pythonpath = ["."]`). Run with `uv run pytest` from the project root (no venv activation needed). `hypothesis` (dev dependency) backs property-based tests in the diagnostics suite. **Current coverage: 374 tests passing.** Suites:
+pytest is configured (`pyproject.toml [tool.pytest.ini_options]`, `pythonpath = ["."]`). Run with `uv run pytest` from the project root (no venv activation needed). `hypothesis` (dev dependency) backs property-based tests in the diagnostics suite. **Current coverage: 618 Python tests passing** (the US-filter subsystem added the `test_us_*`, `test_calibration_*`, `test_dateline_guard`, `test_apply_us_filter`, `test_artifact_reload`, and `test_*` validation suites). The R dateline pipeline has its own testthat suite — `Rscript r/tests/run_tests.R` from the project root, currently 79 passing assertions (see `r/CLAUDE.md`). Suites:
 - `tests/test_flpu_loss.py` — `FLPULoss` invariants + loss-component correctness (the `return_intermediates` path)
 - `tests/test_data_splits.py` — train/val/test split, label construction, id-uniqueness in `create_classifier_data`
 - `tests/test_data_loading.py` — missing-value handling + headline-with-lead concatenation in `data_from_parquet`
@@ -75,6 +104,44 @@ The project implements a three-phase pipeline, each with dedicated training scri
 - Trains with a **frozen encoder** and classification head only. Per-layer learning rates and encoder unfreezing are forward-compatible via `LayerLRModel` (the type returned by `build_endpoint_model`) — set `freeze_encoder=False` and pass `layer_multipliers={...}` when ready.
 - Current quality: better than chance, but hand review shows the NYT indexer tag definitions are too generous (highest-leverage improvement is refining label definitions). An empirical retraining run with the corrected prior is one of the deferred items below.
 - `src/test_script.py` is a pre-Tier-2 sandbox exercising the endpoint-layer training pattern with inline shapes (raw `keras_hub` backbone, ad-hoc `EndpointLayer`, plain `keras.Model`); it is not the production path. The production path is covered by `tests/test_heads.py` and `tests/test_assembly.py`.
+
+## US/not-US Pre-Filter (second classification head)
+
+A standalone **US/not-US** binary classifier, built on the same frozen-DAPT-backbone + single-`ClassificationHead` spine as the CCA classifier but as **plain supervised PN with BCE** (no FLPU/prior/nnPU coupling). Its purpose is to pre-filter the full NYT Archive API corpus (1960–1995) down to plausibly-US events before downstream CCA/ICA classification. Phases 1–7 of the implementation plan (`docs/implementation-plans/2026-06-06-us-filter/phase_01.md … phase_08.md`) have landed; **Phase 8 (a dialogic calibration-notes drafting session) is deliberately open.** Operator-gated items (full training run, cluster shakedown, gold-set hand-coding + slice eval / DoCA recall / escalation decision, full-corpus apply) are described in the phase files and not yet executed.
+
+### Labels: the R dateline pipeline (`r/`)
+
+US labels are derived **outside Python**, in the `r/` tree (see `r/CLAUDE.md` for its contracts). Key discovery driving the design (phase_01.md execution-deviation note, the authoritative amendment): **datelines do not live in the LDC parquet text** — the parquet-feeding CSV pipeline never extracted the NITF `dateline` element. They survive in the parallel `parsed_to_rds/{year}.rds` metadata (27–40% coverage). So:
+- **Label channel = rds join** (`r/dateline/build_labels.R`): per-year rds `dateline` field joined onto LDC parquet by `id`, resolved structure-first via `resolve_dateline_field` (states/countries/AP-city gazetteers in `r/dateline/gazetteers/`), fused with desk/section signals (`r/dateline/label_policy.R`).
+- **Text channel = hygiene only**: a strict, **conditional** dateline-stripper produces a leakage-proof `stripped_text` column (strips a caps-block prefix only if it has a date field, a recognized state/country qualifier, or is a bare AP-list city — emphasis-caps ledes like `"PILOBOLUS - that dance troupe…"` are NOT stripped).
+- **Derived-parquet convention**: `build_labels.R` writes `us_filter/ldc_labeled.parquet` (the training source: `us_label` bool + `label_source` + `stripped_text`). The API corpus (`api_corpus/`, produced by `r/api_ingest/rds_to_parquet.R`) is **read-only**; `us_filter/api_us_scores/` is **derived** (apply output). These are gitignored data products, not checked in.
+
+### Python training + apply path
+
+- **`src/us_config.py` — `UsRunConfig`** (frozen dataclass) + `UsHeadConfig`. Deliberately parallel to `cca_config.RunConfig` but with **no FLPU/prior**; REUSES the shared sub-configs (`LRScheduleConfig`, `OptimizerConfig`, `DiagnosticsConfig`, `ResolvedSteps`) and MIRRORS the property surface (`label_keys`, `expected_columns`, `validate_against_backbone`, `to_json`/`from_json`, `config_path_for_weights` re-export). `DEFAULT_US_CONFIG` is the canonical starting point. Carries **escalation knobs** for forward-compatible fine-tuning: `freeze_encoder` (default `True`), `unfreeze_top_n` (validated `[0, 12]`), `layer_multipliers`; sidecars predating these knobs back-compat-default to frozen-probe. Convergence path: unifies with `RunConfig` via a loss-type discriminated union on the head config when the multi-head config is built.
+- **`src/us_metrics.py` — `make_us_metrics()`**: canonical binary metrics (logits-space thresholds at 0.0, PR-AUC for imbalance), mirroring `make_cca_metrics`.
+- **`src/run_us_classification.py`**: importable `main(run_config=None, max_steps=None)` guarded by `if __name__ == "__main__"`. Reads `us_filter/` via `data_from_parquet(..., lead_column="stripped_text")`, splits via `create_us_filter_data`, and **asserts no dateline residue** on every split (`assert_no_dateline_residue`, AC2.2 leakage guard) before training. `scripts/us_short_run.py` is the reproducible level-1 short run (1 epoch / 200 steps, local float32).
+- **`src/preproc/dateline_guard.py` — `has_dateline_prefix` / `assert_no_dateline_residue`**: the Python port of the R extractor's *conditional-strip detection* half. **Boundary-inventory pair** with `r/dateline/resolve_dateline.R`: any change to the R credit-line / caps-block / delimiter / conditional-stripping logic MUST be mirrored here and vice versa. Mirrors the conditional "would-strip" semantics exactly (so unstripped emphasis-caps ledes do not register as residue).
+- **`src/apply_us_filter.py` — `main(threshold=0.5)`**: batch-applies the calibrated model to the full API corpus, writes per-year parquets to `US_FILTER_SCORES_DIR` with `id` / `us_score` (calibrated, in [0,1]) / `us` (bool). Default threshold 0.5; the CCA-consumer recall recipe (pick the largest threshold whose DoCA recall ≥ target) is in `docs/notes/us-filter-threshold-recipe.md`.
+
+### Calibration (`src/calibration/`)
+
+Platt scaling as a post-hoc seam between logits and probabilities. `calibrator.py` (Functional Core: `platt_fit` / `platt_transform`, `PlattCalibrator`), `report.py` (pure ECE / Brier / reliability), `sidecar.py` (Imperative Shell: `*.calibration.json` I/O, `calibration_path_for_weights`). This extends Pattern-2 reload to an **artifact triple**: `*.weights.h5` + `*.config.json` + `*.calibration.json` — proven sufficient for cross-process reproduction by `src/validation/artifact_check.py` (`reload_and_score`). **Calibration-fit rule**: the calibrator is fit on **natural-balance** (un-rebalanced) data only, so the learned A/B map to the real prior rather than the training-time rebalanced one.
+
+### Validation instruments (`src/validation/`)
+
+Tooling for the operator-gated gold-set evaluation (mostly not yet run on real data):
+- `schema.py` — durable gold-set schema (`validate_gold_set`), shared across model iterations.
+- `build_coding_template.py` — stratified (era-bucket × news_desk) hand-coding candidate sampler with CLI entry point; emits schema-conforming rows with null labels.
+- `slice_eval.py` — `apply_us_model` (the canonical model-application helper, reused by apply + artifact_check), `evaluate_slice`, `proxy_gap` (dateline-vs-event-location gap for pre-1986 transfer eval).
+- `doca_recall.py` — `doca_recall(scored_df, threshold)` recall diagnostic over DoCA-matched articles (input must carry `doca_id` + `us_score`).
+- `escalation.py` — `top_n_group_fn` (per-layer discriminative-LR grouping for unfreezing the top-N RoBERTa layers) + `escalation_decision` (frozen-probe → fine-tune decision logic).
+- `free_audit.py` — heuristic free-audit metrics (error rate vs dateline labels, lead similarity).
+- `artifact_check.py` — the artifact-triple reload proof.
+
+### Data-pipeline changes supporting the US filter
+
+- **`src/data_setup/data.py`**: `data_from_parquet` gained a `lead_column` parameter (default `"lead_paragraph"`; the US filter passes `"stripped_text"`) so the same loader serves both the CCA (raw lede) and US (dateline-stripped) text channels. New `create_us_filter_data(dataset)`: drops null `us_label` rows, splits the `True`/`False` groups separately 90/5/5 (seed=200), then **shuffles each split deterministically** (seed=200) — the within-split shuffle prevents class-blocking when `from_tensor_slices` preserves row order and `SHUFFLE_BUFFER` is smaller than the full split.
 
 ### Model-construction abstractions
 
@@ -132,13 +199,34 @@ Permanent observability for training runs (the tooling for the deferred empirica
 
 ## Current Status and Open Work
 
-**Done:**
+> **The sections below this banner describe the pre-`cca-doca-retrain` state and are
+> retained for the Tier-1–5 / US-filter-phase history. They are NOT current on the
+> multi-head model.** As of 2026-06-26 the multi-head `IcaModel` is assembled and
+> producing ICA candidates (see "Architecture" above), the CCA + relevance (`rel`)
+> heads were retrained features-mode on a harmonized population, all three heads are
+> Platt-calibrated, the fusion is fit and persisted, and `apply_ica.py` has run on
+> the API and LDC caches. Authoritative current state + open work:
+> `docs/notes/project-state-and-data-map.md` and `docs/notes/roadmap.md`.
+
+**Done (multi-head ICA assembly, Phases 1–6, 2026-06-26):**
+- `IcaModel` assembled (`src/assemble_ica.py`); fusion module `src/fusion/`; apply
+  (`src/apply_ica.py`) → `cca_doca/ica_candidates/`. CCA + relevance (`rel`)
+  harmonized retrain; three Platt calibrators; clean hand-coded eval set
+  (`validation/ica_coding_template_coded.csv`, 214 ICA positives).
+- Two captured findings: the US head's diaspora-recall ceiling
+  (`docs/notes/us-head-retrain-plan.md`, a deferred retrain) and the apply results +
+  raw-vs-stripped channel correction + cluster runbook
+  (`docs/notes/ica-apply-results-and-cluster-runbook.md`).
+
+**Done (pre-retrain history):**
 - DAPT on headline/lede pairs
 - CCA classifier (single-head) with FLPU loss
 - Class prior estimation via DEDPUL
 - **Tiers 1–5 (audit/refactor + diagnostic instrumentation) — subagent-executable portion complete.** Tier 1 (correctness), Tier 2 (structural refactor — the abstractions above), Tier 3 (robustness / boundary enforcement), Tier 4 (hygiene + LR-schedule resolution + lessons docs), and Tier 5 (diagnostic instrumentation) have all landed, with per-tier adversarial review. Commit-level status is in `docs/notes/tiers-and-checkpoints.md`; per-tier design reasoning is in the `tier{2,3,4,5}-design.md` docs.
+- **US/not-US pre-filter — Phases 1–7 complete** (see "US/not-US Pre-Filter" above). R dateline-labeling pipeline, US-filter config/metrics/training/apply, Platt calibration + artifact triple, and validation instruments all landed with per-phase adversarial review. **Phase 8 (dialogic calibration-notes drafting) is deliberately open**, and the operator-gated runs below are not yet performed.
 
 **Pending — HUMAN-OPERATED (handed off, not yet performed):**
+- US filter: full local training run + cluster `mixed_float16` shakedown; gold-set hand-coding (`build_coding_template.py`) → slice eval / DoCA recall / escalation decision; full-corpus apply (`apply_us_filter.py`) over `api_corpus/`. Runbooks: `docs/implementation-plans/2026-06-06-us-filter/phase_*.md` (phase_01/phase_03 carry authoritative execution-deviation amendments).
 - Tier 5 Phase 7 Tasks 3–5: level-1 short + level-2 full **real-data** runs on local `cca_set/`, then create `docs/notes/tier5-stress-test-notes.md` (does not yet exist). Runbook: `docs/notes/tier5-implementation-plan/phase_07.md`.
 - Tier 5 Phase 8 Tasks 2–4: short + full **cluster** `mixed_float16` runs on Explorer, then the level-3 π=0.03-vs-0.02 research handoff. Runbook: `docs/notes/tier5-implementation-plan/phase_08.md`.
 - These runs are the intended coverage for the smoke-test backbone-validation gap (the synthetic stand-in's canonical boundary case). The diagnostic instrumentation above is the observability for them.
@@ -150,11 +238,11 @@ Permanent observability for training runs (the tooling for the deferred empirica
 - Benchmarking and comparative testing (FLPU vs. ALUM, etc.)
 - Refine NYT indexer tag definitions for CCA and immigration labels (current definitions are too generous)
 - Pull DoCA article headlines (1960-1984) via NYT Archive API to expand training data
-- Build additional classification heads (immigration, US, combined ICA)
+- ~~Build additional classification heads (immigration, combined ICA); unify the standalone US filter into the shared-encoder multi-head~~ — **DONE 2026-06-26**: the relevance (`rel`) head and the combined ICA composition exist; the US filter is consumed as the assembled gate (see "Architecture" above).
 - Hyperparameter search
-- Output calibration (decision threshold, not just raw .5)
-- Hand-label a small PN test set (~200-1000 articles) for proper evaluation
-- Retrain CCA classifier with the corrected prior (π_pos ≈ 0.02 rather than 0.03)
+- Output calibration (decision threshold, not just raw .5) — **partly done**: all three heads + the composed ICA score are now Platt-calibrated; τ_us picked via `doca_recall.pick_us_threshold`.
+- Hand-label a small PN test set (~200-1000 articles) for proper evaluation — **partly done**: a 214-positive hand-coded ICA eval set exists (`validation/ica_coding_template_coded.csv`); a 500-row CCA gold set also exists.
+- ~~Retrain CCA classifier with the corrected prior (π_pos ≈ 0.02 rather than 0.03)~~ — **DONE**: CCA retrained features-mode at π=0.02 on the DoCA-matched population.
 
 **Handoff docs for picking up mid-work:**
 - `docs/notes/tiers-and-checkpoints.md` — tier plan, commit-level status, and "how to pick up" instructions. Operational doc — read at the start of each piece, updated at piece close.

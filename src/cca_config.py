@@ -107,6 +107,9 @@ class FLPULossConfig:
 
     prior: float
     kiryo_clawback: bool = False
+    # nnPNU PU<->PN mixing weight for reliable negatives (0 = pure nnPU). Used by
+    # the relevance head; FLPULoss guards eta>0 against kiryo_clawback=True.
+    nnpnu_eta: float = 0.0
 
     def __post_init__(self):
         if not isinstance(self.prior, (int, float)):
@@ -123,6 +126,15 @@ class FLPULossConfig:
                 f"FLPULossConfig.kiryo_clawback must be a bool; "
                 f"got {self.kiryo_clawback!r} "
                 f"(type {type(self.kiryo_clawback).__name__})."
+            )
+        if not (0.0 <= float(self.nnpnu_eta) <= 1.0):
+            raise ValueError(
+                f"FLPULossConfig.nnpnu_eta must be in [0, 1]; got {self.nnpnu_eta}."
+            )
+        if float(self.nnpnu_eta) > 0.0 and self.kiryo_clawback:
+            raise ValueError(
+                "FLPULossConfig: nnpnu_eta>0 with kiryo_clawback is not supported "
+                "(see FLPULoss / docs/notes/pinned-questions.md)."
             )
 
     @classmethod
@@ -993,7 +1005,6 @@ def _cli_show(config_path: Path) -> None:
 
 def _cli_main(argv: list[str] | None = None) -> int:
     import argparse
-    import sys
 
     parser = argparse.ArgumentParser(
         prog="python -m src.cca_config",

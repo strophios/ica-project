@@ -650,3 +650,76 @@ class TestLossComponentCorrectness:
         )
         _, c = loss.call(y_true, y_pred, return_intermediates=True)
         assert float(c["positive_risk"]) >= 0.0
+
+
+def _reference_nnpnu(y_true, y_pred, prior, eta, focal_gamma=2.0):
+    """NumPy reference for the nnPNU loss: positive_risk + (1-eta)*max(0, PU) +
+    eta*PN, with reliable negatives carrying label -1."""
+    y_true = np.asarray(y_true).reshape(-1).astype(np.float64)
+    y_pred = np.asarray(y_pred).reshape(-1).astype(np.float64)
+
+    def focal(y, logit):
+        p = 1.0 / (1.0 + np.exp(-logit))
+        p_t = np.clip(np.where(y == 1, p, 1.0 - p), 1e-12, 1.0 - 1e-12)
+        return -((1.0 - p_t) ** focal_gamma) * np.log(p_t)
+
+    pos = (y_true == 1).astype(np.float64)
+    unl = (y_true == 0).astype(np.float64)
+    neg = (y_true == -1).astype(np.float64)
+    n_pos, n_unl, n_neg = max(pos.sum(), 1.0), max(unl.sum(), 1.0), max(neg.sum(), 1.0)
+    focal_pos = focal(np.ones_like(y_pred), y_pred)
+    focal_neg = focal(np.zeros_like(y_pred), y_pred)
+    positive_risk = prior * (focal_pos * pos).sum() / n_pos
+    pu = (focal_neg * unl).sum() / n_unl - prior * (focal_neg * pos).sum() / n_pos
+    pn = (1.0 - prior) * (focal_neg * neg).sum() / n_neg
+    return float(positive_risk + (1.0 - eta) * max(pu, 0.0) + eta * pn)
+
+
+class TestNnPNU:
+    """Reliable-negative (PNU) extension: a third label value (-1) with a
+    PU<->PN mixing weight eta. eta=0 must reduce exactly to nnPU."""
+
+    @pytest.mark.parametrize("bad", [-0.1, 1.1, 2.0])
+    def test_invalid_eta_raises(self, bad):
+        with pytest.raises(ValueError):
+            FLPULoss(prior=0.1, nnpnu_eta=bad)
+
+    def test_clawback_with_eta_raises(self):
+        # The clawback's ascent must not touch the reliable-negative term; guard it.
+        with pytest.raises(NotImplementedError):
+            FLPULoss(prior=0.1, kiryo_clawback=True, nnpnu_eta=0.5)
+
+    def test_eta_zero_ignores_reliable_negatives(self):
+        # At eta=0, adding reliable-negative (-1) samples must not change the loss:
+        # they enter neither the positive nor unlabeled masks, and the PN term is
+        # weighted 0. This is the back-compat guarantee for the CCA head.
+        rng = np.random.default_rng(0)
+        pos = rng.normal(2.0, 1.0, 8)
+        unl = rng.normal(-1.0, 1.0, 16)
+        neg = rng.normal(-3.0, 1.0, 10)
+        loss = FLPULoss(prior=0.1, nnpnu_eta=0.0)
+        y_wo = np.concatenate([np.ones(8), np.zeros(16)]).astype("float32")
+        p_wo = np.concatenate([pos, unl]).astype("float32").reshape(-1, 1)
+        y_w = np.concatenate([np.ones(8), np.zeros(16), -np.ones(10)]).astype("float32")
+        p_w = np.concatenate([pos, unl, neg]).astype("float32").reshape(-1, 1)
+        np.testing.assert_allclose(_scalar(loss(y_wo, p_wo)), _scalar(loss(y_w, p_w)), rtol=1e-5)
+
+    @pytest.mark.parametrize("eta", [0.0, 0.3, 0.5, 0.7, 1.0])
+    def test_matches_nnpnu_reference(self, eta):
+        rng = np.random.default_rng(1)
+        y = np.concatenate([np.ones(10), np.zeros(20), -np.ones(12)]).astype("float32")
+        p = np.concatenate([
+            rng.normal(1.0, 1.0, 10), rng.normal(0.0, 1.0, 20), rng.normal(-2.0, 1.0, 12)
+        ]).astype("float32").reshape(-1, 1)
+        got = _scalar(FLPULoss(prior=0.1, nnpnu_eta=eta)(y, p))
+        np.testing.assert_allclose(got, _reference_nnpnu(y, p, 0.1, eta), rtol=1e-4)
+
+    def test_misclassified_reliable_negatives_raise_loss(self):
+        # Reliable negatives predicted POSITIVE (logit>0) cost more as eta rises.
+        y = np.concatenate([np.ones(8), np.zeros(16), -np.ones(8)]).astype("float32")
+        p = np.concatenate([
+            np.full(8, 2.0), np.full(16, -1.0), np.full(8, 3.0)  # negs wrongly positive
+        ]).astype("float32").reshape(-1, 1)
+        lo = _scalar(FLPULoss(prior=0.1, nnpnu_eta=0.0)(y, p))
+        hi = _scalar(FLPULoss(prior=0.1, nnpnu_eta=0.6)(y, p))
+        assert hi > lo

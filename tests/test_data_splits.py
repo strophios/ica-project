@@ -20,7 +20,7 @@ downstream model training:
 import polars as pl
 import pytest
 
-from src.data_setup.data import create_classifier_data
+from src.data_setup.data import create_classifier_data, assert_holdout_excluded
 
 
 # -----------------------------------------------------------------------------
@@ -390,3 +390,336 @@ class TestLabelConstruction:
         assert cca_row["immig_label"][0] == 0
         assert immig_row["cca_label"][0] == 0
         assert immig_row["immig_label"][0] == 1
+
+
+class TestCreateRelevanceData:
+    """The 3-way PNU split: positives / reliable-negatives / unlabeled."""
+
+    @staticmethod
+    def _table():
+        # 8 positives (US), 6 reliable-neg, 20 unlabeled-US, 4 unlabeled-not-US.
+        # (count, cca_label, us, reliable_neg)
+        spec = [(8, 1, True, False), (6, 0, True, True), (20, 0, True, False), (4, 0, False, False)]
+        cca, us, rneg = [], [], []
+        for n, lab, is_us, rn in spec:
+            cca += [lab] * n
+            us += [is_us] * n
+            rneg += [rn] * n
+        return pl.DataFrame({
+            "id": [f"d{i}" for i in range(len(cca))],
+            "cca_label": cca, "us": us, "reliable_neg": rneg,
+            "emb_row": list(range(len(cca))),
+        })
+
+    def _splits(self):
+        from src.data_setup.data import create_relevance_data
+        return create_relevance_data(self._table())
+
+    def test_groups_are_disjoint_and_correctly_assigned(self):
+        s = self._splits()
+        all_pos = pl.concat([s[k]["pos"] for k in ("train", "val", "test")])
+        all_neg = pl.concat([s[k]["neg"] for k in ("train", "val", "test")])
+        all_unl = pl.concat([s[k]["unl"] for k in ("train", "val", "test")])
+        pos_ids, neg_ids, unl_ids = (set(g["id"].to_list()) for g in (all_pos, all_neg, all_unl))
+        # positives = cca_label==1; reliable negatives carved out; unlabeled is
+        # US-restricted and excludes the reliable negatives.
+        assert all(all_pos["cca_label"] == 1)
+        assert all(all_neg["reliable_neg"])
+        assert pos_ids.isdisjoint(neg_ids)
+        assert neg_ids.isdisjoint(unl_ids)
+        assert pos_ids.isdisjoint(unl_ids)
+        # non-US unlabeled rows (4) are dropped from the unlabeled pool.
+        assert len(unl_ids) == 20
+        assert "emb_row" in all_unl.columns
+
+    def test_holdout_drops_ids_from_all_groups(self):
+        from src.data_setup.data import create_relevance_data
+        held = ["d0", "d8", "d14"]  # one positive, one reliable-neg, one unlabeled
+        s = create_relevance_data(self._table(), holdout_ids=held)
+        seen = set()
+        for k in ("train", "val", "test"):
+            for grp in ("pos", "neg", "unl"):
+                seen |= set(s[k][grp]["id"].to_list())
+        assert seen.isdisjoint(set(held))
+
+
+# =============================================================================
+# Tests for assert_holdout_excluded
+# =============================================================================
+
+class TestAssertHoldoutExcluded:
+    """Runtime leakage-guard assertion for train/val pools."""
+
+    @staticmethod
+    def _cca_splits(train_ids, val_ids, test_ids):
+        """Build a CCA-shape splits dict: {"train":{"pos","unl"},...}."""
+        return {
+            "train": {
+                "pos": pl.DataFrame({"id": train_ids[:2]}),
+                "unl": pl.DataFrame({"id": train_ids[2:]}),
+            },
+            "val": {
+                "pos": pl.DataFrame({"id": val_ids[:1]}),
+                "unl": pl.DataFrame({"id": val_ids[1:]}),
+            },
+            "test": {
+                "pos": pl.DataFrame({"id": test_ids[:1]}),
+                "unl": pl.DataFrame({"id": test_ids[1:]}),
+            },
+        }
+
+    @staticmethod
+    def _relevance_splits(train_ids, val_ids, test_ids):
+        """Build a relevance-shape splits dict: {"train":{"pos","neg","unl"},...}."""
+        return {
+            "train": {
+                "pos": pl.DataFrame({"id": train_ids[:2]}),
+                "neg": pl.DataFrame({"id": train_ids[2:3]}),
+                "unl": pl.DataFrame({"id": train_ids[3:]}),
+            },
+            "val": {
+                "pos": pl.DataFrame({"id": val_ids[:1]}),
+                "neg": pl.DataFrame({"id": val_ids[1:2]}),
+                "unl": pl.DataFrame({"id": val_ids[2:]}),
+            },
+            "test": {
+                "pos": pl.DataFrame({"id": test_ids[:1]}),
+                "neg": pl.DataFrame({"id": test_ids[1:2]}),
+                "unl": pl.DataFrame({"id": test_ids[2:]}),
+            },
+        }
+
+    def test_cca_clean_split_passes(self):
+        """CCA split with no holdout ids should pass (no-op)."""
+        splits = self._cca_splits(
+            train_ids=["t1", "t2", "t3"],
+            val_ids=["v1", "v2"],
+            test_ids=["te1", "te2"],
+        )
+        # Should not raise
+        assert_holdout_excluded(splits, None)
+        assert_holdout_excluded(splits, set())
+        assert_holdout_excluded(splits, [])
+
+    def test_cca_clean_split_with_non_overlapping_holdout(self):
+        """CCA split where holdout ids don't appear anywhere should pass."""
+        splits = self._cca_splits(
+            train_ids=["t1", "t2", "t3"],
+            val_ids=["v1", "v2"],
+            test_ids=["te1", "te2"],
+        )
+        # holdout has "other1", "other2" which don't appear in train/val
+        assert_holdout_excluded(splits, ["other1", "other2"])
+
+    def test_cca_leaks_in_train_pos(self):
+        """CCA: holdout id in train[pos] should raise with id enumerated."""
+        splits = self._cca_splits(
+            train_ids=["t1", "t2", "t3"],
+            val_ids=["v1", "v2"],
+            test_ids=["te1", "te2"],
+        )
+        with pytest.raises(ValueError, match="leaked.*t2"):
+            assert_holdout_excluded(splits, ["t2"])
+
+    def test_cca_leaks_in_train_unl(self):
+        """CCA: holdout id in train[unl] should raise with id enumerated."""
+        splits = self._cca_splits(
+            train_ids=["t1", "t2", "t3"],
+            val_ids=["v1", "v2"],
+            test_ids=["te1", "te2"],
+        )
+        with pytest.raises(ValueError, match="leaked.*t3"):
+            assert_holdout_excluded(splits, ["t3"])
+
+    def test_cca_leaks_in_val_pos(self):
+        """CCA: holdout id in val[pos] should raise with id enumerated."""
+        splits = self._cca_splits(
+            train_ids=["t1", "t2", "t3"],
+            val_ids=["v1", "v2"],
+            test_ids=["te1", "te2"],
+        )
+        with pytest.raises(ValueError, match="leaked.*v1"):
+            assert_holdout_excluded(splits, ["v1"])
+
+    def test_cca_leaks_in_val_unl(self):
+        """CCA: holdout id in val[unl] should raise with id enumerated."""
+        splits = self._cca_splits(
+            train_ids=["t1", "t2", "t3"],
+            val_ids=["v1", "v2"],
+            test_ids=["te1", "te2"],
+        )
+        with pytest.raises(ValueError, match="leaked.*v2"):
+            assert_holdout_excluded(splits, ["v2"])
+
+    def test_cca_safe_in_test(self):
+        """CCA: holdout ids in test[] are OK (test is evaluation-only)."""
+        splits = self._cca_splits(
+            train_ids=["t1", "t2", "t3"],
+            val_ids=["v1", "v2"],
+            test_ids=["te1", "te2"],
+        )
+        # holdout ids in test should not raise
+        assert_holdout_excluded(splits, ["te1", "te2"])
+
+    def test_cca_multiple_leaked_ids_enumerated(self):
+        """CCA: multiple leaked ids should be enumerated in error."""
+        splits = self._cca_splits(
+            train_ids=["t1", "t2", "t3"],
+            val_ids=["v1", "v2"],
+            test_ids=["te1", "te2"],
+        )
+        with pytest.raises(ValueError) as exc_info:
+            assert_holdout_excluded(splits, ["t1", "t2", "v1"])
+        error_msg = str(exc_info.value)
+        assert "t1" in error_msg
+        assert "t2" in error_msg
+        assert "v1" in error_msg
+
+    def test_relevance_clean_split_passes(self):
+        """Relevance split with no holdout ids should pass."""
+        splits = self._relevance_splits(
+            train_ids=["t1", "t2", "t3", "t4"],
+            val_ids=["v1", "v2", "v3"],
+            test_ids=["te1", "te2", "te3"],
+        )
+        assert_holdout_excluded(splits, None)
+        assert_holdout_excluded(splits, set())
+
+    def test_relevance_clean_split_with_non_overlapping_holdout(self):
+        """Relevance split where holdout ids don't appear should pass."""
+        splits = self._relevance_splits(
+            train_ids=["t1", "t2", "t3", "t4"],
+            val_ids=["v1", "v2", "v3"],
+            test_ids=["te1", "te2", "te3"],
+        )
+        assert_holdout_excluded(splits, ["other1", "other2"])
+
+    def test_relevance_leaks_in_train_pos(self):
+        """Relevance: holdout in train[pos] should raise."""
+        splits = self._relevance_splits(
+            train_ids=["t1", "t2", "t3", "t4"],
+            val_ids=["v1", "v2", "v3"],
+            test_ids=["te1", "te2", "te3"],
+        )
+        with pytest.raises(ValueError, match="leaked.*t1"):
+            assert_holdout_excluded(splits, ["t1"])
+
+    def test_relevance_leaks_in_train_neg(self):
+        """Relevance: holdout in train[neg] should raise."""
+        splits = self._relevance_splits(
+            train_ids=["t1", "t2", "t3", "t4"],
+            val_ids=["v1", "v2", "v3"],
+            test_ids=["te1", "te2", "te3"],
+        )
+        with pytest.raises(ValueError, match="leaked.*t3"):
+            assert_holdout_excluded(splits, ["t3"])
+
+    def test_relevance_leaks_in_train_unl(self):
+        """Relevance: holdout in train[unl] should raise."""
+        splits = self._relevance_splits(
+            train_ids=["t1", "t2", "t3", "t4"],
+            val_ids=["v1", "v2", "v3"],
+            test_ids=["te1", "te2", "te3"],
+        )
+        with pytest.raises(ValueError, match="leaked.*t4"):
+            assert_holdout_excluded(splits, ["t4"])
+
+    def test_relevance_leaks_in_val_pos(self):
+        """Relevance: holdout in val[pos] should raise."""
+        splits = self._relevance_splits(
+            train_ids=["t1", "t2", "t3", "t4"],
+            val_ids=["v1", "v2", "v3"],
+            test_ids=["te1", "te2", "te3"],
+        )
+        with pytest.raises(ValueError, match="leaked.*v1"):
+            assert_holdout_excluded(splits, ["v1"])
+
+    def test_relevance_leaks_in_val_neg(self):
+        """Relevance: holdout in val[neg] should raise."""
+        splits = self._relevance_splits(
+            train_ids=["t1", "t2", "t3", "t4"],
+            val_ids=["v1", "v2", "v3"],
+            test_ids=["te1", "te2", "te3"],
+        )
+        with pytest.raises(ValueError, match="leaked.*v2"):
+            assert_holdout_excluded(splits, ["v2"])
+
+    def test_relevance_leaks_in_val_unl(self):
+        """Relevance: holdout in val[unl] should raise."""
+        splits = self._relevance_splits(
+            train_ids=["t1", "t2", "t3", "t4"],
+            val_ids=["v1", "v2", "v3"],
+            test_ids=["te1", "te2", "te3"],
+        )
+        with pytest.raises(ValueError, match="leaked.*v3"):
+            assert_holdout_excluded(splits, ["v3"])
+
+    def test_relevance_safe_in_test(self):
+        """Relevance: holdout ids in test[] are OK."""
+        splits = self._relevance_splits(
+            train_ids=["t1", "t2", "t3", "t4"],
+            val_ids=["v1", "v2", "v3"],
+            test_ids=["te1", "te2", "te3"],
+        )
+        assert_holdout_excluded(splits, ["te1", "te2", "te3"])
+
+    def test_missing_train_split_raises(self):
+        """Missing 'train' key in splits dict should raise."""
+        splits = {
+            "val": {"pos": pl.DataFrame({"id": ["v1"]}), "unl": pl.DataFrame({"id": ["v2"]})},
+            "test": {"pos": pl.DataFrame({"id": ["te1"]}), "unl": pl.DataFrame({"id": ["te2"]})},
+        }
+        with pytest.raises(ValueError, match="'train'.*not found"):
+            assert_holdout_excluded(splits, ["holdout"])
+
+    def test_missing_val_split_raises(self):
+        """Missing 'val' key in splits dict should raise."""
+        splits = {
+            "train": {"pos": pl.DataFrame({"id": ["t1"]}), "unl": pl.DataFrame({"id": ["t2"]})},
+            "test": {"pos": pl.DataFrame({"id": ["te1"]}), "unl": pl.DataFrame({"id": ["te2"]})},
+        }
+        with pytest.raises(ValueError, match="'val'.*not found"):
+            assert_holdout_excluded(splits, ["holdout"])
+
+    def test_missing_pos_in_train_raises(self):
+        """Missing 'pos' group in train split should raise."""
+        splits = {
+            "train": {"unl": pl.DataFrame({"id": ["t1"]})},
+            "val": {"pos": pl.DataFrame({"id": ["v1"]}), "unl": pl.DataFrame({"id": ["v2"]})},
+            "test": {"pos": pl.DataFrame({"id": ["te1"]}), "unl": pl.DataFrame({"id": ["te2"]})},
+        }
+        with pytest.raises(ValueError, match="'pos'.*not found"):
+            assert_holdout_excluded(splits, ["holdout"])
+
+    def test_missing_unl_in_val_raises(self):
+        """Missing 'unl' group in val split should raise."""
+        splits = {
+            "train": {"pos": pl.DataFrame({"id": ["t1"]}), "unl": pl.DataFrame({"id": ["t2"]})},
+            "val": {"pos": pl.DataFrame({"id": ["v1"]})},
+            "test": {"pos": pl.DataFrame({"id": ["te1"]}), "unl": pl.DataFrame({"id": ["te2"]})},
+        }
+        with pytest.raises(ValueError, match="'unl'.*not found"):
+            assert_holdout_excluded(splits, ["holdout"])
+
+    def test_non_dict_split_raises(self):
+        """Non-dict value in splits should raise."""
+        splits = {
+            "train": pl.DataFrame({"id": ["t1"]}),  # Wrong: should be dict
+            "val": {"pos": pl.DataFrame({"id": ["v1"]}), "unl": pl.DataFrame({"id": ["v2"]})},
+            "test": {"pos": pl.DataFrame({"id": ["te1"]}), "unl": pl.DataFrame({"id": ["te2"]})},
+        }
+        with pytest.raises(ValueError, match="'train'.*not a dict"):
+            assert_holdout_excluded(splits, ["holdout"])
+
+    def test_non_dataframe_group_raises(self):
+        """Non-DataFrame value in group should raise."""
+        splits = {
+            "train": {
+                "pos": ["t1", "t2"],  # Wrong: should be DataFrame
+                "unl": pl.DataFrame({"id": ["t3"]}),
+            },
+            "val": {"pos": pl.DataFrame({"id": ["v1"]}), "unl": pl.DataFrame({"id": ["v2"]})},
+            "test": {"pos": pl.DataFrame({"id": ["te1"]}), "unl": pl.DataFrame({"id": ["te2"]})},
+        }
+        with pytest.raises(ValueError, match="'pos'.*not a DataFrame"):
+            assert_holdout_excluded(splits, ["holdout"])

@@ -95,15 +95,30 @@ class FLPULoss(keras.losses.Loss):
         nn_beta=0.0,
         nn_gamma=1.0,
         kiryo_clawback=False,
+        nnpnu_eta=0.0,
     ):
         super().__init__()
         if not 0 < prior < 1:
             raise NotImplementedError("The class prior should be in (0, 1)")
+        if not 0.0 <= nnpnu_eta <= 1.0:
+            raise ValueError(
+                f"nnpnu_eta (PU<->PN mixing weight) must be in [0, 1], got {nnpnu_eta}"
+            )
+        if nnpnu_eta > 0.0 and kiryo_clawback:
+            # The clawback's gradient-ASCENT recovery must be isolated to the PU
+            # negative-risk term: ascending on the reliable-negative term would
+            # push reliable negatives toward positive (un-learning them). Composing
+            # the two needs a deliberate design pass, not a silent stack.
+            raise NotImplementedError(
+                "nnpnu_eta>0 with kiryo_clawback is not yet supported "
+                "(see docs/notes/pinned-questions.md)."
+            )
         self.prior = prior
         self.focal_gamma = focal_gamma
         self.nn_beta = nn_beta
         self.nn_gamma = nn_gamma
         self.kiryo_clawback = kiryo_clawback
+        self.nnpnu_eta = nnpnu_eta
 
         # Per-sample focal loss with no class-balance α (see docstring).
         self.focal_loss = keras.losses.BinaryFocalCrossentropy(
@@ -117,75 +132,85 @@ class FLPULoss(keras.losses.Loss):
         # to avoid divide-by-zero when a batch is missing one class entirely.
         self.positive = 1
         self.unlabeled = 0
+        self.reliable_negative = -1
         self.min_count = 1.0
 
     def call(self, y_true, y_pred, return_intermediates=False):
         # Boolean masks per sub-population, cast to float for elementwise
         # multiplication. Reshape to 1-D so the masks line up with the
         # per-sample focal loss output (which is also 1-D under reduction="none").
-        positive = ops.cast(y_true == self.positive, dtype="float32")
-        unlabeled = ops.cast(y_true == self.unlabeled, dtype="float32")
-        positive = ops.reshape(positive, (-1,))
-        unlabeled = ops.reshape(unlabeled, (-1,))
+        # Three label values: positive (1), unlabeled (0), reliable negative (-1).
+        positive = ops.reshape(ops.cast(y_true == self.positive, "float32"), (-1,))
+        unlabeled = ops.reshape(ops.cast(y_true == self.unlabeled, "float32"), (-1,))
+        reliable_neg = ops.reshape(
+            ops.cast(y_true == self.reliable_negative, "float32"), (-1,)
+        )
 
         # Sample counts, floored at 1 to avoid division by zero.
         n_positive = ops.maximum(ops.sum(positive), self.min_count)
         n_unlabeled = ops.maximum(ops.sum(unlabeled), self.min_count)
+        n_reliable_neg = ops.maximum(ops.sum(reliable_neg), self.min_count)
 
-        # Per-sample focal loss over the whole batch; we zero out irrelevant
-        # entries via the masks below. We evaluate over the full batch
-        # (rather than slicing) to keep the graph static for autograph/jit.
+        # We evaluate focal loss over the whole batch and zero out irrelevant
+        # entries via the masks below (rather than slicing) to keep the graph
+        # static for autograph/jit. Shape expectation: `focal_pos`/`focal_neg`
+        # are 1-D of length batch_size, matching the masks after their reshape --
+        # this depends on `BinaryFocalCrossentropy(reduction="none")` returning
+        # per-sample losses, and is guarded by tests/test_flpu_loss.py (a
+        # Python-level assert would only run at trace time), the intended
+        # tripwire if a Keras upgrade ever changes reduction="none" semantics.
         #
-        # Shape expectation: `pn_loss` is 1-D of length batch_size, matching
-        # `positive` and `unlabeled` after their reshape. This depends on
-        # `BinaryFocalCrossentropy(reduction="none")` returning per-sample
-        # losses. A Python-level assert here would not be a runtime guard:
-        # under `tf.function` tracing, asserts run only at trace time, and
-        # an asserted shape equality on tensors with partially-unknown dims
-        # could silently pass. Instead, the shape invariant is guarded by
-        # the test suite (tests/test_flpu_loss.py, TestOutputStructure and
-        # the production-configuration test for mixed_float16). If a Keras
-        # upgrade ever changes reduction="none" semantics, those tests are
-        # the intended tripwire, not this comment.
-        pn_loss = self.focal_loss(y_true, y_pred)
+        # Per-sample focal loss treating EVERY sample as positive / as negative,
+        # then masked below. This decomposition is bit-identical to the prior
+        # focal(y_true) / focal(1 - y_true) form at 0/1 labels, and lets the third
+        # label value (-1, reliable negative) join without feeding -1 to the focal
+        # loss (which expects 0/1).
+        focal_pos = ops.reshape(self.focal_loss(ops.ones_like(y_pred), y_pred), (-1,))
+        focal_neg = ops.reshape(self.focal_loss(ops.zeros_like(y_pred), y_pred), (-1,))
 
-        # Three FLPU components.
-        y_positive = pn_loss * positive  # positives, treated as positive
-        y_unlabeled = pn_loss * unlabeled  # unlabeled, treated as negative
-        y_positive_inv = (
-            self.focal_loss(ops.abs(y_true - 1), y_pred) * positive
-        )  # positives, treated as negative (bias correction)
-
-        positive_risk = self.prior * ops.sum(y_positive) / n_positive
-        negative_risk = (
-            ops.sum(y_unlabeled) / n_unlabeled
-            - self.prior * ops.sum(y_positive_inv) / n_positive
+        positive_risk = self.prior * ops.sum(focal_pos * positive) / n_positive
+        # PU estimate of (1 - pi) * R_n^-: the ONLY term that can go negative (the
+        # bias-correction subtraction overfits the positives). nnPU clips it.
+        pu_negative_risk = (
+            ops.sum(focal_neg * unlabeled) / n_unlabeled
+            - self.prior * ops.sum(focal_neg * positive) / n_positive
+        )
+        # PN estimate of the same (1 - pi) * R_n^- from reliable negatives: a mean
+        # of non-negative focal losses, so always >= 0 (no clip/clawback needed).
+        pn_negative_risk = (
+            (1.0 - self.prior) * ops.sum(focal_neg * reliable_neg) / n_reliable_neg
         )
 
+        eta = self.nnpnu_eta
         if not self.kiryo_clawback:
-            # Standard nnPU: clip the negative risk at 0 to prevent the
-            # bias-correction subtraction from going negative due to
-            # overfitting on the positive samples.
-            loss = positive_risk + ops.maximum(negative_risk, 0)
-            correction_triggered = ops.cast(negative_risk < 0, "float32")
+            # nnPNU: the clip applies to the PU term ONLY; the reliable-negative
+            # term is an ordinary supervised loss added OUTSIDE the clip. `eta`
+            # blends the PU and PN estimates of the same (1 - pi) * R_n^-, so
+            # eta=0 reduces exactly to nnPU.
+            negative_risk = (
+                (1.0 - eta) * ops.maximum(pu_negative_risk, 0.0)
+                + eta * pn_negative_risk
+            )
+            loss = positive_risk + negative_risk
+            correction_triggered = ops.cast(pu_negative_risk < 0, "float32")
         else:
-            # Kiryo "active recovery" branch: when the negative risk falls below
-            # -nn_beta, take a gradient-ascent step on the (negated) negative
-            # risk, scaled by nn_gamma, while ignoring the positive risk for
-            # this step. Intent: actively claw back from overfitting.
+            # Kiryo "active recovery": gradient-ascent step on the (negated) PU
+            # negative risk when it falls below -nn_beta, ignoring positive risk.
+            # Guarded to eta==0 at __init__, so no reliable-negative term enters
+            # here -- identical to the original nnPU clawback.
             loss = ops.cond(
-                pred=negative_risk < -self.nn_beta,
-                true_fn=lambda: -self.nn_gamma * negative_risk,
-                false_fn=lambda: positive_risk + negative_risk,
+                pred=pu_negative_risk < -self.nn_beta,
+                true_fn=lambda: -self.nn_gamma * pu_negative_risk,
+                false_fn=lambda: positive_risk + pu_negative_risk,
             )
             correction_triggered = ops.cast(
-                negative_risk < -self.nn_beta, "float32"
+                pu_negative_risk < -self.nn_beta, "float32"
             )
 
         if return_intermediates:
             return loss, {
                 "positive_risk": positive_risk,
-                "negative_risk": negative_risk,
+                "negative_risk": pu_negative_risk,
                 "correction_triggered": correction_triggered,
             }
         return loss

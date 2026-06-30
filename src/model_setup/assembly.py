@@ -216,6 +216,123 @@ def build_endpoint_model(
     )
 
 
+def build_feature_endpoint_model(
+    heads,
+    hidden_dim,
+    target_dtype="float32",
+    layer_multipliers=None,
+    group_fn=None,
+    diagnostics=None,
+):
+    """Features-mode counterpart of `build_endpoint_model`.
+
+    The frozen backbone is factored out into a one-time CLS-embedding cache (see
+    `src/embed_corpus.py`), so this model's input is the cached `(hidden_dim,)`
+    feature vector instead of `token_ids/padding_mask -> backbone`. Everything
+    downstream is identical to `build_endpoint_model`: same `ClassificationHead`
+    instances, same `"<head>_targets"` target Inputs, same `LayerLRModel`, and the
+    same diagnostics wiring (`build_trackers`). All training-quality diagnostics
+    therefore behave exactly as in token mode — they operate at the head/loss
+    level, not the backbone.
+
+    This path is scoped to the FROZEN-backbone regime. Full fine-tuning (unfrozen
+    encoder, per-layer LR) stays on the token-mode `build_endpoint_model`.
+
+    Inputs to the resulting model:
+      - `features`: `(batch, hidden_dim)` float
+      - one `"<head>_targets"` Input per head (same contract as `build_endpoint_model`)
+
+    Outputs: dict keyed by head name (logits), same as `build_endpoint_model`.
+
+    Args:
+        heads: `dict[str, ClassificationHead]`.
+        hidden_dim: width of the cached feature vector (== backbone hidden_dim,
+            typically 768). Validated against each head's `hidden_dim`.
+        target_dtype: dtype for target inputs (match the preprocessor/dataset).
+        layer_multipliers / group_fn / diagnostics: as in `build_endpoint_model`.
+
+    Returns:
+        A `LayerLRModel` ready to compile (no `loss` arg — heads own it via add_loss).
+    """
+    names = list(heads.keys())
+    if len(set(names)) != len(names):
+        duplicates = sorted({n for n in names if names.count(n) > 1})
+        raise ValueError(
+            f"build_feature_endpoint_model requires unique head names; got "
+            f"duplicates: {duplicates}"
+        )
+
+    if diagnostics is not None:
+        for k, h in heads.items():
+            if k != h.name:
+                raise ValueError(
+                    f"build_feature_endpoint_model: heads dict key {k!r} != "
+                    f"head.name {h.name!r}; diagnostic head-ref lookup requires "
+                    f"them equal"
+                )
+
+    # The head's intermediate Dense accepts any input width (it sets output
+    # units, not input), so a feature/head dim mismatch would NOT raise naturally.
+    # Validate explicitly: the cache's feature dim must match what each head
+    # expects (its hidden_dim == the producing backbone's hidden_dim).
+    for h in heads.values():
+        if h.hidden_dim != hidden_dim:
+            raise ValueError(
+                f"feature dim {hidden_dim} != head {h.name!r} hidden_dim "
+                f"{h.hidden_dim}; the embedding cache was produced by a backbone "
+                f"whose hidden_dim does not match this head"
+            )
+
+    features = keras.Input(shape=(hidden_dim,), dtype="float32", name="features")
+    target_inputs = {
+        f"{name}_targets": keras.Input(shape=(), dtype=target_dtype, name=f"{name}_targets")
+        for name in heads.keys()
+    }
+
+    outputs = {
+        name: head(features, targets=target_inputs[f"{name}_targets"])
+        for name, head in heads.items()
+    }
+    all_inputs = {"features": features, **target_inputs}
+
+    # Diagnostics: gather constituent trainable vars from the heads only (no
+    # backbone in features mode). Mirrors build_endpoint_model's post-call gather.
+    diagnostic_trackers = None
+    diagnostic_head_refs = None
+    if diagnostics is not None:
+        constituent_trainable = []
+        for _h in heads.values():
+            constituent_trainable.extend(_h.trainable_variables)
+        diagnostic_trackers = build_trackers(
+            diagnostics,
+            group_fn=group_fn or _default_group_fn,
+            heads=heads,
+            trainable_variables=constituent_trainable,
+        )
+        diagnostic_head_refs = list(heads.values())
+
+    return LayerLRModel(
+        inputs=all_inputs,
+        outputs=outputs,
+        group_fn=group_fn or _default_group_fn,
+        multipliers=layer_multipliers or {},
+        diagnostic_trackers=diagnostic_trackers,
+        diagnostic_head_refs=diagnostic_head_refs,
+    )
+
+
+def build_feature_inference_model(heads, hidden_dim):
+    """Features-mode counterpart of `build_inference_model` (no targets).
+
+    Input `features` `(batch, hidden_dim)`; outputs a dict of per-head logits.
+    Pattern A applies: share `heads` instances with `build_feature_endpoint_model`
+    in-process and `predict()` on this model after fitting the endpoint model.
+    """
+    features = keras.Input(shape=(hidden_dim,), dtype="float32", name="features")
+    outputs = {name: head(features) for name, head in heads.items()}
+    return keras.Model(inputs={"features": features}, outputs=outputs)
+
+
 def build_inference_model(backbone, heads, seq_length):
     """
     Wire backbone + heads into a single-input inference model,
