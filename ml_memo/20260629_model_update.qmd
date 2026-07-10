@@ -1,0 +1,129 @@
+---
+title: ICA Model Update
+date: 2026-06-29
+format: pdf
+bibliography: /users/strophios/immigration_project/00_ML_data_expansion/00_explorer/ica_project/ml_memo/references.json
+csl: "/users/strophios/documents/csl_files/american-sociological-association.csl"
+---
+
+# What We Had Then
+
+When we last checked in, I had a working CCA classification model that was better than chance, but not great. The "backbone" of the model (the part that turns raw text into meaningful numbers, i.e."features", that we can use to make predictions) had had a round of domain-adaptive pretraining (DAPT) on NYT headlines + ledes to make it better at "understanding" the NYT's specific language (as opposed to general English). Then, I'd placed a single classification "head" on top of that backbone and trained it on the task of identifying headlines + ledes that reported CCA events. I kept the backbone weights "frozen" for this, so only the weights in the classification head changed during training (we want the backbone to produces features that are useful for identifying CCA events, but also reporting relevant to immigrants, etc.). 
+
+As said, the resulting model worked, but was not great. The main problem, from what I could tell, was that I'd been too generous when using the NYT indexing service terms to identify CCA articles. The technical pieces of the model (i.e., the specialized loss and class priori estimation to deal with the positive-unlabeled learning challenge of not having known negatives) all worked, but the input labels weren't great.
+
+# What We Have Now
+
+One sentence summary: we have a trained, calibrated, multi-headed classifier that takes the headline and lede of an *NYT* article and returns the probabilities that the article 1) reports a CCA events, 2) is of special relevance to immigrants or is about immigration, and 3) an overall probability that the article reports an ICA event. There is also a classification head built on the same backbone that gives a probability that an article reports on events in the US and we use this classifier gate what articles get fed into the CCA/immig relevant/ICA model. 
+
+None of these classifiers is perfect (see the "How Well It Works" section, below, for details), but they're pretty good (crucially, they are *usuably* good). And this is not quite the full model as laid out in the previous memo, but it's very close. 
+
+The take-away: we have a model that's like 85% of what we want and is well set up get the rest of the way there. 
+
+
+## Data Stuff
+
+There are several major changes/improvements here that were critical in getting the model working. First, I used the NYT API to pull down headlines + ledes for the full 35 years covered by DoCA. This allowed me to match in the full DoCA dataset: of the 23615 events in the corpus, I was able to successfully match 19568 of them to NYT articles from the API; since an article can report more than one event, this means that, at the article level, we have 15613 labeled positives (i.e., articles that we know report on a CCA event) directly from DoCA. As a result, I was able to dispense with the *NYT* indexing terms as a way to get CCA positives. 
+
+But I still needed them as a source of "immigrant relevance" positives. Dropping duplicates and unmatched events, our ICA corpus only gets us 466 "immigrant relevant" labeled positive articles, which is not remotely enough to train a classifier. In order to expand this set, I created a curated include-list of *NYT* descriptor terms, created by looking at the descriptors that most differentiate the 466 articles in the ICA corpus from 1) other DoCA articles and 2) other *NYT* articles in general. The resulting list was then hand curated to get: 
+
+- "Immigration and Emigration",
+- "Refugees and Expatriates",
+- "Refugees",
+- "Illegal Aliens",
+- "Immigration and Refugees",
+- "Deportation",
+- "Asylum (Political)",
+- "Asylum, Political",
+- "Asylum, Right of",
+- "Foreign Population and Foreign-Descent Groups",
+- "Foreign Population",
+- "Immigration and Naturalization Service",
+- "Immigration and Naturalization Service (US)",
+- "Bilingual Education",
+- "Migrant Labor",
+- "Migrant Workers Children",
+- "Visas",
+- "Immigration Reform and Control Act of 1986",
+- "Curbs on Aliens",
+- "Denaturalization and Deportation of Criminals",
+- "Exiles"
+
+These were used to identify immigrant relevant positives via normalized matching (specifically, matching after converting to lowercase and dropping non-alphanumeric characters). This is as opposed to, e.g., partial matching: to match, an article had to ahve one of the included descriptors *exactly* (after normalization), so "Visas" would match but "Visa" would not. This results in a set of 15200 positives we can use for training and validation. 
+
+Additionally, I used a combination of datelines (where available) and metadata (e.g., the section an article appeared in) to get definitive US/not-US labels for over 600k articles from the LDC corpus, which I then used to train a US/not-US classifier. 
+
+Finally, I hand coded a set of 992 articles as a validation/calibration set, which were then combined with 139 of the ICA articles to create a set of 1128 articles (three articles were dropped due to an error, but will be returned for future training). The newly coded articles are not a simple random sample; instead, they were drawn deliberately from near the model's decision boundary (i.e., cases where the model was not sure). It thus is *not directly representative* of the corpus as a whole (e.g., 19% of the validation set are ICA articles). Doing this allows us to learn more about the model's performance with less hand-coding (cause if we drew really at random, positives would be really rare), but it does mean that some of the performance stats are not as directly interpretable. 
+
+
+## Model Stuff
+
+As mentioned above, where before we had the backbone + an iffy CCA classifier, what we have now is the backbone feeding into three independently trained and separately calibrated heads: 
+
+- US gate: is this article reporting on things in the US? This is used as a "gate" or pre-filter to drop non-US articles so they are not used in training the other two heads. This was trained using the above mentioned datelines + metadata set of US/not-US labeled articles. 
+- CCA: is this article reporting on a CCA event? Trained on matched DoCA articles. 
+- Immigration relevance: is this article of specific relevance to immigrants? Trained on the above discussed  
+
+An article is scored ICA by gating on US, then combining calibrated CCA and relevance probabilities (a simple product, currently this beats a learned logistic combiner on a held-out comparison). That output is then also calibrated, resulting in a final `ica_score` between 0 and 1.  
+
+Crucially, in terms of moving forward, in putting together this model, I did a bunch of infrastructural work that will make continued building, tweaking, revising, and testing, far simpler. 
+
+
+# How Well It Works
+
+Now, as mentioned above, the evaluation set I hand-coded isn't directly representative of the corpus, which makes some of the standard measures of performance (e.g., precision) less meaningful. Instead, I'll focus here on what's known as ROC-AUC, standing for "receiver operating characteristic - area under the curve". For a detailed explanation, see [here](https://developers.google.com/machine-learning/crash-course/classification/roc-and-auc). The short version is this: the ROC curve plots a model's true positive rate (TPR) against its false positive rate (FPR) across decision thresholds (e.g., TPR and FPR if we say that a score of .2 or better is positive, a score of .4, etc.). The "area under the curve", then represents the probability that a model will rank a random positive input higher than a random negative input. A model that was randomly guessing would have an ROC-AUC of .5, while a perfect model would have an ROC-AUC of 1. 
+
+So, how does our model do?
+
+Well, the current version of the model has an ROC-AUC of 0.80. Alternatively, we can say that, if we set our positive/negative cutoff such that we find 45% of the true positives in the data (i.e., TPR of .45), then 5% of what we find will be false positives (i.e., FPR of .05). To find 58% of true positives, we'd have a false positive rate of 10% and to find 68% of true positives, we'd have a false positive rate of 20%. 
+
+For an easy, well-separated task, this would be pretty mediocre; we'd want something more like an ROC-AUC of 0.90+. But this *isn't* an easy, well-separated task: it's a conjunction of two difficult tasks (CCA + immigrant-relevant), on a limited signal (i.e., just headline + lede), and we evaluating it on a test set that's harder than normal. To put it another way, we're getting 0.80 where it's difficult. 
+
+## What It Gets Us
+
+But is it good for anything?
+
+Yes, at least as a starting point. I applied the current model to the 624,842 NYT articles (in the US) from 1996–2007 in the LDC corpus, to see how effective it would be as a way to expand our current ICA data set. Here are the number of candidate events identified at different decision thresholds: 
+
+| ica_score ≥ | candidates | % of corpus |
+|---|---|---|
+| 0.3 | 4,320 | 0.69% |
+| 0.5 | 860 | 0.14% |
+| 0.7 | 137 | 0.02% |
+
+So from ~625k articles, the model surfaces a few hundred to a few thousand ranked
+candidates to review, a tractable haystack reduction for human coding. 
+
+Crucially, face validity at the top is strong. Here are the highest-scoring 1996–2007 candidates:
+
+- "Asylum-Seekers Are Confined To Dormitories After Protest" (0.95)
+- "Latinos Protest in California In Latest Immigration March" (0.93)
+- "Demanding Parole, Immigrants Held in Queens Stage Protest" (0.89)
+- "Detained Immigrants Still Not Eating in Protest"
+- "Across the U.S., Protests for Immigrants Draw Thousands" (the 2006 wave)
+- "Hunger Strike by 6 Immigrants Enters 2nd Week"
+
+
+# What Comes Next
+
+Or: how to improve it.
+
+There are a number of things that are either planned, but not yet done, or which have emerged from the process of getting the model here. First, some things related to the model: 
+
+- Virtual Adversarial Training: discussed in the previous memo, this will, hopefully, improve the model's ability to generalize and make it more consistent (i.e., articles that are meaningfully similar will get more similar scores). 
+- Unfreezing the encoder: all of this progress has been made based on the same backbone, with frozen weights. As I trained each classifier head, the weights in the backbone encoder have stayed the same, largely because the Northeastern cluster has been down for maintenance. Right now, the backbone is encoding the input texts into a general set of features that you could input into any linguistic (NYT headline + lede) task. Unfreezing the encoder during training will allow it to learn to output features better suited to our particular tasks, improving the model. 
+- Temporal signal: at present, both the backbone and all the classification heads treat all input articles the same; they have no notion of *when* an article was written, nor how that might impact what the input text means. I am planning rewire the model so that each input headline and lede is accompanied by a "time token" representing the year it was published. Redoing the domain adaptive pretraining in this way should allow the encoder to learn to encode text differently over time. This will be more important later, as we look to extend the dataset backwards in time, but even for just 1960-2007, it should help improve the model. 
+
+But maybe the bigger area of improvement is the data and the definitions, and I mean this in a couple of ways. First, our current evaluations are against (mostly) single-coder labels which, in some cases, have a decent amount of uncertainty. Label noise puts a cap on just how well the model can perform, so the model may already be better than it looks, it may be the evaluation set that needs improving. 
+
+Relatedly, as mentioned above, the current evaluation set was deliberately biased towards cases where the model was uncertain. For the most straightforwardly interpretable and meaningful numbers, what we need is a truly randomly drawn hand coded set of probably several thousand events. Now, that's obviously a meaningful undertaking, but 1) the vast majority will be easy to code (i.e., immediate negatives); and, 2) this would contribute to a possibly even more important issue: solidifying our definitions. 
+
+There are a number of places where we may want to think a little more about how exactly we're defining ICA (and/or its component parts). In particular: 
+
+- Our definition of ICA relies on the phrase "of special or specific relevance to immigrants due to their status as immigrants". This worked well when thinking about CCA events in DoCA, but I found the boundaries somewhat harder to draw when trying to judge whether a random article was reporting something "of special or specific relevance...". 
+  - In particular, I think we may need a stronger definition of with regard to diasporic action specifically.
+  - Relatedly, we may want to think some more about how we understand events that are related to documentation *in another country* (see, e.g., all the protesting around allowing Soviet Jews to emigrate).
+- DoCA included any article that mentioned an event, even in passing. This raises a little bit of a dilemma for us, as there are cases where it is impossible to tell from a headline + lede that an article is going to, in fifth paragraph, in a dependent clause, mention a protest.
+- We might consider revisiting and revising DoCA's definition of contentious collective action. In particular, I'm thinking of their inclusion of a lot of "conventional" organizational activity, their exclusion of a lot of labor activity, and their exclusion (so far as I can tell) of mass conventional politics (e.g., campaign rallies). I don't necessarily have a strong opinion here, in terms of what we ought to do, but I can say that some early testing of a model that identifies specifically "street" CCA events, indicates that a more limited definition may be easier to identify. Alternatively, we could investigate multi-category classifier, which could directly discriminate between not CCA/street/lawsuit/etc. instead of just between CCA/not CCA. 
+
+
