@@ -45,6 +45,41 @@ US-ness. Many non-ICA articles are strongly US (US protests that aren't about
 immigrants), and some true ICA scores low on US (diaspora protests — more below).
 That's exactly why US is used as a gate, not a fusion feature.
 
+### The heads on their own terms (added 2026-07-10)
+
+The table above scores each head against the *ICA* label — a job none of them was
+trained for individually. The same eval set carries hand codes for each head's own
+dimension (`us_event`, `cca_event`, `immig_relevant`), so we can also ask how each
+head does at its actual job (calibrated scores, same scoring recipe as the fusion
+fit; `scripts/eval_heads_own_terms.py` →
+`cca_doca/experiments/eval_heads_own_terms.json`):
+
+| Head | Own label | base rate | ROC-AUC | PR-AUC | vs-ICA ROC (above) |
+|------|-----------|-----------|---------|--------|--------------------|
+| US | `us_event` | 0.83 | **0.925** | 0.984 | 0.38 |
+| CCA | `cca_event` | 0.61 | **0.927** | 0.955 | 0.62 |
+| Relevance | `immig_relevant` | 0.20 | **0.829** | 0.522 | 0.78 |
+
+Two readings, one caveat:
+
+1. **The vs-ICA ranking inverts.** CCA — the "laggard" at 0.62 vs ICA — discriminates
+   collective action well (0.927); its weak ICA number reflects that CCA-ness alone
+   doesn't isolate ICA, not a broken head. Relevance, the best ICA ranker, is the
+   *weakest* head at its own job (0.829, PR-AUC 0.52 at a 20% base rate) — so the
+   frozen-encoder headroom argument attaches at least as much to relevance as to CCA.
+2. **The US head's own-terms gap is the diaspora story.** 0.925 ROC and recall 0.86
+   at calibrated 0.5 here, versus precision 0.965 / recall 0.981 on its held-out
+   dateline-labeled LDC test: hand-coded `us_event` codes where the *event* happened,
+   datelines code where the story was filed, and the recall shortfall is where the
+   diaspora misses live (see the retrain plan).
+
+Caveat: the eval set was stratified on CCA × relevance score bands plus DoCA anchors —
+selected on the model's own scores — so these are head-to-head comparisons on a common
+hard population, not corpus estimates (boundary oversampling typically deflates ROC,
+and base rates are not corpus rates). Per-head ECE on this population (0.10 US /
+0.12 CCA / 0.07 rel) likewise reflects population shift from each calibrator's fit
+population, not necessarily miscalibration where they were fit.
+
 ## Operating points (on the enriched eval)
 
 Reading the precision/recall trade-off off the composed score:
