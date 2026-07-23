@@ -1,7 +1,8 @@
 # Project state and data map
 
-*Last updated: 2026-07-23 (added the 2026-07-10 per-head own-terms eval; the rest
-of the doc is the 2026-06-26 filesystem-verified snapshot). The **data/artifact
+*Last updated: 2026-07-23 (added the 2026-07-10 per-head own-terms eval; refreshed
+the lead summary and branch note; the rest of the doc is the 2026-06-26
+filesystem-verified snapshot). The **data/artifact
 MAP** — where things live and what state they're in. For **what's next / deferred**, see `docs/notes/roadmap.md` (the
 live roadmap + index). The top-level `CLAUDE.md` was reconciled 2026-06-26 for the
 multi-head assembly; `README.md` (April) still predates the `cca-doca-retrain` arc.
@@ -12,14 +13,14 @@ and the assembled `IcaModel` producing ICA candidates (see below).*
 
 ## The one-paragraph version
 
-The CCA classifier was retrained on the NYT Archive API corpus (1960–1995) with DoCA-matched
-articles as positives, replacing the old over-generous NYT-descriptor labels. It trains in
-minutes because it runs on cached frozen-DAPT CLS embeddings (768-d), not live forward passes.
-Honest gold-set metrics exist (500 hand-coded articles, leakage-held-out). The US pre-filter
-that gates the CCA training background is **not** finished — its current weights are a 200-step
-smoke test, uncalibrated and unapplied. A real US filter is being retrained now (overnight embed
-of its training set running as of this writing). All large data and weights live *outside* this
-repo, in sibling and grandparent directories.
+The assembled multi-head `IcaModel` (frozen DAPT encoder + calibrated US/CCA/rel heads +
+empirically-chosen fusion) exists and has been applied: ranked ICA candidates cover the API
+corpus (1960–1995) and LDC (1996–2007). All heads train in minutes because they run
+features-mode on cached frozen-DAPT CLS embeddings (768-d), not live forward passes. Honest
+hand-coded eval sets exist (500-row CCA gold set; 1,131-row ICA eval set with 214 positives).
+The known system ceiling is the US head's diaspora-recall gap (dateline labels encode filing
+location, not event location); its retrain is the active thread in `roadmap.md`. All large
+data and weights live *outside* this repo, in sibling and grandparent directories.
 
 ## Out-of-repo directory map
 
@@ -38,7 +39,7 @@ The repo holds code; the data and trained artifacts do not. Three levels matter.
 - `nyt_archive_by_year/` — the processed API corpus split per year as `.rds` (keywords as a
   list-column).
 - `tmp.R` — the current DoCA→NYT matcher (fuzzy headline match + exact `pub_date` block, ~80% hit).
-  Modified today (Jun 17); see the freshness flag below.
+  Modified Jun 17; see the freshness flag below.
 - `nyt_location_checking.R` — the original US/not-US heuristic, since vendored to `r/vendored/us_assign.R`.
 
 **Parent — `/Users/strophios/immigration_project/00_ML_data_expansion/00_explorer/`** (`../` from repo root):
@@ -64,11 +65,12 @@ The repo holds code; the data and trained artifacts do not. Three levels matter.
   `classifier/`, `us_set/`.
 - `validation/` — the gold set: `cca_coding_first500_coded.csv` (500 hand-coded rows),
   `cca_coding_template.parquet` (2,553-row score-stratified template), and the uncoded sample.
-- `doca.csv` — DoCA event data as CSV (~23.6k events, 1960–1995). Modified today (Jun 17).
+- `doca.csv` — DoCA event data as CSV (~23.6k events, 1960–1995). Modified Jun 17.
 - `cca_set/`, `cca_logs/` — **stale.** Artifacts from the *original* keyword-label CCA run,
   superseded by `cca_doca/`. Don't wire new work to these.
 
-**Repo — `ica_project/`** — the git repo, branch `cca-doca-retrain`.
+**Repo — `ica_project/`** — the git repo, branch `main` (the `cca-doca-retrain`
+branch was merged via PR #1).
 
 ## Data lineage
 
@@ -84,7 +86,7 @@ Two NYT corpora plus the DoCA event set, joined to produce labels.
   where `us_label` comes from datelines fused with desk/section signals, and `stripped_text` is the
   leakage-guarded text channel (dateline removed so the model can't cheat).
 
-**Freshness flag:** `doca.csv` and `tmp.R` were both touched today (Jun 17), but
+**Freshness flag:** `doca.csv` and `tmp.R` were both touched Jun 17, but
 `cca_matches_good.rds` is dated May 8 and `cca_doca_positives.parquet` Jun 15. So today's DoCA edit
 has **not** propagated to the match or the positives. If the edit was substantive, the match needs a
 re-run; if incidental, ignore. Worth a one-line confirmation before the final retrain.

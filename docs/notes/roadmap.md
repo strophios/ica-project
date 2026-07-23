@@ -1,8 +1,11 @@
 # Roadmap & index — current live next-steps
 
 *Created 2026-06-19, last touched 2026-07-23. THIS is the single live list of
-what's next and what's deferred. The root `CLAUDE.md` and `README.md` are stale
-(pre-`cca-doca-retrain`) — full reconciliation is itself a deferred item below.*
+what's next and what's deferred. Reconciled 2026-07-23 with the 2026-07-10 team
+meeting (`docs/meetings/20260710_notes.md`) and the external task plan
+(`~/tasks/projects/ica-project.md`); the active thread below is the pre-Aug-6
+refine-and-apply arc. The root `CLAUDE.md`/`README.md` rewrite is in progress
+this session (was deferred until a working multi-head landed — condition met).*
 
 ## Where to look (index)
 
@@ -10,12 +13,15 @@ what's next and what's deferred. The root `CLAUDE.md` and `README.md` are stale
 |---|---|
 | **What's next / deferred (live)** | this doc |
 | **Data layout, artifacts, model state** | `project-state-and-data-map.md` |
+| **Team meeting notes (2026-07-10)** | `docs/meetings/20260710_notes.md` |
+| Model-state memo for collaborators | `ml_memo/ica_model_state_2026-06.md` |
 | CCA/DoCA retrain arc (detail/reasoning) | `cca-doca-handoff.md`, `cca-doca-retrain-design.md`, `cca-model-characterization.md` |
 | Relevance-head arc (detail/reasoning) | `relevance-head-handoff.md` |
 | US filter / dateline pipeline | `us-filter-*.md`, `r/CLAUDE.md` |
 | **US head retrain (diaspora recall)** | `us-head-retrain-plan.md` |
 | **ICA apply results + cluster runbook** | `ica-apply-results-and-cluster-runbook.md` |
 | Per-head own-terms eval (2026-07-10) | `ml_memo/ica_model_state_2026-06.md` ("The heads on their own terms"); `scripts/eval_heads_own_terms.py` |
+| Multi-head assembly design (landed) | `docs/design-plans/2026-06-19-multi-head-ica-assembly.md` |
 | Tier 1–5 audit/refactor history | `tiers-and-checkpoints.md`, `tier{2,3,4,5}-design.md` |
 | Deferred substantive questions | `pinned-questions.md` |
 | Process / engineering patterns | `process-patterns.md`, `engineering-patterns.md` |
@@ -25,60 +31,98 @@ consolidated **here** so nothing drifts out of sight.
 
 ## Status snapshot
 
-CCA head (DoCA-matched, calibrated, two tracks) — done. US filter (F1 0.97,
-calibrated) — done. **Relevance head (η=0, fused-gated)** — done this session.
-**Smarter US gate** (location-fused) — done. Next major piece: assemble the
-multi-head ICA model.
+Multi-head `IcaModel` — assembled, calibrated, applied (candidates exist for
+API 1960–1995 and LDC 1996–2007). Per-head own-terms eval done (US 0.925 /
+CCA 0.927 / rel 0.829 ROC — rel is the weak head at its own job; the US head's
+0.86 event-location recall is the diaspora ceiling). Team meeting 2026-07-10 set
+the direction: **refine the model, generate post-1995 ICA candidates, and check
+recall against DoCA + the team's ICA dataset — write-up to the team by Aug 1,
+meeting Aug 6.**
 
-## A. Active thread — multi-head ICA assembly (next major piece)
+## A. Active thread — pre-Aug-6 refine-and-apply arc
 
-**DESIGN DECIDED (2026-06-19): `docs/design-plans/2026-06-19-multi-head-ica-assembly.md`**
-(6 phases + pre-flight checklist; implementation plan next). Pieces all exist:
-fused US gate, CCA head, relevance head. Assembly =
-`fused US gate → {CCA head, relevance head} → calibrated composition`. The three
-open questions are now resolved in the design doc:
-- **Fusion-head training labels** → no heavy fusion head: per-head-calibrated
-  AND baseline vs. a ≤3-param LR challenger (EPV-capped at 466 anchors), chosen
-  empirically; the anchors are spent on a clean held-out eval, not on training a
-  combiner.
-- **Shared vs. separate encoder** → shared *frozen* encoder (already de-facto, via
-  the one CLS cache). Frozen kills negative transfer; top-N joint fine-tune is a
-  tracked, separately-measured ceiling-lift experiment (deferred, not in scope).
-- **Binary vs. typed relevance** → assemble with the binary head now; typed
-  multi-label heads (B4) folded in later.
+Milestone: **write-up in the team's hands by 2026-08-01** (meeting 08-06).
+Reconciles the meeting outcomes with the external task plan. Two scope tiers
+with a pre-registered promotion rule (below).
 
-Key design move: a **harmonized retrain** of CCA + relevance (same fused gate,
-same held-out joint-ICA eval ids) to kill anchor contamination by construction;
-US is a recall-tuned **gate**, not a fusion term (the heads are conditional-on-US
-estimators). Apply targets: `api_corpus` 1960–1995 + LDC 1996–2007 (the
-out-of-DoCA expansion test).
+### Committed scope (in order; API pull runs in parallel throughout)
 
-## A2. US head retrain — deferred follow-up to the assembly (2026-06-26)
+1. **API headline pull** — start immediately; rate-limited, so it runs behind
+   everything else. Forward first (1996 → as close to present as the API
+   allows), then backward (pre-1960; consider one-year-per-decade or
+   one-month-per-year sampling for temporal coverage in case of API cutoff).
+2. **US-head retrain (diaspora recall)** — the system-recall ceiling: the gate
+   drops ~27% of held-out ICA positives (diaspora/solidarity events; dateline
+   labels encode *filing* not *event* location). Scoped design exists:
+   `us-head-retrain-plan.md` (DoCA + section labels, nnPNU, strip-vs-no-strip,
+   validate-before-swap). Directly serves the meeting's "check recall on our
+   ICA coded events" ask — encoder work can't rescue events the gate zeroes out.
+3. **Encoder unfreeze + discriminative LR** — the machinery exists
+   (`LayerLRModel`, `layer_multipliers`, `top_n_group_fn`). Per the own-terms
+   eval, the clearest payoff is the **rel head**, not CCA. Includes the
+   **multi-head training-strategy decision**: train heads jointly with unfrozen
+   encoder vs. frozen per-head training + a learned combined head on top (an
+   unfrozen encoder is what would justify replacing the product-AND fusion with
+   a real classification head). Cluster time required
+   (`ica-apply-results-and-cluster-runbook.md`).
+   - **Pre-flight correctness check:** `LayerLRModel.train_step` weights loss by
+     batch size differently than stock Keras
+     (`sample_weight=tf.shape(tf.nest.flatten(x)[0])[0]` vs stock `trainer.py`
+     ~lines 71–73) — resolve before real unfrozen runs (from `scratchpad.md:798`).
+4. **Train + tune the refined model** — hyperparameter search (LRs, unfreeze
+   depth, etc.) on the cluster; the meeting endorsed doing the deeper training
+   there.
+5. **Apply + evaluate** — (a) generate ranked post-1995 ICA candidates (LDC
+   1996–2007 + whatever API-forward data has landed); (b) re-run 1960–1995 and
+   report CCA recall vs DoCA and ICA recall vs the team's coded ICA events
+   specifically (this comparison is a potential methods piece).
+6. **Write-up** — findings memo to the team by **08-01**.
 
-The Phase-4 fusion fit surfaced a hard recall ceiling: the US gate misses
-**diaspora/solidarity protests** (US-soil collective action about foreign topics —
-e.g. Haitian exiles marching in NYC), which are the highest-value ICA category. It
-drops 27% of held-out ICA positives; 19% of the DoCA anchors score `p_us < 0.2`.
-Ruled out era/dateline/sparsity — the cause is content (foreign-topic text swamps
-the US-location signal), rooted in dateline labels encoding *filing* location, not
-*event* location. The fused gate can't rescue ML-negatives.
+### Stretch scope + promotion rule (pre-registered 2026-07-23)
 
-The assembly ships on the current head with **gold-first gating** (trust DoCA /
-dateline `us_label` over the ML head) — fine for known positives, leaves a
-documented ceiling for novel diaspora events. The retrain (DoCA + section labels,
-nnPNU, strip-vs-no-strip experiment, validate-before-swap) is a substantial
-follow-up: full findings + design in **`us-head-retrain-plan.md`**.
+Stretch items are attempted **only** if the committed scope is ahead of
+schedule; conditions are checkable, not vibes:
 
-*Corroborated 2026-07-10 by the per-head own-terms eval: US-head recall vs
-hand-coded `us_event` (event location) is 0.86 @ calib 0.5, vs 0.98 on its
-dateline-labeled (filing location) test — the gap is the diaspora ceiling.*
+- **VAT/ALUM**: start only if by EOD **07-27** (1) the US-head retrain is
+  validated-and-swapped (ICA-positive gate recall improves, US own-terms
+  precision does not collapse) AND (2) the encoder-unfreeze training path is
+  running on the cluster.
+- **Temporal signal**: start only if VAT lands by EOD **07-29** (it forces a
+  DAPT re-run — the most expensive single item; also note the API-forward data
+  makes train/apply eras diverge, which is the argument *for* it).
+- **Write-up freeze: EOD 07-30.** The memo reports whatever model state exists
+  then. Stretch work continuing past the freeze targets the post-meeting arc,
+  not the memo.
+
+## A2. Post-meeting arc (from the 2026-07-10 meeting — not before Aug 6)
+
+- **1950s backward test** — apply the (contemporary-trained) model to 1950s
+  pulls; compare candidates against the hand-coders' output and the dictionary
+  search; iterate decade-by-decade backward. Part of the same candidate methods
+  piece as the recall comparison above.
+- **Team's hand-coded events as data** — ~800 coded events, 1870–1960 (most
+  ICA, all ICA-plausible). Candidate eval anchors and eventually training
+  positives for the backward expansion.
+- **Definitional alignment** — the team's draft coding doc defines ICA as
+  **CA + IMM + CLAIM** (three levels for CA and IMM; allies=1 only for some
+  claim types; "diasporic" requires a call on the US, not merely a foreign
+  gov't; labor rules). This is *close to but not identical to* the heads'
+  current label semantics — before training on their coded data, map their
+  scheme onto the `us`/`cca`/`rel` decomposition and decide whether CLAIM needs
+  its own head or lives in `rel`.
+- **Domains/claims identification** — can LLMs code domains? Compare zero-shot
+  vs. an orchestrated agent workflow (accuracy and cost).
+- **Active-learning efficiency study** — starting from ~1000 good examples, how
+  many 100-article hand-checked batches until performance saturates, vs. the
+  cost of coding a random sample up front?
+- **Full-article texts** for high-ranked candidates (via the team).
 
 ## B. Relevance head — deferred (from `relevance-head-handoff.md`)
 
 *Priority note (2026-07-10): the per-head own-terms eval shows rel is the
 weakest head at its own dimension (ROC 0.829, PR-AUC 0.52 @ 20% base on the
-hand-coded set) while CCA is strong on its own terms (0.927) — so encoder-
-unfreeze / typed-heads work has its clearest payoff here, not on CCA.*
+hand-coded set) while CCA is strong on its own terms (0.927) — so the
+encoder-unfreeze work in thread A attaches here first.*
 
 1. **Operating-threshold re-tuning** for the fused-gated head — the retrain
    shifted the logit scale; pick the threshold from the gold PR curve
@@ -91,11 +135,11 @@ unfreeze / typed-heads work has its clearest payoff here, not on CCA.*
 3. **Feature-fusion US retrain (gate option B)** — add the `us_assign` signals
    (`any_us`/`any_not_us`/desk/section) as FEATURES to the US classifier and
    retrain (learns the weighting vs. the hand-rule). Fold in when the multi-head
-   US head is (re)built.
+   US head is (re)built — natural to consider inside thread A item 2.
 4. **Typed multi-label relevance heads** — the η per-type result (foreign-negative
    pressure helps exclusionary/access, hurts diaspora) says the four types want
    separate sigmoid heads; also yields the typology output. Typed anchors exist
-   (`event_type4`).
+   (`event_type4`). Relevant to the CLAIM-dimension question in A2.
 5. **Honest precision eval** — gold immig is thin (17 pos) + CCA-stratified; add
    IPW reweighting + a relevance-stratified gold draw. (The 2026-07-10 own-terms
    eval is unweighted on the ICA-stratified set — corpus-anchored per-head
@@ -107,26 +151,46 @@ NOT to revive without a different negative set: **nnPNU reliable negatives** —
 η-sweep was a clean negative result (foreign-news and diaspora relevance are the
 same content signal). Machinery retained; η=0 canonical.
 
-## C. Saturday Tier — apply + project hygiene (from `cca-doca-handoff.md`)
+## C. Apply + project hygiene (from `cca-doca-handoff.md`)
 
-- **Full-corpus apply** — produce `cca_doca/api_cca_scores/` and
-  `us_filter/api_us_scores/` over `api_corpus` (absent today). Use the fused gate.
+- **Full-corpus apply** — `us_filter/api_us_scores/` still absent; the
+  assembled-model candidates exist (`cca_doca/ica_candidates/`) but the
+  standalone US-score product was never produced. Fold into thread A item 5 or
+  drop if the assembled apply supersedes it.
 - **Broaden the gold set** — only 500 of 2,553 template rows coded; street-/
   CCA-stratified. Re-draw stratified for relevance + a larger US/immig slice.
 - **`run_us_classification.py` greedy-glob bug** — still reads `us_filter/**/*.parquet`
   greedily (pulls in `audit/api_ldc_matched.parquet`, no `id` → crash). Apply the
-  additive `pattern=` fix (as done for `data_from_parquet`) when next touched.
-- **CLAUDE.md / README.md reconciliation** — full rewrite to current state
-  (deferred until a working multi-head lands; banners added 2026-06-19).
+  additive `pattern=` fix (as done for `data_from_parquet`) when next touched —
+  the US-head retrain (thread A item 2) is the likely next touch.
+- **CLAUDE.md / README.md reconciliation** — in progress 2026-07-23.
 
 ## D. Older deferred (indexed, not duplicated)
 
 - **Tier 5 empirical runs** (real-data short/full + cluster `mixed_float16` runs;
   π=0.03-vs-0.02 research handoff) — runbooks in
   `docs/notes/tier5-implementation-plan/phase_07.md`/`phase_08.md`, status in
-  `tiers-and-checkpoints.md`. HUMAN-OPERATED.
+  `tiers-and-checkpoints.md`. HUMAN-OPERATED. The thread-A cluster tuning runs
+  will largely supersede the original intent here; close these out explicitly
+  when they do.
 - **US filter operator-gated items** (cluster shakedown, gold-set hand-coding →
   slice eval / DoCA recall / escalation) — `us-filter-design-handoff.md`,
-  `docs/implementation-plans/2026-06-06-us-filter/phase_*.md`.
-- **Substantive deferred questions** (ALUM/VAT, nnPU+α+γ composition, multi-class
+  `docs/implementation-plans/2026-06-06-us-filter/phase_*.md`. Partially
+  superseded by the 06-18 features-mode retrain + validation; reconcile when the
+  US head is next touched.
+- **VAT/ALUM + temporal signal** — now stretch items in thread A (promotion rule
+  above), not free-floating deferred items.
+- **Substantive deferred questions** (nnPU+α+γ composition, multi-class
   heads, preprocessor train/predict split) — `pinned-questions.md`.
+
+## History (landed major arcs)
+
+- **Multi-head ICA assembly (2026-06-26)** — design
+  `docs/design-plans/2026-06-19-multi-head-ica-assembly.md`, all 6 phases landed:
+  harmonized CCA+rel retrain, three Platt calibrators, empirically-chosen fusion
+  (product-AND vs ≤3-param LR, 1-SE rule), assembled `IcaModel`, apply →
+  `cca_doca/ica_candidates/`. Detail in `project-state-and-data-map.md`.
+- **CCA/DoCA retrain, US filter retrain + calibration, relevance head, fused US
+  gate (2026-06)** — see the per-arc docs in the index.
+- **Tiers 1–5 audit/refactor + diagnostics (2026-04/05)** —
+  `tiers-and-checkpoints.md`.
