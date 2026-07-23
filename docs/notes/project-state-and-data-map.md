@@ -1,7 +1,8 @@
 # Project state and data map
 
-*Last updated: 2026-06-26. The **data/artifact MAP** — where things live and what
-state they're in. For **what's next / deferred**, see `docs/notes/roadmap.md` (the
+*Last updated: 2026-07-23 (added the 2026-07-10 per-head own-terms eval; the rest
+of the doc is the 2026-06-26 filesystem-verified snapshot). The **data/artifact
+MAP** — where things live and what state they're in. For **what's next / deferred**, see `docs/notes/roadmap.md` (the
 live roadmap + index). The top-level `CLAUDE.md` was reconciled 2026-06-26 for the
 multi-head assembly; `README.md` (April) still predates the `cca-doca-retrain` arc.
 This note is a snapshot, not a contract — lead facts are verified against the
@@ -49,7 +50,8 @@ The repo holds code; the data and trained artifacts do not. Three levels matter.
   `id, headline, lead_paragraph` overlap with `api_corpus`, plus it carries `full_text` and the
   `cca`/`immig` descriptor labels.
 - `cca_doca/` — retrained CCA artifacts: weights + config sidecars, per-run metrics CSVs,
-  `experiments/` (eval + corpus-score JSON), `prior_estimate.json`, `embed_cache/`, plus
+  `experiments/` (eval + corpus-score JSON, incl. `eval_heads_own_terms.json` — the
+  2026-07-10 per-head own-terms eval), `prior_estimate.json`, `embed_cache/`, plus
   `scored_candidates.parquet` and the `face_validity_*.csv` dumps. Now also carries the
   **fusion sidecar** `ica_fusion.fusion.json` (+ its `ica_fusion_metrics.json`) and the
   **`ica_candidates/`** directory (`api_1960_1995.parquet`, `ldc_1996_2007.parquet` — the
@@ -189,6 +191,24 @@ applied to the full API corpus (`us_filter/api_us_scores/` absent — that's the
 - **Known ceiling (deferred):** the US head misses diaspora collective action — it drops ~27% of ICA
   positives at τ_us=0.3, capping system recall. A retrain is scoped but not done; see
   `docs/notes/us-head-retrain-plan.md`.
+
+**Done 2026-07-10 (per-head own-terms eval, commit 94071db):**
+- **`scripts/eval_heads_own_terms.py`** (run as `uv run python -m
+  scripts.eval_heads_own_terms`) scores each head against its OWN hand-coded
+  dimension on the 1,131-row ICA eval set (`us_event` / `cca_event` /
+  `immig_relevant`), same scoring recipe as `fit_fusion.py`; per-head vs-ICA
+  ROC reproduces the memo's decomposed table (0.38/0.62/0.78). Output:
+  `cca_doca/experiments/eval_heads_own_terms.json` (data product, not in repo).
+- **Findings** (written up in `ml_memo/ica_model_state_2026-06.md`, "The heads
+  on their own terms"): the vs-ICA ranking inverts — CCA discriminates
+  collective action well on its own terms (ROC 0.927) while relevance, the best
+  ICA ranker, is the weakest head at its own job (ROC 0.829, PR-AUC 0.52 @ 20%
+  base) — so the frozen-encoder headroom argument attaches at least as much to
+  rel as to CCA. US own-terms recall (0.86 @ calib 0.5, vs 0.98 on its dateline
+  test) is the dateline-vs-event-location transfer gap, i.e. the diaspora
+  ceiling (`us-head-retrain-plan.md`). Caveat: eval set is score-stratified
+  (selected on CCA×rel scores), so these are head-to-head comparisons on a hard
+  population, not corpus estimates; no IPW applied.
 
 **Open gaps (full live list in `roadmap.md`):**
 - US head diaspora-recall retrain (the system-recall ceiling above) — `us-head-retrain-plan.md`.

@@ -217,6 +217,13 @@ Permanent observability for training runs (the tooling for the deferred empirica
   (`docs/notes/us-head-retrain-plan.md`, a deferred retrain) and the apply results +
   raw-vs-stripped channel correction + cluster runbook
   (`docs/notes/ica-apply-results-and-cluster-runbook.md`).
+- **Per-head own-terms eval (2026-07-10):** `scripts/eval_heads_own_terms.py`
+  (run as `uv run python -m scripts.eval_heads_own_terms`) scores each head
+  against its own hand-coded dimension on the ICA eval set → own-terms ROC
+  US 0.925 / CCA 0.927 / rel 0.829 (the vs-ICA ranking inverts: rel, the best
+  ICA ranker, is the weakest at its own job). Findings + caveats in
+  `ml_memo/ica_model_state_2026-06.md` ("The heads on their own terms");
+  artifact `cca_doca/experiments/eval_heads_own_terms.json`.
 
 **Done (pre-retrain history):**
 - DAPT on headline/lede pairs
@@ -265,3 +272,4 @@ Permanent observability for training runs (the tooling for the deferred empirica
 - **Voss2024**: The ICA dataset this project extends
 - **Deep Learning with Python** (Chollet 2025): Architecture/training guidance
 - **Detailed project memo**: `ml_memo/ml_memo.qmd` — comprehensive explanation of the problem, methods, and plans
+- **Model-state snapshot for collaborators**: `ml_memo/ica_model_state_2026-06.md` — the multi-head classifier's current numbers (composed + decomposed-by-head + per-head own-terms eval) and known ceilings

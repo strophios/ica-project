@@ -1,6 +1,6 @@
 # Roadmap & index — current live next-steps
 
-*Created 2026-06-19. Branch `cca-doca-retrain`. THIS is the single live list of
+*Created 2026-06-19, last touched 2026-07-23. THIS is the single live list of
 what's next and what's deferred. The root `CLAUDE.md` and `README.md` are stale
 (pre-`cca-doca-retrain`) — full reconciliation is itself a deferred item below.*
 
@@ -15,6 +15,7 @@ what's next and what's deferred. The root `CLAUDE.md` and `README.md` are stale
 | US filter / dateline pipeline | `us-filter-*.md`, `r/CLAUDE.md` |
 | **US head retrain (diaspora recall)** | `us-head-retrain-plan.md` |
 | **ICA apply results + cluster runbook** | `ica-apply-results-and-cluster-runbook.md` |
+| Per-head own-terms eval (2026-07-10) | `ml_memo/ica_model_state_2026-06.md` ("The heads on their own terms"); `scripts/eval_heads_own_terms.py` |
 | Tier 1–5 audit/refactor history | `tiers-and-checkpoints.md`, `tier{2,3,4,5}-design.md` |
 | Deferred substantive questions | `pinned-questions.md` |
 | Process / engineering patterns | `process-patterns.md`, `engineering-patterns.md` |
@@ -68,7 +69,16 @@ documented ceiling for novel diaspora events. The retrain (DoCA + section labels
 nnPNU, strip-vs-no-strip experiment, validate-before-swap) is a substantial
 follow-up: full findings + design in **`us-head-retrain-plan.md`**.
 
+*Corroborated 2026-07-10 by the per-head own-terms eval: US-head recall vs
+hand-coded `us_event` (event location) is 0.86 @ calib 0.5, vs 0.98 on its
+dateline-labeled (filing location) test — the gap is the diaspora ceiling.*
+
 ## B. Relevance head — deferred (from `relevance-head-handoff.md`)
+
+*Priority note (2026-07-10): the per-head own-terms eval shows rel is the
+weakest head at its own dimension (ROC 0.829, PR-AUC 0.52 @ 20% base on the
+hand-coded set) while CCA is strong on its own terms (0.927) — so encoder-
+unfreeze / typed-heads work has its clearest payoff here, not on CCA.*
 
 1. **Operating-threshold re-tuning** for the fused-gated head — the retrain
    shifted the logit scale; pick the threshold from the gold PR curve
@@ -87,7 +97,9 @@ follow-up: full findings + design in **`us-head-retrain-plan.md`**.
    separate sigmoid heads; also yields the typology output. Typed anchors exist
    (`event_type4`).
 5. **Honest precision eval** — gold immig is thin (17 pos) + CCA-stratified; add
-   IPW reweighting + a relevance-stratified gold draw.
+   IPW reweighting + a relevance-stratified gold draw. (The 2026-07-10 own-terms
+   eval is unweighted on the ICA-stratified set — corpus-anchored per-head
+   precision needs this IPW work; the ICA strata weren't designed per-head.)
 6. **DEDPUL π for relevance** — pass-1 used π=0.05 by analogy; estimate + sweep
    (frontier-invariant, but record it).
 
