@@ -198,7 +198,9 @@ applied to the full API corpus (`us_filter/api_us_scores/` absent — that's the
 - **`scripts/eval_heads_own_terms.py`** (run as `uv run python -m
   scripts.eval_heads_own_terms`) scores each head against its OWN hand-coded
   dimension on the 1,131-row ICA eval set (`us_event` / `cca_event` /
-  `immig_relevant`), same scoring recipe as `fit_fusion.py`; per-head vs-ICA
+  `immig_relevant`; note 1,128 of the 1,131 rows carry a coded `ica_event` —
+  3 nulls — which is why `ml_memo` tables sum to 1,128), same scoring recipe
+  as `fit_fusion.py`; per-head vs-ICA
   ROC reproduces the memo's decomposed table (0.38/0.62/0.78). Output:
   `cca_doca/experiments/eval_heads_own_terms.json` (data product, not in repo).
 - **Findings** (written up in `ml_memo/ica_model_state_2026-06.md`, "The heads
