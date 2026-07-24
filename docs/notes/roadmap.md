@@ -85,10 +85,12 @@ with a pre-registered promotion rule (below).
    unfrozen encoder is what would justify replacing the product-AND fusion with
    a real classification head). Cluster time required
    (`ica-apply-results-and-cluster-runbook.md`).
-   - **Pre-flight correctness check:** `LayerLRModel.train_step` weights loss by
-     batch size differently than stock Keras
-     (`sample_weight=tf.shape(tf.nest.flatten(x)[0])[0]` vs stock `trainer.py`
-     ~lines 71–73) — resolve before real unfrozen runs (from `scratchpad.md:798`).
+   - ~~**Pre-flight correctness check:** `LayerLRModel.train_step` loss-weighting
+     vs stock Keras~~ — **RESOLVED 2026-07-24**: the flatten discrepancy was
+     already fixed (verified vs installed Keras 3.12 stock trainer); batch-size
+     weighting is correct-by-design (partial-batch proportionality). Real drift
+     found + fixed in the check: the tracked loss now mirrors stock's replica
+     unscaling under tf.distribute (identity single-device, display-only).
 4. **Train + tune the refined model** — hyperparameter search (LRs, unfreeze
    depth, etc.) on the cluster; the meeting endorsed doing the deeper training
    there.

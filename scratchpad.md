@@ -795,7 +795,7 @@ For the empirical stress test, I kind of imagine these three definitions as sequ
 
 # Misc notes
 
-- [ ] At some point, come back and check/ask why the loss update in the `LayerLRModel` class's custom training step uses a slightly different method to weight by batch size than does the stock version: in `LayerLRModel` (line 221 as of 2026-05-08) we use `sample_weight=tf.shape(tf.nest.flatten(x)[0])[0]`, while the stock version (`keras/keras/src/backend/tensorflow/trainer.py`, lines 71-73) uses `sample_weight=tf.shape(next(i for i in tree.flatten(x) if i is not None))[0]`. 
+- [x] ~~At some point, come back and check/ask why the loss update in the `LayerLRModel` class's custom training step uses a slightly different method to weight by batch size than does the stock version~~ **RESOLVED 2026-07-24** (encoder-unfreeze pre-flight): the flatten discrepancy had already been fixed to the stock `next(... if not None)` form at some point after this note; verified against installed Keras 3.12 stock trainer. The batch-size weighting itself is correct-by-design (partial last batch contributes proportionally to the epoch-mean loss). One real drift found and fixed in the same check: stock 3.12 unscales the *tracked* loss by replica count under tf.distribute (`unscale_loss_for_distribution`); inlined the equivalent (identity on single device, display-only). See `layer_lr_model.py` train_step comments.
 
 The stress-test framing isn't lost — it's "three sequential levels (mechanical → numerical → research-relevant), local for the first two, cluster for the third, with the local-vs-cluster dtype gap (float32 vs mixed_float16) as a caveat." You or future-me can pick that up from this sentence alone.
 

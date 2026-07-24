@@ -253,11 +253,26 @@ class LayerLRModel(keras.Model):
             # fit progress bar, and TensorBoard reflect actual loss
             # rather than zero. Stock train_step weights by batch size
             # so a partial last batch contributes proportionally to the
-            # epoch mean.
+            # epoch mean. (Pre-flight check resolved 2026-07-24: an
+            # earlier version used `tf.nest.flatten(x)[0]`, which
+            # diverged from stock when the first flattened leaf was
+            # None; the `next(... if t is not None)` form below matches
+            # stock exactly, via the public `keras.tree` API.)
+            #
+            # The replica unscaling mirrors stock 3.12's
+            # `unscale_loss_for_distribution` (private path, so inlined
+            # here): under tf.distribute with N>1 replicas the
+            # per-replica loss arrives divided by N, and the tracker
+            # would under-report by that factor. Identity on a single
+            # device. Display-only either way -- backprop uses `loss`.
+            tracked_loss = loss
+            num_replicas = tf.distribute.get_strategy().num_replicas_in_sync
+            if num_replicas > 1:
+                tracked_loss = loss * tf.cast(num_replicas, loss.dtype)
             self._loss_tracker.update_state(
-                loss,
+                tracked_loss,
                 sample_weight=tf.shape(
-                    next(t for t in tf.nest.flatten(x) if t is not None)
+                    next(t for t in keras.tree.flatten(x) if t is not None)
                 )[0],
             )
             # Loss scaling for LossScaleOptimizer (no-op for plain
