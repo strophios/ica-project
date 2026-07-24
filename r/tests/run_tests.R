@@ -11,4 +11,6 @@ source("r/dateline/label_policy.R")
 gz <- load_gazetteers("r/dateline/gazetteers")
 # Load vendored us_assign heuristic for tests
 source("r/vendored/us_assign.R")
+# Archive-pull transforms (pure core of r/api_ingest/pull_archive.R)
+source("r/api_ingest/archive_transform.R")
 testthat::test_dir("r/tests/testthat", stop_on_failure = TRUE)
