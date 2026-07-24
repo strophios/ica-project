@@ -126,6 +126,10 @@ US_FILTER_API_LDC_MATCHED: Path = US_FILTER_DIR / "audit" / "api_ldc_matched.par
 # DoCA positives, and the assembled P/N/U training table.
 US_POS_LDC345_SOURCE: Path = US_FILTER_DIR / "us_pos_ldc345_source.parquet"
 US_PNU_TABLE: Path = US_FILTER_DIR / "us_pnu_table.parquet"
+# The nnPNU retrain candidate itself (src/run_us_pnu.py). Distinct weights file
+# from the production `us_classifier_full` head -- this is the validate-before-
+# swap candidate, never consumed by apply_ica.py / assemble_ica.py.
+US_PNU_WEIGHTS: Path = US_FILTER_DIR / "us_pnu.weights.h5"
 
 # Validation (gold-set) artifacts
 VALIDATION_DIR: Path = PROJECT_ROOT / "validation"

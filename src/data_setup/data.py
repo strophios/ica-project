@@ -353,6 +353,56 @@ def create_relevance_data(table, seed=200, holdout_ids=None):
     }
 
 
+def create_us_pnu_data(table, seed=200, holdout_ids=None):
+    """90/5/5 P/N/U split for the US-head retrain table (src/build_us_pnu_table.py).
+
+    # pattern: Functional Core (pure, no I/O)
+
+    The nnPNU counterpart to `create_relevance_data`, keyed on this table's
+    `pnu_label` Utf8 column ("pos"/"neg"/"unl") rather than cca_label/reliable_neg.
+    Table must carry `id`, `pnu_label`, `cache`, `emb_row` (a per-cache feature-row
+    index -- rows draw CLS vectors from FOUR different embed caches, so `emb_row`
+    only makes sense together with `cache`; see `src.run_us_pnu.attach_emb_rows`,
+    which produces this shape from the raw `us_pnu_table.parquet`).
+
+    `holdout_ids` drops ids from the WHOLE table before splitting (belt-and-
+    suspenders leakage guard, matching `create_cca_doca_data`/`create_relevance_data`
+    -- the PNU table already excludes the ICA-eval holdout at build time; this is a
+    second, independent check). `None`/empty is a strict no-op. Each group is split
+    90/5/5 separately (seed) and shuffled within split (seed), mirroring the other
+    `create_*_data` split functions (prevents class-blocking under
+    `from_tensor_slices` + a `SHUFFLE_BUFFER` smaller than the split).
+    """
+    assert table["id"].n_unique() == table.height, (
+        f"`id` not unique: {table.height} rows, {table['id'].n_unique()} ids"
+    )
+    if holdout_ids:
+        table = table.filter(pl.col("id").is_in(list(holdout_ids)).not_())
+
+    def _split(group):
+        train = group.sample(fraction=0.9, seed=seed)
+        rest = group.filter(pl.col("id").is_in(train["id"].implode()).not_())
+        test = rest.sample(fraction=0.5, seed=seed)
+        val = rest.filter(pl.col("id").is_in(test["id"].implode()).not_())
+        return train, val, test
+
+    pos = table.filter(pl.col("pnu_label") == "pos")
+    neg = table.filter(pl.col("pnu_label") == "neg")
+    unl = table.filter(pl.col("pnu_label") == "unl")
+    p_tr, p_va, p_te = _split(pos)
+    n_tr, n_va, n_te = _split(neg)
+    u_tr, u_va, u_te = _split(unl)
+
+    def _shuf(d):
+        return d.sample(fraction=1.0, shuffle=True, seed=seed)
+
+    return {
+        "train": {"pos": _shuf(p_tr), "neg": _shuf(n_tr), "unl": _shuf(u_tr)},
+        "val": {"pos": _shuf(p_va), "neg": _shuf(n_va), "unl": _shuf(u_va)},
+        "test": {"pos": _shuf(p_te), "neg": _shuf(n_te), "unl": _shuf(u_te)},
+    }
+
+
 def dataset_create(
     shuffle_buffer,
     batch_size,
