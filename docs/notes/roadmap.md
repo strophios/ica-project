@@ -66,12 +66,17 @@ with a pre-registered promotion rule (below).
      `"Archives"` before it), datelines existing only in LDC text, and the
      lead/abstract shift above. Every new era we ingest gets a schema +
      missingness + convention audit before training or applying on it.
-2. **US-head retrain (diaspora recall)** — the system-recall ceiling: the gate
-   drops ~27% of held-out ICA positives (diaspora/solidarity events; dateline
-   labels encode *filing* not *event* location). Scoped design exists:
-   `us-head-retrain-plan.md` (DoCA + section labels, nnPNU, strip-vs-no-strip,
-   validate-before-swap). Directly serves the meeting's "check recall on our
-   ICA coded events" ask — encoder work can't rescue events the gate zeroes out.
+2. **US-head retrain (diaspora recall)** — ~~scoped design in
+   `us-head-retrain-plan.md`~~ **DONE 2026-07-24, decision: NO SWAP** (results
+   addendum in that doc). v1 (stripped, nnPNU, dateline-only negatives) trained
+   and evaluated; at the deployed gate regime (recall-matched ≥0.98) the
+   current head equals or beats the candidate on both foreign rejection and
+   diaspora recovery — the "27% drop" was a τ=0.3 artifact; at deployed τ=0.02
+   the ceiling is ~5/26 diaspora anchors. Real deployed weakness = foreign
+   leak at high recall (~27–31% rejection), a separation problem that
+   relabeling alone doesn't fix (→ gate options B/C, encoder unfreeze).
+   Keeper findings: nnPU collapses at π≈0.83 (PN term load-bearing); the PNU
+   corpus + dual-id-space holdout machinery is permanent infrastructure.
 3. **Encoder unfreeze + discriminative LR** — the machinery exists
    (`LayerLRModel`, `layer_multipliers`, `top_n_group_fn`). Per the own-terms
    eval, the clearest payoff is the **rel head**, not CCA. Includes the

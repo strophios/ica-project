@@ -150,3 +150,72 @@ Concrete next steps when picking this up:
    → τ_us → fusion. Phase 4 scripts all three, so the swap is a re-run, not a
    rebuild.
 5. Update `project-state-and-data-map.md` and this doc with results.
+
+---
+
+## v1 OUTCOME (2026-07-24): retrain executed — decision: NO SWAP
+
+The v1 retrain (stripped channel, nnPNU, dateline-only reliable negatives) was
+built, trained, and evaluated per the design above (corpus commit `b66da55`,
+training/eval commit `b49da45`; artifacts `us_filter/us_pnu.weights.h5` +
+sidecar, `cca_doca/experiments/{us_pnu_eta_grid,eval_us_retrain}.json`).
+Validate-before-swap concluded **keep the current head**. This section records
+why — the numbers reframe the problem this doc was written to solve.
+
+### What the retrain got right
+
+- **η=1.0 selected** (val PR-AUC 0.9968). **Pure nnPU (η=0) collapses
+  structurally at this prior** (π̂=0.8253, estimated from the current head's
+  calibrated scores over the unlabeled sample): the nnPU negative-risk clip
+  fires on essentially every batch and the loss minimizes by predicting
+  everything positive. The reliable-negative PN term is load-bearing — the
+  design's nnPNU choice is validated a posteriori. Prior sensitivity (±0.1):
+  flat; η is the first-order lever, not π.
+- At mid-curve thresholds the candidate recovers 17/26 diaspora anchors
+  (logit>0) and has much higher dateline-negative specificity (0.973 vs 0.883).
+
+### Why no swap: the gate regime is what matters, and there the current head wins
+
+The US head is deployed as a lenient recall-tuned **gate** (τ_us=0.02 calibrated,
+~94% pass on the hard eval set, ~97% on the API corpus), not a mid-curve
+classifier. Recall-matched comparison on gold `us_event` (n=1,129):
+
+| matched US recall | head | foreign rejection | diaspora recovered |
+|---|---|---|---|
+| 0.98 | current | **0.312** | **21/26** |
+| 0.98 | v1 candidate | 0.260 | 19/26 |
+| 0.99 | current | **0.167** | **24/26** |
+| 0.99 | v1 candidate | 0.135 | 23/26 |
+
+A rank-average ensemble of the two heads also fails to beat the current head
+in this regime (0.292 rejection @0.98). The candidate's wins live at operating
+points the gate never uses; swapping would trade away bulk dateline recall
+(0.98 → 0.74 at logit>0) for nothing the gate can cash in.
+
+### The reframed ceiling
+
+The headline "drops 27% of ICA positives" figure was measured at τ_us=0.3. At
+the **deployed** τ_us=0.02 the gate passes 21/26 diaspora anchors — the
+recall ceiling is real but modest (~5/26 diaspora anchors ≈ 4% of anchors).
+The gate's actual weakness at deployment is the **foreign leak at high recall**
+(only ~27–31% of known-foreign rejected at ≥0.98 recall), which is a
+*precision* problem on the API side (no gold labels there), and neither the
+label-source swap nor the ensemble improves it. What plausibly would: richer
+location signals (gate options B/C in `roadmap.md`), the feature-fusion US
+retrain (option B), or encoder unfreezing — i.e., better separation, not
+relabeling alone.
+
+### Kept artifacts + incidental findings
+
+- The candidate weights/sidecar and both experiment JSONs are kept for
+  comparison; nothing was wired into `IcaModel`.
+- The PNU corpus + both-id-space holdout machinery (`build_us_pnu_table.py`,
+  `build_holdout_ids_ldc.py`, `create_us_pnu_data`) are permanent
+  infrastructure — any future US-head experiment starts from them.
+- **FLPULoss shape footgun** (found writing diagnostics): calling
+  `FLPULoss.call` with BOTH y_true and y_pred flattened 1-D silently yields an
+  η-invariant loss; the production path always passes (batch,1) logits. Out-of-
+  graph diagnostic code must reshape y_pred to (-1,1) (regression-tested in
+  `tests/test_run_us_pnu.py`).
+- The no-strip variant was never needed for the swap decision; the LDC 1987–94
+  raw embed (if run) serves the encoder-unfreeze work instead.
