@@ -119,9 +119,18 @@ US_FILTER_CLASSIFIER_FULL_WEIGHTS: Path = US_FILTER_DIR / "us_classifier_full.we
 US_FILTER_FULL_WEIGHTS: Path = US_FILTER_CLASSIFIER_FULL_WEIGHTS  # Phase 3 alias for harmonized retrains
 US_FILTER_LOGS_DIR: Path = US_FILTER_DIR / "logs"
 US_FILTER_SCORES_DIR: Path = US_FILTER_DIR / "api_us_scores"
+# API<->LDC cross-match table (from api_ldc_join.R) -- the id-space translation
+# table for turning API-format (`nyt://...`) ids into their LDC-integer twins.
+US_FILTER_API_LDC_MATCHED: Path = US_FILTER_DIR / "audit" / "api_ldc_matched.parquet"
+# US-head retrain (v1, stripped channel): the embed source for the 345 LDC-format
+# DoCA positives, and the assembled P/N/U training table.
+US_POS_LDC345_SOURCE: Path = US_FILTER_DIR / "us_pos_ldc345_source.parquet"
+US_PNU_TABLE: Path = US_FILTER_DIR / "us_pnu_table.parquet"
 
 # Validation (gold-set) artifacts
 VALIDATION_DIR: Path = PROJECT_ROOT / "validation"
+ICA_HOLDOUT_IDS: Path = VALIDATION_DIR / "ica_holdout_ids.parquet"
+ICA_HOLDOUT_IDS_LDC: Path = VALIDATION_DIR / "ica_holdout_ids_ldc.parquet"
 
 # CCA/DoCA retrain artifacts (2026-06-15 retrain on the NYT API corpus with
 # DoCA-confirmed positives; see docs/notes/cca-doca-retrain-design.md).
