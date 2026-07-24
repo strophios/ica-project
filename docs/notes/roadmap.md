@@ -47,10 +47,25 @@ with a pre-registered promotion rule (below).
 
 ### Committed scope (in order; API pull runs in parallel throughout)
 
-1. **API headline pull** — start immediately; rate-limited, so it runs behind
-   everything else. Forward first (1996 → as close to present as the API
-   allows), then backward (pre-1960; consider one-year-per-decade or
-   one-month-per-year sampling for temporal coverage in case of API cutoff).
+1. **API headline pull** — running (started 2026-07-24; `r/api_ingest/pull_archive.R`,
+   resumable). Forward first (1996 → mid-2026), then backward (`--skeleton`
+   rotating-month sampling for temporal coverage, then densify).
+   - **Data-drift watchout (operator hand-check, 2026-07-24):** recent API
+     stories have **empty `lead_paragraph`** — abstract (and a multimedia
+     caption) carry the lede-like text instead, possibly because the abstract
+     *is* the under-headline text online now. Since the model input is
+     `headline + "</s>" + lead_paragraph`, this would silently collapse the
+     text channel to headline-only. Before embedding any new years: per-year
+     missingness audit over the pulled data (`lead_paragraph`, `abstract`,
+     multimedia) → find the cutover → define an explicit lead-fallback policy
+     (e.g. coalesce to abstract) in processing, and check how
+     `data_from_parquet`/`embed_corpus` treat empty leads today.
+   - **General principle (same date): expect the data to shift under us across
+     the 175-year corpus.** Known instances so far: the API desk/section signal
+     cutover (~1981 — `news_desk` is `"None"` and `section_name` is
+     `"Archives"` before it), datelines existing only in LDC text, and the
+     lead/abstract shift above. Every new era we ingest gets a schema +
+     missingness + convention audit before training or applying on it.
 2. **US-head retrain (diaspora recall)** — the system-recall ceiling: the gate
    drops ~27% of held-out ICA positives (diaspora/solidarity events; dateline
    labels encode *filing* not *event* location). Scoped design exists:

@@ -47,9 +47,13 @@ The repo holds code; the data and trained artifacts do not. Three levels matter.
   include `id, headline, lead_paragraph, abstract, keywords, year, news_desk, section_name`. **No
   dateline column.**
 - `ldc_corpus/` — LDC corpus as hive parquet (partitioned on `publication_year`), 1987–2007, ~1.16M
-  rows. Optimized for the original CCA run, so it's **missing columns** versus the full data; only
-  `id, headline, lead_paragraph` overlap with `api_corpus`, plus it carries `full_text` and the
-  `cca`/`immig` descriptor labels.
+  rows. Only `id, headline, lead_paragraph` overlap with `api_corpus`, plus it carries `full_text`,
+  `file_id`, and the `cca`/`immig` descriptor labels. **Correction (2026-07-24 audit): it also
+  carries `dsk` / `print_section` / `online_sections`, 100% non-null** (earlier notes said desk/
+  section were missing from the parquet — they aren't; they were just never joined into
+  `ldc_labeled.parquet`). Desk strings have a noisy long tail — high-confidence use must whitelist
+  exact canonical values. Related: the **API corpus has no usable desk/section signal before ~1981**
+  (`news_desk` is `"None"`, `section_name` is `"Archives"` — a hard cutover).
 - `cca_doca/` — retrained CCA artifacts: weights + config sidecars, per-run metrics CSVs,
   `experiments/` (eval + corpus-score JSON, incl. `eval_heads_own_terms.json` — the
   2026-07-10 per-head own-terms eval), `prior_estimate.json`, `embed_cache/`, plus
