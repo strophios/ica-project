@@ -50,16 +50,20 @@ with a pre-registered promotion rule (below).
 1. **API headline pull** — running (started 2026-07-24; `r/api_ingest/pull_archive.R`,
    resumable). Forward first (1996 → mid-2026), then backward (`--skeleton`
    rotating-month sampling for temporal coverage, then densify).
-   - **Data-drift watchout (operator hand-check, 2026-07-24):** recent API
-     stories have **empty `lead_paragraph`** — abstract (and a multimedia
-     caption) carry the lede-like text instead, possibly because the abstract
-     *is* the under-headline text online now. Since the model input is
-     `headline + "</s>" + lead_paragraph`, this would silently collapse the
-     text channel to headline-only. Before embedding any new years: per-year
-     missingness audit over the pulled data (`lead_paragraph`, `abstract`,
-     multimedia) → find the cutover → define an explicit lead-fallback policy
-     (e.g. coalesce to abstract) in processing, and check how
-     `data_from_parquet`/`embed_corpus` treat empty leads today.
+   - **Data-drift finding (audited 2026-07-27, resolving the 07-24 watchout):**
+     per-year audit over the converted 1996–2025 parquets. `lead_paragraph` is
+     healthy 1996–2024 (0.1–2% empty; one bad patch: 2005, 15.5% missing BOTH
+     lead and abstract) — but **2025 is a hard cutover: 100% of rows have no
+     lead_paragraph** (abstract 97% present). The hand-checked stories were
+     2025 rows. Abstract is NOT simply the lead (only 8.9% identical in 2024
+     when both present) but covers 91.7% of lead-empty rows.
+     **POLICY: text channel for new-year embedding = `headline + "</s>" +
+     coalesce(lead_paragraph, abstrct)`** — implement as an additive
+     `lead_fallback_column` on the loader/embed path when the post-1995 embed
+     is built. Pre-2025 this fills only the small gaps; 2025+ rows ride the
+     abstract register (a mild channel shift — slice any 2025+ eval by era).
+     Corpus state after assembly: `api_corpus/` parquet now spans 1960–2025
+     (66 files); the 1870–1959 skeleton is raw-checkpoint-only by design.
    - **General principle (same date): expect the data to shift under us across
      the 175-year corpus.** Known instances so far: the API desk/section signal
      cutover (~1981 — `news_desk` is `"None"` and `section_name` is
