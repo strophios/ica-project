@@ -160,6 +160,10 @@ ICA_CANDIDATES_DIR: Path = CCA_DOCA_DIR / "ica_candidates"
 
 # Relevance head artifacts (Phase 3 training output)
 RELEVANCE_DOCA_WEIGHTS: Path = PROJECT_ROOT / "relevance" / "relevance.weights.h5"
+# Text-mode / encoder-unfreeze rel-first path (docs/notes/encoder-unfreeze-strategy.md).
+RELEVANCE_TEXT_TABLE: Path = PROJECT_ROOT / "relevance" / "relevance_text_table.parquet"
+RELEVANCE_SET_DIR: Path = PROJECT_ROOT / "relevance" / "rel_set"
+RELEVANCE_TEXT_WEIGHTS: Path = PROJECT_ROOT / "relevance" / "relevance_text.weights.h5"
 
 
 # ---------------------------------------------------------------------------

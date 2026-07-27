@@ -604,6 +604,17 @@ class RunConfig:
     diagnostics: DiagnosticsConfig = dataclasses.field(
         default_factory=DiagnosticsConfig
     )
+    # Encoder-unfreeze escalation knobs (docs/notes/encoder-unfreeze-strategy.md).
+    # Mirror UsRunConfig's fields/validation exactly (src/us_config.py) — RunConfig
+    # was the one config still missing them (UsRunConfig already carried them).
+    # Back-compat: an older sidecar lacking these keys reconstructs via
+    # _filter_known_fields's default-fallback (each field has a default here),
+    # landing on the frozen-probe defaults below — no manual payload.get() needed,
+    # unlike UsRunConfig.from_json's hand-written back-compat (that module's
+    # from_json predates _filter_known_fields's generic default-fallback).
+    freeze_encoder: bool = True
+    unfreeze_top_n: int = 0
+    layer_multipliers: dict | None = None
 
     def __post_init__(self):
         # --- Self-consistency: own fields ---------------------------------
@@ -694,6 +705,24 @@ class RunConfig:
             raise ValueError(
                 f"RunConfig.diagnostics must be a DiagnosticsConfig; "
                 f"got {type(self.diagnostics).__name__}."
+            )
+
+        # --- Escalation knobs (mirrors UsRunConfig's validation exactly) ---
+        if not isinstance(self.freeze_encoder, bool):
+            raise ValueError(
+                f"RunConfig.freeze_encoder must be a bool; "
+                f"got {type(self.freeze_encoder).__name__}."
+            )
+        # unfreeze_top_n: RoBERTa-base has 12 layers; max unfreeze is top 12 (all layers)
+        if not isinstance(self.unfreeze_top_n, int) or self.unfreeze_top_n < 0 or self.unfreeze_top_n > 12:
+            raise ValueError(
+                f"RunConfig.unfreeze_top_n must be in [0, 12] (RoBERTa-base has 12 layers); "
+                f"got {self.unfreeze_top_n!r}."
+            )
+        if self.layer_multipliers is not None and not isinstance(self.layer_multipliers, dict):
+            raise ValueError(
+                f"RunConfig.layer_multipliers must be a dict or None; "
+                f"got {type(self.layer_multipliers).__name__}."
             )
 
     # ----------------------------------------------------------------------

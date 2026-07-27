@@ -11,12 +11,10 @@ forward-compat handling, backbone validation, and the path helper.
 
 import dataclasses
 import json
-import warnings
 from pathlib import Path
 
 import pytest
 
-import src.cca_config as cca_config
 from src.cca_config import (
     FLPULossConfig,
     HeadConfig,
@@ -901,6 +899,96 @@ class TestDiagnosticsConfigFromDict:
         payload = {"prediction_summary_stats": ["variance"]}
         with pytest.raises(ValueError, match="prediction_summary_stats"):
             DiagnosticsConfig._from_dict(payload)
+
+
+class TestEscalationKnobs:
+    """Encoder-unfreeze escalation knobs (freeze_encoder / unfreeze_top_n /
+    layer_multipliers) on RunConfig — mirrors UsRunConfig's TestEscalationKnobs
+    in tests/test_us_config.py."""
+
+    def test_default_escalation_knobs(self):
+        cfg = _valid_run_config()
+        assert cfg.freeze_encoder is True
+        assert cfg.unfreeze_top_n == 0
+        assert cfg.layer_multipliers is None
+
+    def test_freeze_encoder_false(self):
+        cfg = _valid_run_config(freeze_encoder=False)
+        assert cfg.freeze_encoder is False
+
+    def test_unfreeze_top_n_positive(self):
+        cfg = _valid_run_config(unfreeze_top_n=2)
+        assert cfg.unfreeze_top_n == 2
+
+    def test_unfreeze_top_n_at_upper_bound_accepted(self):
+        cfg = _valid_run_config(unfreeze_top_n=12)
+        assert cfg.unfreeze_top_n == 12
+
+    def test_layer_multipliers_dict(self):
+        multipliers = {"head": 1.0, "encoder_top": 0.1, "encoder_frozen": 0.0}
+        cfg = _valid_run_config(layer_multipliers=multipliers)
+        assert cfg.layer_multipliers == multipliers
+
+    def test_unfreeze_top_n_negative_rejected(self):
+        with pytest.raises(ValueError, match="unfreeze_top_n"):
+            _valid_run_config(unfreeze_top_n=-1)
+
+    def test_unfreeze_top_n_above_12_rejected(self):
+        with pytest.raises(ValueError, match="unfreeze_top_n"):
+            _valid_run_config(unfreeze_top_n=13)
+
+    def test_layer_multipliers_non_dict_rejected(self):
+        with pytest.raises(ValueError, match="layer_multipliers"):
+            _valid_run_config(layer_multipliers="not a dict")
+
+    def test_freeze_encoder_non_bool_rejected(self):
+        with pytest.raises(ValueError, match="freeze_encoder"):
+            _valid_run_config(freeze_encoder="yes")
+
+
+class TestEscalationKnobsRoundTrip:
+    """JSON round-trip for the escalation knobs, incl. back-compat for older
+    sidecars written before these fields existed."""
+
+    def test_round_trip_with_escalation_knobs(self, tmp_path):
+        cfg = _valid_run_config(
+            freeze_encoder=False,
+            unfreeze_top_n=2,
+            layer_multipliers={"head": 1.0, "encoder_top": 0.1},
+        )
+        path = tmp_path / "config.json"
+        cfg.to_json(path)
+        reloaded = RunConfig.from_json(path)
+        assert reloaded == cfg
+        assert reloaded.freeze_encoder is False
+        assert reloaded.unfreeze_top_n == 2
+        assert reloaded.layer_multipliers == {"head": 1.0, "encoder_top": 0.1}
+
+    def test_back_compat_old_sidecar_missing_fields(self, tmp_path):
+        """Old sidecars missing escalation knobs should load with the
+        frozen-probe defaults (freeze_encoder=True, unfreeze_top_n=0,
+        layer_multipliers=None)."""
+        cfg = _valid_run_config()
+        path = tmp_path / "config.json"
+        cfg.to_json(path)
+
+        payload = json.loads(path.read_text())
+        del payload["freeze_encoder"]
+        del payload["unfreeze_top_n"]
+        del payload["layer_multipliers"]
+        path.write_text(json.dumps(payload))
+
+        reloaded = RunConfig.from_json(path)
+        assert reloaded.freeze_encoder is True
+        assert reloaded.unfreeze_top_n == 0
+        assert reloaded.layer_multipliers is None
+        assert reloaded.seq_length == cfg.seq_length
+        assert reloaded.heads == cfg.heads
+
+    def test_default_cca_config_has_frozen_probe_defaults(self):
+        assert DEFAULT_CCA_CONFIG.freeze_encoder is True
+        assert DEFAULT_CCA_CONFIG.unfreeze_top_n == 0
+        assert DEFAULT_CCA_CONFIG.layer_multipliers is None
 
 
 class TestRunConfigDiagnosticsIntegration:
