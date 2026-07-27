@@ -77,14 +77,19 @@ with a pre-registered promotion rule (below).
    relabeling alone doesn't fix (→ gate options B/C, encoder unfreeze).
    Keeper findings: nnPU collapses at π≈0.83 (PN term load-bearing); the PNU
    corpus + dual-id-space holdout machinery is permanent infrastructure.
-3. **Encoder unfreeze + discriminative LR** — the machinery exists
-   (`LayerLRModel`, `layer_multipliers`, `top_n_group_fn`). Per the own-terms
-   eval, the clearest payoff is the **rel head**, not CCA. Includes the
-   **multi-head training-strategy decision**: train heads jointly with unfrozen
-   encoder vs. frozen per-head training + a learned combined head on top (an
-   unfrozen encoder is what would justify replacing the product-AND fusion with
-   a real classification head). Cluster time required
-   (`ica-apply-results-and-cluster-runbook.md`).
+3. **Encoder unfreeze + discriminative LR** — machinery exists (`LayerLRModel`,
+   `top_n_group_fn`; the escalation branch in `run_us_classification.py:154-179`
+   is the proven template). **Training-strategy decision MADE 2026-07-27**
+   (`encoder-unfreeze-strategy.md`, literature-grounded): **rel-first
+   sequential** — text-mode rel training w/ top-N unfreeze → re-embed →
+   features-retrain US/CCA on the new cache (built-in negative-transfer check)
+   → recalibrate → refit fusion. Pre-registered escalation: **joint CCA+rel**
+   (same population/channel/loss family → same batches carry both labels, one
+   λ; no PU-interleaving risk); three-head joint stays out. Build list (7
+   items, from the 2026-07-27 readiness inventory): RunConfig escalation
+   knobs; text-bearing rel population table; RELEVANCE_SET_DIR; 3-stream text
+   Ratio-Batch; `run_relevance_text.py`; smoke script + sbatch variant; cluster
+   time/mem budgeting (full-encoder backprop regardless of N).
    - ~~**Pre-flight correctness check:** `LayerLRModel.train_step` loss-weighting
      vs stock Keras~~ — **RESOLVED 2026-07-24**: the flatten discrepancy was
      already fixed (verified vs installed Keras 3.12 stock trainer); batch-size
