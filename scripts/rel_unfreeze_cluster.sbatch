@@ -1,8 +1,8 @@
 #!/bin/bash
 #SBATCH --job-name=rel-unfreeze
 #SBATCH --partition=gpu-short     # e.g. gpu-short for the test, gpu for the full
-#SBATCH --gres=gpu:1              # gpu:1:h200 (preferably) or a100 for the full run
-#SBATCH --time=00:30:00           # e.g. 06:00:00 (short: 00:30:00)
+#SBATCH --gres=gpu:h200         # gpu:1:h200 (preferably) or a100 for the full run
+#SBATCH --time=06:00:00           # e.g. 06:00:00 (short: 00:30:00)
 #SBATCH --mem=64G                 # e.g. 64G
 #SBATCH --output=/projects/ahd/relevance/logs/slurm-%j.out
 

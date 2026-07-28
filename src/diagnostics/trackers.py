@@ -84,12 +84,26 @@ class PerGroupGradNormTracker(keras.metrics.Metric):
             return  # empty group is a no-op (e.g., frozen encoder)
 
         norms = tf.stack(in_group_norms)
+        # Exclude non-finite norms (mixed_float16 overflow steps): the
+        # LossScaleOptimizer SKIPS the weight update on those steps, so they
+        # are non-events for training and must not poison the running
+        # aggregates (one inf/nan would otherwise turn the whole epoch's
+        # mean/max to nan -- observed on cluster job 8806998). Counting
+        # overflow steps is GradientFiniteTracker's job, not this tracker's.
+        finite = tf.math.is_finite(norms)
         if self.aggregation == "mean":
-            self._total.assign_add(tf.reduce_sum(norms))
-            self._count.assign_add(tf.cast(tf.size(norms), self._count.dtype))
-        else:  # "max"
+            self._total.assign_add(
+                tf.reduce_sum(tf.where(finite, norms, tf.zeros_like(norms)))
+            )
+            self._count.assign_add(
+                tf.reduce_sum(tf.cast(finite, self._count.dtype))
+            )
+        else:  # "max" -- norms are >= 0, so substituting 0 never wins the max
             self._running_max.assign(
-                tf.maximum(self._running_max, tf.reduce_max(norms))
+                tf.maximum(
+                    self._running_max,
+                    tf.reduce_max(tf.where(finite, norms, tf.zeros_like(norms))),
+                )
             )
 
     def result(self):

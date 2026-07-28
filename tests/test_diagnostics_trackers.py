@@ -506,3 +506,35 @@ class TestBatchLabelBalanceProperties:
         assert float(t.result()) == pytest.approx(
             float(np.mean(labels)), rel=1e-5, abs=1e-6
         )
+
+
+class TestPerGroupGradNormNonFinite:
+    """Overflow steps (mixed_float16) must not poison the aggregates.
+
+    The LossScaleOptimizer skips weight updates on non-finite steps, so the
+    norm tracker excludes them too (observed nan-poisoning on cluster job
+    8806998); GradientFiniteTracker counts them instead.
+    """
+
+    def _var(self):
+        return tf.Variable(tf.zeros([2]), name="g/kernel")
+
+    def test_nan_gradient_excluded_from_mean(self):
+        t = PerGroupGradNormTracker(group_name="g", aggregation="mean")
+        gfn = lambda v: "g"  # noqa: E731
+        t.update_state([tf.constant([3.0, 4.0])], [self._var()], gfn)   # norm 5
+        t.update_state([tf.constant([float("nan"), 1.0])], [self._var()], gfn)
+        assert float(t.result()) == pytest.approx(5.0, rel=1e-5)
+
+    def test_inf_gradient_excluded_from_max(self):
+        t = PerGroupGradNormTracker(group_name="g", aggregation="max")
+        gfn = lambda v: "g"  # noqa: E731
+        t.update_state([tf.constant([3.0, 4.0])], [self._var()], gfn)   # norm 5
+        t.update_state([tf.constant([float("inf"), 0.0])], [self._var()], gfn)
+        assert float(t.result()) == pytest.approx(5.0, rel=1e-5)
+
+    def test_all_nonfinite_step_reports_zero(self):
+        t = PerGroupGradNormTracker(group_name="g", aggregation="mean")
+        gfn = lambda v: "g"  # noqa: E731
+        t.update_state([tf.constant([float("nan"), float("nan")])], [self._var()], gfn)
+        assert float(t.result()) == 0.0
