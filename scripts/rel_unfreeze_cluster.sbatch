@@ -35,12 +35,22 @@ set -euo pipefail
 # ------------------------------------------------------------------------
 
 cd "/projects/ahd/<PLACEHOLDER_REPO_PATH>"        # repo root on the cluster
-source .venv/bin/activate
 export ICA_ENV=cluster                            # force cluster config
+# No venv activation -- project convention is `uv run` (see CLAUDE.md).
+# `uv sync --frozen` must have been run ONCE on the login node beforehand;
+# --frozen below means jobs never attempt resolution (compute nodes may
+# lack internet).
 
-# Prerequisite (run once, not part of this job -- cheap, CPU-only):
-#   uv run python -m src.build_relevance_text_table
-# This job assumes relevance/relevance_text_table.parquet already exists.
+# Prerequisite -- the training table lives OUTSIDE the repo, at the cluster
+# DATA root (config.py on-cluster: PROJECT_ROOT == /projects/ahd == data
+# root; the repo checkout under it is code-only, same data-outside-repo
+# convention as local). Upload the locally-built artifact once:
+#   rsync -avz <local>/00_explorer/relevance/relevance_text_table.parquet \
+#       <cluster>:/projects/ahd/relevance/
+# (Rebuilding on-cluster via `uv run python -m src.build_relevance_text_table`
+# is possible but needs api_corpus + the relevance candidates/negatives +
+# holdout parquets uploaded first -- the 55MB table upload is the short path.)
+# This job assumes /projects/ahd/relevance/relevance_text_table.parquet exists.
 
 # --- TensorBoard (OPERATOR-ADJUSTABLE) -------------------------------------
 # Points at a job-id-scoped dir under the cluster relevance artifacts area
@@ -59,9 +69,9 @@ TB_LOG_DIR="/projects/ahd/relevance/tb_logs/${SLURM_JOB_ID:-manual}"
 UNFREEZE_TOP_N="${2:-1}"
 MODE="${1:-full}"
 if [ "$MODE" = "short" ]; then
-    python -m src.run_relevance_text --unfreeze-top-n "$UNFREEZE_TOP_N" --epochs 1 --max-steps 200 \
+    uv run --frozen python -m src.run_relevance_text --unfreeze-top-n "$UNFREEZE_TOP_N" --epochs 1 --max-steps 200 \
         --tensorboard-dir "$TB_LOG_DIR"
 else
-    python -m src.run_relevance_text --unfreeze-top-n "$UNFREEZE_TOP_N" --epochs 7 \
+    uv run --frozen python -m src.run_relevance_text --unfreeze-top-n "$UNFREEZE_TOP_N" --epochs 7 \
         --tensorboard-dir "$TB_LOG_DIR"
 fi
