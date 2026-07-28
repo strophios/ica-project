@@ -1,8 +1,8 @@
 #!/bin/bash
 #SBATCH --job-name=rel-unfreeze
-#SBATCH --partition=gpu-short     # e.g. gpu-short for the test, gpu for the full
+#SBATCH --partition=gpu     # e.g. gpu-short for the test, gpu for the full
 #SBATCH --gres=gpu:h200         # gpu:1:h200 (preferably) or a100 for the full run
-#SBATCH --time=06:00:00           # e.g. 06:00:00 (short: 00:30:00)
+#SBATCH --time=00:45:00           # e.g. 06:00:00 (short: 00:30:00)
 #SBATCH --mem=64G                 # e.g. 64G
 #SBATCH --output=/projects/ahd/relevance/logs/slurm-%j.out
 
@@ -74,10 +74,13 @@ TB_LOG_DIR="/projects/ahd/relevance/tb_logs/${SLURM_JOB_ID:-manual}"
 UNFREEZE_TOP_N="${2:-1}"
 GRADED_DECAY="${3:-}"     # empty = flat encoder_top scheme
 MODE="${1:-full}"
+EXTRA_ARGS=("${@:4}")     # passed through to the trainer, e.g. --eta 0.5 --peak-lr 1e-4
 if [ "$MODE" = "short" ]; then
     uv run --frozen python -m src.run_relevance_text --unfreeze-top-n "$UNFREEZE_TOP_N" --epochs 1 --max-steps 200 \
-        ${GRADED_DECAY:+--graded-decay "$GRADED_DECAY"} --tensorboard-dir "$TB_LOG_DIR"
+        ${GRADED_DECAY:+--graded-decay "$GRADED_DECAY"} --tensorboard-dir "$TB_LOG_DIR" \
+        ${EXTRA_ARGS[@]+"${EXTRA_ARGS[@]}"}
 else
     uv run --frozen python -m src.run_relevance_text --unfreeze-top-n "$UNFREEZE_TOP_N" --epochs 7 \
-        ${GRADED_DECAY:+--graded-decay "$GRADED_DECAY"} --tensorboard-dir "$TB_LOG_DIR"
+        ${GRADED_DECAY:+--graded-decay "$GRADED_DECAY"} --tensorboard-dir "$TB_LOG_DIR" \
+        ${EXTRA_ARGS[@]+"${EXTRA_ARGS[@]}"}
 fi

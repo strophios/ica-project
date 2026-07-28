@@ -143,6 +143,35 @@ def _default_rel_text_config(epochs: int = 7) -> cca_config.RunConfig:
 DEFAULT_REL_TEXT_CONFIG = _default_rel_text_config()
 
 
+def apply_cli_overrides(cfg, eta=None, peak_lr=None):
+    """Pure: apply the --eta / --peak-lr CLI overrides to a run config.
+
+    - `eta`: sets `nnpnu_eta` on the rel head's FLPU loss, forcing
+      `kiryo_clawback=False` when eta > 0 (the loss rejects that combination:
+      Kiryo's recovery ascends on the negative term, which would un-learn
+      reliable negatives). eta > 0 turns the loss-inert -1 labels into a real
+      PN anchor -- the counter to the all-positive nnPU collapse observed in
+      cluster job 8808071 (and structurally in the US-retrain eta=0 finding).
+    - `peak_lr`: sets `lr_schedule.warmup_target`, scaling `initial_lr` to
+      keep the default 10:1 peak:initial ratio. The 1e-3 default is a
+      features-mode head LR; text-mode encoder fine-tuning wants ~1e-4.
+    """
+    if eta is not None:
+        head = cfg.heads[0]
+        new_loss = dataclasses.replace(
+            head.loss, nnpnu_eta=eta, kiryo_clawback=False if eta > 0 else head.loss.kiryo_clawback
+        )
+        cfg = dataclasses.replace(cfg, heads=(dataclasses.replace(head, loss=new_loss),))
+    if peak_lr is not None:
+        cfg = dataclasses.replace(
+            cfg,
+            lr_schedule=dataclasses.replace(
+                cfg.lr_schedule, warmup_target=peak_lr, initial_lr=peak_lr * 0.1
+            ),
+        )
+    return cfg
+
+
 # ---------------------------------------------------------------------------
 # Imperative shell
 # ---------------------------------------------------------------------------
@@ -403,6 +432,12 @@ if __name__ == "__main__":
                      help="ULMFiT-style graded per-layer LRs: top layer at 0.1x, each layer "
                           "below multiplied by this decay (e.g. 0.5 -> 0.1/0.05/0.025). "
                           "Requires --unfreeze-top-n > 0; omit for the flat encoder_top scheme.")
+    ap.add_argument("--eta", type=float, default=None,
+                     help="nnPNU eta: weight of the reliable-negative PN term (canonical rel "
+                          "config is 0.0 = pure PU). Forces kiryo_clawback off when > 0.")
+    ap.add_argument("--peak-lr", type=float, default=None,
+                     help="override the LR schedule's warmup_target (peak LR); initial_lr "
+                          "scales to keep the 10:1 peak:initial ratio.")
     ap.add_argument("--epochs", type=int, default=7)
     ap.add_argument("--max-steps", type=int, default=None)
     ap.add_argument("--batch-size", type=int, default=256)
@@ -429,6 +464,7 @@ if __name__ == "__main__":
             else DEFAULT_REL_TEXT_CONFIG.layer_multipliers
         ),
     )
+    cfg = apply_cli_overrides(cfg, eta=args.eta, peak_lr=args.peak_lr)
     tb_timestamp = datetime.datetime.now(datetime.timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     tensorboard_dir = resolve_tensorboard_dir(args.tensorboard_dir, args.tensorboard, tb_timestamp)
     main(

@@ -26,6 +26,7 @@ from src.run_relevance_text import (
     DEFAULT_REL_TEXT_CONFIG,
     RELEVANCE_DIR,
     _default_rel_text_config,
+    apply_cli_overrides,
     build_fit_callbacks,
     resolve_tensorboard_dir,
     with_rel_label,
@@ -293,3 +294,25 @@ class TestImportNoSideEffects:
         import src.run_relevance_text
 
         assert src.run_relevance_text is not None
+
+
+class TestApplyCliOverrides:
+    def test_no_overrides_is_identity(self):
+        cfg = DEFAULT_REL_TEXT_CONFIG
+        assert apply_cli_overrides(cfg) is cfg
+
+    def test_eta_sets_loss_and_disables_clawback(self):
+        cfg = apply_cli_overrides(DEFAULT_REL_TEXT_CONFIG, eta=0.5)
+        assert cfg.heads[0].loss.nnpnu_eta == 0.5
+        assert cfg.heads[0].loss.kiryo_clawback is False
+        assert cfg.heads[0].loss.prior == DEFAULT_REL_TEXT_CONFIG.heads[0].loss.prior
+
+    def test_peak_lr_scales_initial(self):
+        cfg = apply_cli_overrides(DEFAULT_REL_TEXT_CONFIG, peak_lr=1e-4)
+        assert cfg.lr_schedule.warmup_target == pytest.approx(1e-4)
+        assert cfg.lr_schedule.initial_lr == pytest.approx(1e-5)
+
+    def test_both_compose(self):
+        cfg = apply_cli_overrides(DEFAULT_REL_TEXT_CONFIG, eta=0.25, peak_lr=2e-4)
+        assert cfg.heads[0].loss.nnpnu_eta == 0.25
+        assert cfg.lr_schedule.warmup_target == pytest.approx(2e-4)
