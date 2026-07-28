@@ -105,6 +105,72 @@ DEFAULT_ESCALATION_MULTIPLIERS: dict[str, float] = {
 }
 
 
+def per_layer_group_fn(n_top: int, n_layers: int = 12, layer_prefix: str = "transformer_layer"):
+    """Like `top_n_group_fn`, but each unfrozen layer gets its OWN group.
+
+    Groups: "encoder_layer_{idx}" for each of the top `n_top` transformer
+    blocks (so each can carry a distinct LR multiplier -- ULMFiT-style graded
+    discriminative rates), "encoder_frozen" for the rest of the backbone
+    (lower blocks + embeddings), "head" for everything else. Same
+    boundary-safe path matching as `top_n_group_fn` (segment equality, so
+    transformer_layer_1 never matches transformer_layer_11).
+    """
+    top_indices = [n_layers - 1 - i for i in range(n_top)]
+    name_to_group = {f"{layer_prefix}_{idx}": f"encoder_layer_{idx}" for idx in top_indices}
+
+    def group_of(var):
+        path = var.path
+        path_segments = path.split("/")
+        for layer_name, group in name_to_group.items():
+            if layer_name in path_segments or f"{layer_name}/" in path:
+                return group
+        if layer_prefix in path:
+            return "encoder_frozen"
+        if path_segments[0].startswith(_ENCODER_NON_LAYER_PREFIXES):
+            return "encoder_frozen"
+        return "head"
+
+    return group_of
+
+
+def graded_multipliers(
+    n_top: int, n_layers: int = 12, base: float = 0.1, decay: float = 0.5
+) -> dict[str, float]:
+    """Geometric per-layer LR multipliers for graded top-N unfreezing.
+
+    Top layer gets `base`, each layer below it `base * decay^k` (ULMFiT-style
+    discriminative rates: highest at the top, decaying with depth). Keys match
+    `per_layer_group_fn`'s group names; "head" is 1.0, "encoder_frozen" 0.0.
+    Example (n_top=3, base=0.1, decay=0.5): layer 11 -> 0.1, 10 -> 0.05,
+    9 -> 0.025.
+    """
+    if n_top < 1:
+        raise ValueError(f"graded multipliers need n_top >= 1, got {n_top}")
+    if not (0.0 < decay <= 1.0) or base <= 0.0:
+        raise ValueError(f"need base > 0 and 0 < decay <= 1, got base={base} decay={decay}")
+    out: dict[str, float] = {"head": 1.0, "encoder_frozen": 0.0}
+    for k in range(n_top):
+        out[f"encoder_layer_{n_layers - 1 - k}"] = base * (decay**k)
+    return out
+
+
+def _validate_per_layer_keys(layer_multipliers: dict, n_top: int, n_layers: int) -> None:
+    """Raise if per-layer multiplier keys don't exactly cover the top-N groups.
+
+    Load-bearing defense: `LayerLRModel.get_multiplier` DEFAULTS missing groups
+    to 1.0 ("train normally"), so a typo'd or missing per-layer key would
+    silently train that layer at FULL learning rate. Exact-cover validation
+    makes that impossible.
+    """
+    expected = {f"encoder_layer_{n_layers - 1 - k}" for k in range(n_top)}
+    provided = {k for k in layer_multipliers if k.startswith("encoder_layer_")}
+    if provided != expected:
+        raise ValueError(
+            f"per-layer multipliers must cover exactly the top-{n_top} groups: "
+            f"missing={sorted(expected - provided)} unexpected={sorted(provided - expected)}"
+        )
+
+
 def escalation_build_kwargs(
     unfreeze_top_n: int,
     layer_multipliers: dict | None = None,
@@ -130,6 +196,18 @@ def escalation_build_kwargs(
     (backbone/heads/seq_length/diagnostics are the caller's responsibility).
     """
     if unfreeze_top_n > 0:
+        # Grouping is inferred from the multipliers dict's keys so that a
+        # config sidecar (which records only the dict) fully determines the
+        # run's behavior on reload: per-layer keys ("encoder_layer_*") select
+        # per-layer grouping (graded rates); otherwise the flat
+        # encoder_top/encoder_frozen scheme.
+        if layer_multipliers and any(k.startswith("encoder_layer_") for k in layer_multipliers):
+            _validate_per_layer_keys(layer_multipliers, unfreeze_top_n, n_layers)
+            return {
+                "freeze_encoder": False,
+                "group_fn": per_layer_group_fn(unfreeze_top_n, n_layers=n_layers),
+                "layer_multipliers": dict(layer_multipliers),
+            }
         return {
             "freeze_encoder": False,
             "group_fn": top_n_group_fn(unfreeze_top_n, n_layers=n_layers),

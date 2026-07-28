@@ -5,10 +5,16 @@ Tests for `src.validation.escalation` (fine-tuning decision helpers).
 Tests cover:
 - top_n_group_fn: grouping of encoder layers by position (top N vs frozen)
 - escalation_decision: decision logic and margin-based flipping
+- per_layer_group_fn / graded_multipliers / the graded escalation_build_kwargs
+  path (ULMFiT-style graded discriminative rates)
 """
+
+import pytest
 
 from src.validation.escalation import (
     top_n_group_fn,
+    per_layer_group_fn,
+    graded_multipliers,
     escalation_decision,
     escalation_build_kwargs,
     DEFAULT_ESCALATION_MULTIPLIERS,
@@ -261,3 +267,82 @@ class TestEscalationDecision:
         assert ">" in result_escalate["rationale"]
         # escalate=False should have '<='
         assert "<=" in result_no_escalate["rationale"]
+
+
+class _FakeVar:
+    def __init__(self, path):
+        self.path = path
+
+
+class TestPerLayerGroupFn:
+    def test_top_layers_get_distinct_groups(self):
+        fn = per_layer_group_fn(3)
+        assert fn(_FakeVar("transformer_layer_11/attn/kernel")) == "encoder_layer_11"
+        assert fn(_FakeVar("transformer_layer_10/ffn/bias")) == "encoder_layer_10"
+        assert fn(_FakeVar("transformer_layer_9/ln/gamma")) == "encoder_layer_9"
+
+    def test_boundary_no_collision(self):
+        fn = per_layer_group_fn(n_top=1, n_layers=12)
+        assert fn(_FakeVar("transformer_layer_11/x")) == "encoder_layer_11"
+        assert fn(_FakeVar("transformer_layer_1/x")) == "encoder_frozen"
+
+    def test_lower_layers_and_embeddings_frozen(self):
+        fn = per_layer_group_fn(2)
+        assert fn(_FakeVar("transformer_layer_5/x")) == "encoder_frozen"
+        assert fn(_FakeVar("embeddings/token_embedding/embeddings")) == "encoder_frozen"
+        assert fn(_FakeVar("embeddings_layer_norm/gamma")) == "encoder_frozen"
+
+    def test_head_default(self):
+        fn = per_layer_group_fn(2)
+        assert fn(_FakeVar("rel/intermediate_dense/kernel")) == "head"
+
+
+class TestGradedMultipliers:
+    def test_geometric_decay(self):
+        m = graded_multipliers(3, base=0.1, decay=0.5)
+        assert m["encoder_layer_11"] == pytest.approx(0.1)
+        assert m["encoder_layer_10"] == pytest.approx(0.05)
+        assert m["encoder_layer_9"] == pytest.approx(0.025)
+        assert m["head"] == 1.0
+        assert m["encoder_frozen"] == 0.0
+
+    def test_keys_match_per_layer_group_fn(self):
+        m = graded_multipliers(2)
+        fn = per_layer_group_fn(2)
+        assert fn(_FakeVar("transformer_layer_11/x")) in m
+        assert fn(_FakeVar("transformer_layer_10/x")) in m
+
+    def test_invalid_args_raise(self):
+        with pytest.raises(ValueError):
+            graded_multipliers(0)
+        with pytest.raises(ValueError):
+            graded_multipliers(2, decay=0.0)
+        with pytest.raises(ValueError):
+            graded_multipliers(2, base=-0.1)
+
+
+class TestEscalationBuildKwargsGraded:
+    def test_per_layer_keys_select_per_layer_grouping(self):
+        m = graded_multipliers(3)
+        kw = escalation_build_kwargs(3, m)
+        assert kw["freeze_encoder"] is False
+        assert kw["layer_multipliers"] == m
+        assert kw["group_fn"](_FakeVar("transformer_layer_10/x")) == "encoder_layer_10"
+
+    def test_flat_path_unchanged(self):
+        kw = escalation_build_kwargs(2)
+        assert kw["group_fn"](_FakeVar("transformer_layer_11/x")) == "encoder_top"
+        assert kw["layer_multipliers"]["encoder_top"] == pytest.approx(0.1)
+
+    def test_mismatched_per_layer_keys_raise(self):
+        # LayerLRModel defaults unknown groups to 1.0 (full LR) -- a typo'd
+        # key must be caught here, not trained silently.
+        bad = {"head": 1.0, "encoder_frozen": 0.0, "encoder_layer_7": 0.1}
+        with pytest.raises(ValueError, match="exactly the top-2"):
+            escalation_build_kwargs(2, bad)
+
+    def test_missing_per_layer_key_raises(self):
+        m = graded_multipliers(3)
+        del m["encoder_layer_9"]
+        with pytest.raises(ValueError, match="missing"):
+            escalation_build_kwargs(3, m)

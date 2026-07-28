@@ -53,7 +53,7 @@ from src.model_setup.assembly import build_endpoint_model, build_inference_model
 from src.model_setup.backbone import load_dapt_backbone
 from src.model_setup.heads import ClassificationHead
 from src.preproc.preprocessor import ClassifierPreprocessor
-from src.validation.escalation import escalation_build_kwargs
+from src.validation.escalation import escalation_build_kwargs, graded_multipliers
 
 RELEVANCE_DIR = config.PROJECT_ROOT / "relevance"
 
@@ -399,6 +399,10 @@ if __name__ == "__main__":
     )
     ap.add_argument("--unfreeze-top-n", type=int, default=0,
                      help="number of top RoBERTa layers to unfreeze (0 = frozen probe)")
+    ap.add_argument("--graded-decay", type=float, default=None,
+                     help="ULMFiT-style graded per-layer LRs: top layer at 0.1x, each layer "
+                          "below multiplied by this decay (e.g. 0.5 -> 0.1/0.05/0.025). "
+                          "Requires --unfreeze-top-n > 0; omit for the flat encoder_top scheme.")
     ap.add_argument("--epochs", type=int, default=7)
     ap.add_argument("--max-steps", type=int, default=None)
     ap.add_argument("--batch-size", type=int, default=256)
@@ -409,11 +413,21 @@ if __name__ == "__main__":
                           "RELEVANCE_DIR/tb_logs/ (ignored if --tensorboard-dir is set)")
     args = ap.parse_args()
 
+    if args.graded_decay is not None and args.unfreeze_top_n < 1:
+        ap.error("--graded-decay requires --unfreeze-top-n > 0")
     cfg = dataclasses.replace(
         DEFAULT_REL_TEXT_CONFIG,
         epochs=args.epochs,
         unfreeze_top_n=args.unfreeze_top_n,
         freeze_encoder=(args.unfreeze_top_n == 0),
+        # Graded mode: the computed per-layer dict goes INTO the config so the
+        # sidecar records the actual rates (grouping is inferred from these
+        # keys by escalation_build_kwargs -- sidecar fully determines behavior).
+        layer_multipliers=(
+            graded_multipliers(args.unfreeze_top_n, decay=args.graded_decay)
+            if args.graded_decay is not None
+            else DEFAULT_REL_TEXT_CONFIG.layer_multipliers
+        ),
     )
     tb_timestamp = datetime.datetime.now(datetime.timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     tensorboard_dir = resolve_tensorboard_dir(args.tensorboard_dir, args.tensorboard, tb_timestamp)
