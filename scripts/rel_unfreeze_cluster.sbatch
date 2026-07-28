@@ -67,14 +67,17 @@ TB_LOG_DIR="/projects/ahd/relevance/tb_logs/${SLURM_JOB_ID:-manual}"
 # ----------------------------------------------------------------------------
 
 # Mode is chosen by the submit command:
-#   sbatch scripts/rel_unfreeze_cluster.sbatch short   -> short calibration run
-#   sbatch scripts/rel_unfreeze_cluster.sbatch full    -> full rel-first run
+#   sbatch scripts/rel_unfreeze_cluster.sbatch short        -> short calibration run
+#   sbatch scripts/rel_unfreeze_cluster.sbatch full 1       -> flat N=1 run (baseline)
+#   sbatch scripts/rel_unfreeze_cluster.sbatch full 3 0.5   -> graded top-3 run
+#                                                              (0.1/0.05/0.025 per-layer LRs)
 UNFREEZE_TOP_N="${2:-1}"
+GRADED_DECAY="${3:-}"     # empty = flat encoder_top scheme
 MODE="${1:-full}"
 if [ "$MODE" = "short" ]; then
     uv run --frozen python -m src.run_relevance_text --unfreeze-top-n "$UNFREEZE_TOP_N" --epochs 1 --max-steps 200 \
-        --tensorboard-dir "$TB_LOG_DIR"
+        ${GRADED_DECAY:+--graded-decay "$GRADED_DECAY"} --tensorboard-dir "$TB_LOG_DIR"
 else
     uv run --frozen python -m src.run_relevance_text --unfreeze-top-n "$UNFREEZE_TOP_N" --epochs 7 \
-        --tensorboard-dir "$TB_LOG_DIR"
+        ${GRADED_DECAY:+--graded-decay "$GRADED_DECAY"} --tensorboard-dir "$TB_LOG_DIR"
 fi
