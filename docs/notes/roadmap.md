@@ -64,6 +64,27 @@ with a pre-registered promotion rule (below).
      abstract register (a mild channel shift — slice any 2025+ eval by era).
      Corpus state after assembly: `api_corpus/` parquet now spans 1960–2025
      (66 files); the 1870–1959 skeleton is raw-checkpoint-only by design.
+   - **Full-span audit (2026-07-28) + the provenance caveat.** Extended the
+     audit backward: `lead_paragraph` is ~100% EMPTY for 1960–63, 1965–69,
+     1980 (1964 is an island of coverage), healthy 1970–79 and 1981–2024 —
+     i.e. the training corpus has three lead-free eras the models silently
+     trained through (headline-only text). Pre-1960 skeleton decades:
+     lead ~0% everywhere; abstract 48–80% (rising to ~80% by the 1930s).
+     **Provenance caveat (operator, 2026-07-28): modern abstracts are
+     contemporaneous editorial text (2025 coalesce is sound); HISTORICAL
+     Archive-API abstracts are NYT-Index-register entries** — verified by
+     sampling: telegraphic, abbreviated ("Apptd Consul Gen in Miami", "MTA
+     repts…(S)") vs full-prose ledes. Coalescing historical rows is a real
+     channel change, to be adopted deliberately or not at all — NOT bundled
+     silently with any re-embed (esp. not the encoder-tune re-embed; two
+     simultaneous channel changes destroy attribution).
+     **Pre-registered validation experiment** (before any historical
+     coalesce): on 1970s rows where BOTH exist, score identical articles
+     under headline+lead vs headline+abstract channels with the current
+     heads; compare score distributions + gold-slice metrics. If the
+     Index register materially shifts scores, historical expansion needs
+     either register-normalization, abstract-inclusive training, or the
+     temporal-signal work — a strategy call for the backward arc.
    - **General principle (same date): expect the data to shift under us across
      the 175-year corpus.** Known instances so far: the API desk/section signal
      cutover (~1981 — `news_desk` is `"None"` and `section_name` is
