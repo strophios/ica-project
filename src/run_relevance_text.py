@@ -79,6 +79,48 @@ def with_rel_label(df: pl.DataFrame, group_name: str) -> pl.DataFrame:
     )
 
 
+def resolve_tensorboard_dir(
+    tensorboard_dir: str | None, tensorboard: bool, timestamp: str
+) -> str | None:
+    """Pure: resolve the TensorBoard log dir from the two CLI knobs.
+
+    Precedence: an explicit `tensorboard_dir` always wins. Otherwise,
+    `tensorboard=True` defaults to a timestamped path under
+    `RELEVANCE_DIR/tb_logs/`. `tensorboard=False` with no explicit dir means
+    off (returns None). `timestamp` is caller-supplied (the imperative shell
+    computes it via `datetime.datetime.now(datetime.timezone.utc)`) so this
+    function has no non-deterministic inputs of its own.
+    """
+    if tensorboard_dir is not None:
+        return tensorboard_dir
+    if tensorboard:
+        return str(RELEVANCE_DIR / "tb_logs" / timestamp)
+    return None
+
+
+def build_fit_callbacks(metrics_csv_path, tensorboard_log_dir=None):
+    """Assemble the `fit()` callback list.
+
+    Deterministic given its inputs: CSVLogger + EarlyStopping are always
+    present; a `keras.callbacks.TensorBoard` is appended iff
+    `tensorboard_log_dir` is not None. Constructing these callback objects
+    has no side effects (no file/dir is touched until `fit()` calls
+    `on_train_begin`), which is what makes this testable without invoking
+    `fit`.
+    """
+    callbacks_list = [
+        keras.callbacks.CSVLogger(str(metrics_csv_path)),
+        keras.callbacks.EarlyStopping(
+            monitor="val_loss", patience=2, start_from_epoch=2, verbose=1
+        ),
+    ]
+    if tensorboard_log_dir is not None:
+        callbacks_list.append(
+            keras.callbacks.TensorBoard(log_dir=str(tensorboard_log_dir), update_freq="epoch")
+        )
+    return callbacks_list
+
+
 def _default_rel_text_config(epochs: int = 7) -> cca_config.RunConfig:
     """DEFAULT_CCA_CONFIG with the head renamed to "rel" (source column
     "rel_label", the synthetic PNU-convention column -- NOT "cca_label", the
@@ -104,7 +146,7 @@ DEFAULT_REL_TEXT_CONFIG = _default_rel_text_config()
 # ---------------------------------------------------------------------------
 # Imperative shell
 # ---------------------------------------------------------------------------
-def main(run_config=None, max_steps=None, batch_size=256):
+def main(run_config=None, max_steps=None, batch_size=256, tensorboard_dir=None):
     """
     Train the relevance head in text mode, with optional encoder unfreezing.
 
@@ -120,6 +162,15 @@ def main(run_config=None, max_steps=None, batch_size=256):
             tf.data cache under RELEVANCE_SET_DIR (built at row granularity,
             batched downstream) -- safe to shrink for memory-constrained runs
             (e.g. local MPS) without invalidating an existing cache.
+        tensorboard_dir: Optional path (str). If not None, appends a
+            `keras.callbacks.TensorBoard(log_dir=tensorboard_dir,
+            update_freq="epoch")` to the fit callbacks -- everything logged
+            (per-step diagnostic trackers, the loss tracker) already rides
+            Keras's metrics path (see module docstring / CLAUDE.md), so this
+            is the only wiring TensorBoard needs. Default None = off. The
+            `__main__` CLI resolves this from `--tensorboard-dir` /
+            `--tensorboard` via `resolve_tensorboard_dir`; callers invoking
+            `main()` directly pass the final path themselves.
     """
     keras.config.set_dtype_policy(config.DTYPE_POLICY)
     keras.utils.set_random_seed(200)
@@ -296,12 +347,11 @@ def main(run_config=None, max_steps=None, batch_size=256):
     # -------------------------------------------------------------------------
     RELEVANCE_DIR.mkdir(parents=True, exist_ok=True)
     stamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-    callbacks_list = [
-        keras.callbacks.CSVLogger(str(RELEVANCE_DIR / f"{stamp}_text_metrics.csv")),
-        keras.callbacks.EarlyStopping(
-            monitor="val_loss", patience=2, start_from_epoch=2, verbose=1
-        ),
-    ]
+    if tensorboard_dir is not None:
+        print(f"TensorBoard log dir: {tensorboard_dir}")  # LOG (operators need this for rsync/tunnel)
+    callbacks_list = build_fit_callbacks(
+        RELEVANCE_DIR / f"{stamp}_text_metrics.csv", tensorboard_log_dir=tensorboard_dir
+    )
 
     history = rel_model.fit(
         training_set,
@@ -352,6 +402,11 @@ if __name__ == "__main__":
     ap.add_argument("--epochs", type=int, default=7)
     ap.add_argument("--max-steps", type=int, default=None)
     ap.add_argument("--batch-size", type=int, default=256)
+    ap.add_argument("--tensorboard-dir", type=str, default=None,
+                     help="explicit TensorBoard log dir (wins over --tensorboard)")
+    ap.add_argument("--tensorboard", action="store_true",
+                     help="enable TensorBoard logging to a timestamped dir under "
+                          "RELEVANCE_DIR/tb_logs/ (ignored if --tensorboard-dir is set)")
     args = ap.parse_args()
 
     cfg = dataclasses.replace(
@@ -360,4 +415,11 @@ if __name__ == "__main__":
         unfreeze_top_n=args.unfreeze_top_n,
         freeze_encoder=(args.unfreeze_top_n == 0),
     )
-    main(run_config=cfg, max_steps=args.max_steps, batch_size=args.batch_size)
+    tb_timestamp = datetime.datetime.now(datetime.timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    tensorboard_dir = resolve_tensorboard_dir(args.tensorboard_dir, args.tensorboard, tb_timestamp)
+    main(
+        run_config=cfg,
+        max_steps=args.max_steps,
+        batch_size=args.batch_size,
+        tensorboard_dir=tensorboard_dir,
+    )

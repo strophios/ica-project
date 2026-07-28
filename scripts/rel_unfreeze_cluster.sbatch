@@ -42,13 +42,26 @@ export ICA_ENV=cluster                            # force cluster config
 #   uv run python -m src.build_relevance_text_table
 # This job assumes relevance/relevance_text_table.parquet already exists.
 
+# --- TensorBoard (OPERATOR-ADJUSTABLE) -------------------------------------
+# Points at a job-id-scoped dir under the cluster relevance artifacts area
+# (config.RELEVANCE_DIR == /projects/ahd/relevance on-cluster) so concurrent
+# jobs don't collide. Event files are append-only and safe to rsync mid-run:
+#   rsync -avz <cluster>:/projects/ahd/relevance/tb_logs/<job_id>/ ./tb_local/
+#   uvx tensorboard --logdir ./tb_local
+# Or view directly on the cluster: ssh -L 6006:localhost:6006 <login-node>,
+# then on the login node: uvx tensorboard --logdir <TB_LOG_DIR> --port 6006.
+TB_LOG_DIR="/projects/ahd/relevance/tb_logs/${SLURM_JOB_ID:-manual}"
+# ----------------------------------------------------------------------------
+
 # Mode is chosen by the submit command:
 #   sbatch scripts/rel_unfreeze_cluster.sbatch short   -> short calibration run
 #   sbatch scripts/rel_unfreeze_cluster.sbatch full    -> full rel-first run
 UNFREEZE_TOP_N="${2:-1}"
 MODE="${1:-full}"
 if [ "$MODE" = "short" ]; then
-    python -m src.run_relevance_text --unfreeze-top-n "$UNFREEZE_TOP_N" --epochs 1 --max-steps 200
+    python -m src.run_relevance_text --unfreeze-top-n "$UNFREEZE_TOP_N" --epochs 1 --max-steps 200 \
+        --tensorboard-dir "$TB_LOG_DIR"
 else
-    python -m src.run_relevance_text --unfreeze-top-n "$UNFREEZE_TOP_N" --epochs 7
+    python -m src.run_relevance_text --unfreeze-top-n "$UNFREEZE_TOP_N" --epochs 7 \
+        --tensorboard-dir "$TB_LOG_DIR"
 fi

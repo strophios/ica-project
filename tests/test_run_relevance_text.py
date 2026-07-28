@@ -18,11 +18,16 @@ import polars as pl
 import pytest
 import tensorflow as tf
 
+import keras
+
 from src.data_setup.data import dataset_create
 from src.preproc.preprocessor import ClassifierPreprocessor
 from src.run_relevance_text import (
     DEFAULT_REL_TEXT_CONFIG,
+    RELEVANCE_DIR,
     _default_rel_text_config,
+    build_fit_callbacks,
+    resolve_tensorboard_dir,
     with_rel_label,
 )
 
@@ -116,6 +121,61 @@ class TestDefaultRelTextConfig:
         # Unrelated fields unaffected.
         assert cfg.heads[0].name == "rel"
         assert cfg.heads[0].loss.prior == 0.05
+
+
+# ---------------------------------------------------------------------------
+# resolve_tensorboard_dir (pure)
+# ---------------------------------------------------------------------------
+class TestResolveTensorboardDir:
+    def test_off_by_default(self):
+        assert resolve_tensorboard_dir(None, False, "20260101T000000Z") is None
+
+    def test_explicit_dir_wins_when_tensorboard_flag_also_set(self):
+        result = resolve_tensorboard_dir("/some/explicit/dir", True, "20260101T000000Z")
+        assert result == "/some/explicit/dir"
+
+    def test_explicit_dir_wins_when_tensorboard_flag_off(self):
+        result = resolve_tensorboard_dir("/some/explicit/dir", False, "20260101T000000Z")
+        assert result == "/some/explicit/dir"
+
+    def test_tensorboard_flag_defaults_timestamped_path_under_relevance_dir(self):
+        result = resolve_tensorboard_dir(None, True, "20260101T000000Z")
+        assert result == str(RELEVANCE_DIR / "tb_logs" / "20260101T000000Z")
+
+    def test_does_not_compute_its_own_timestamp(self):
+        """Pure: passing a different timestamp changes the output deterministically
+        (no hidden datetime.now() call inside the function)."""
+        first = resolve_tensorboard_dir(None, True, "aaa")
+        second = resolve_tensorboard_dir(None, True, "bbb")
+        assert first != second
+        assert first.endswith("aaa")
+        assert second.endswith("bbb")
+
+
+# ---------------------------------------------------------------------------
+# build_fit_callbacks
+# ---------------------------------------------------------------------------
+class TestBuildFitCallbacks:
+    def test_tensorboard_absent_when_dir_is_none(self, tmp_path):
+        callbacks_list = build_fit_callbacks(tmp_path / "metrics.csv", tensorboard_log_dir=None)
+        assert not any(isinstance(cb, keras.callbacks.TensorBoard) for cb in callbacks_list)
+
+    def test_tensorboard_present_when_dir_given(self, tmp_path):
+        callbacks_list = build_fit_callbacks(
+            tmp_path / "metrics.csv", tensorboard_log_dir=str(tmp_path / "tb")
+        )
+        tb_callbacks = [cb for cb in callbacks_list if isinstance(cb, keras.callbacks.TensorBoard)]
+        assert len(tb_callbacks) == 1
+        assert tb_callbacks[0].log_dir == str(tmp_path / "tb")
+
+    def test_csv_logger_and_early_stopping_always_present(self, tmp_path):
+        callbacks_list = build_fit_callbacks(tmp_path / "metrics.csv", tensorboard_log_dir=None)
+        assert any(isinstance(cb, keras.callbacks.CSVLogger) for cb in callbacks_list)
+        assert any(isinstance(cb, keras.callbacks.EarlyStopping) for cb in callbacks_list)
+
+    def test_returns_list(self, tmp_path):
+        callbacks_list = build_fit_callbacks(tmp_path / "metrics.csv", tensorboard_log_dir=None)
+        assert isinstance(callbacks_list, list)
 
 
 # ---------------------------------------------------------------------------
