@@ -30,11 +30,15 @@ set -euo pipefail
 # --------------------------------------------------------------------------
 
 # --- Cluster module / env setup (OPERATOR-SUPPLIED) -----------------------
-# module load <PLACEHOLDER_CUDA_MODULE>
-# module load <PLACEHOLDER_PYTHON_MODULE>
+# NO CUDA module: tensorflow[and-cuda] bundles the CUDA runtime as pip
+# wheels (site-packages/nvidia/*); only the node's NVIDIA driver is needed.
+# Loading a CUDA module can SHADOW the bundled libs via LD_LIBRARY_PATH and
+# cause version-mismatch errors. If GPUs come back empty, diagnose with
+# `nvidia-smi` inside the job (driver/allocation), not a module load.
+module load use.own uv
 # ------------------------------------------------------------------------
 
-cd "/projects/ahd/<PLACEHOLDER_REPO_PATH>"        # repo root on the cluster
+cd "/projects/ahd/ica-project"        # repo root on the cluster
 export ICA_ENV=cluster                            # force cluster config
 # No venv activation -- project convention is `uv run` (see CLAUDE.md).
 # `uv sync --frozen` must have been run ONCE on the login node beforehand;
