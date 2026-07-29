@@ -100,11 +100,23 @@ def provenance_record(
     n_included: int,
     sample_n: int,
     full: bool,
+    backbone_weights_override: Path | None = None,
 ) -> dict:
     """Provenance for a cache run: what produced these embeddings.
 
     Records the source weights' mtime+size so a stale/swapped backbone is
     detectable. `stamp` is passed in (not read from the clock) for reproducibility.
+
+    `backbone_weights` is the backbone ACTUALLY used to produce this cache's
+    CLS vectors (the US sidecar's own `backbone_weights_path` by default, or
+    `--backbone-weights`'s value when given -- e.g. a fine-tuned backbone from
+    `extract_tuned_backbone.py`) -- this field's meaning ("what produced these
+    embeddings") is unchanged; only the concrete value can now differ from the
+    US sidecar's recorded path. `backbone_weights_override` is purely additive:
+    `None` when no override was passed (the default, unchanged-behavior case),
+    else a stat of the override path -- an explicit, auditable record that a
+    non-default backbone was requested, independent of what `backbone_weights`
+    resolved to.
     """
     def _stat(p: Path) -> dict:
         return {"path": str(p), "exists": p.exists(),
@@ -113,6 +125,11 @@ def provenance_record(
 
     return {
         "backbone_weights": _stat(Path(backbone_weights)),
+        "backbone_weights_override": (
+            _stat(Path(backbone_weights_override))
+            if backbone_weights_override is not None
+            else None
+        ),
         "us_weights": _stat(Path(us_weights)),
         "seq_length": seq_length,
         "text_channel": text_channel,
@@ -186,16 +203,30 @@ def load_cache(cache_dir: Path) -> tuple[pl.DataFrame, np.ndarray]:
 # ---------------------------------------------------------------------------
 # Imperative shell
 # ---------------------------------------------------------------------------
-def _build_embed_model(us_weights: Path):
+def _build_embed_model(us_weights: Path, backbone_weights: Path | str | None = None):
     """Build a dual-output model {cls, us_logit} on the weighted DAPT backbone + US head.
 
     Mirrors slice_eval.apply_us_model's Pattern-2 construction (load UsRunConfig
     sidecar, fresh head, build_inference_model, load_weights) but taps the CLS
-    vector and emits the RAW US logit (no calibrator). Returns (model, us_cfg).
+    vector and emits the RAW US logit (no calibrator).
+
+    `backbone_weights`: optional override for which backbone checkpoint to load
+    (e.g. a fine-tuned backbone from `extract_tuned_backbone.py`, for the
+    rel-first encoder-unfreeze re-embed step -- see
+    `docs/notes/encoder-unfreeze-strategy.md`). Default `None` uses the US
+    sidecar's own `backbone_weights_path`, unchanged from prior behavior. The
+    US head's weights are always loaded from `us_weights` regardless -- only
+    the encoder producing the CLS vector / us_logit input changes.
+
+    Returns `(model, us_cfg, backbone_path)` -- `backbone_path` is the
+    resolved path actually loaded, for provenance.
     """
     us_cfg = UsRunConfig.from_json(config_path_for_weights(us_weights))
     us_head = ClassificationHead(hidden_dim=us_cfg.head.hidden_dim, name=us_cfg.head.name)
-    backbone = load_dapt_backbone(us_cfg.backbone_weights_path)
+    backbone_path = (
+        Path(backbone_weights) if backbone_weights is not None else Path(us_cfg.backbone_weights_path)
+    )
+    backbone = load_dapt_backbone(backbone_path)
     us_cfg.validate_against_backbone(backbone)
     # Build + load weights via the inference model (populates backbone + head).
     inf = build_inference_model(
@@ -212,7 +243,7 @@ def _build_embed_model(us_weights: Path):
         inputs={"token_ids": tok, "padding_mask": pad},
         outputs={"cls": cls, "us": us_logit},
     )
-    return model, us_cfg
+    return model, us_cfg, backbone_path
 
 
 def main(
@@ -232,6 +263,7 @@ def main(
     include_year=True,
     limit=None,
     source_pattern=None,
+    backbone_weights=None,
 ):
     keras.config.set_dtype_policy(config.DTYPE_POLICY)
     keras.utils.set_random_seed(200)
@@ -293,7 +325,9 @@ def main(
     print(f"Embedding {selected.height} articles "
           f"(included={n_included}, sample_n={sample_n}, full={full})")  # LOG
 
-    model, us_cfg = _build_embed_model(config.US_FILTER_CLASSIFIER_WEIGHTS)
+    model, us_cfg, backbone_path = _build_embed_model(
+        config.US_FILTER_CLASSIFIER_WEIGHTS, backbone_weights=backbone_weights
+    )
     preproc = ClassifierPreprocessor(
         SEQ_LENGTH=us_cfg.seq_length, text_key=us_cfg.text_key,
         label_keys={}, endpoint_model=True, target_dtype=us_cfg.target_dtype,
@@ -329,10 +363,11 @@ def main(
               f"{us_logit.min():.2f}/{us_logit.mean():.2f}/{us_logit.max():.2f}")  # LOG
 
     prov = provenance_record(
-        backbone_weights=Path(us_cfg.backbone_weights_path),
+        backbone_weights=backbone_path,
         us_weights=config.US_FILTER_CLASSIFIER_WEIGHTS,
         seq_length=us_cfg.seq_length, text_channel=us_cfg.text_key,
         stamp=stamp, n_rows=n, n_included=n_included, sample_n=sample_n, full=full,
+        backbone_weights_override=Path(backbone_weights) if backbone_weights is not None else None,
     )
     prov["years"] = list(years) if years is not None else None
     prov["shard_offset"] = shard_offset
@@ -344,7 +379,9 @@ def main(
     print(f"Wrote {n_shards} shards (offset {shard_offset}, {n} rows) to {cache_dir}")  # LOG
 
 
-if __name__ == "__main__":
+def build_arg_parser() -> argparse.ArgumentParser:
+    """Construct the CLI parser (split out from `__main__` so tests can check
+    flag defaults without invoking `main()`'s model-loading side effects)."""
     ap = argparse.ArgumentParser(description="Embed the API corpus (CLS + US logit).")
     ap.add_argument("--include-ids", default=None,
                     help="parquet with an `id` column to force-include (e.g. DoCA positives)")
@@ -375,7 +412,15 @@ if __name__ == "__main__":
     ap.add_argument("--source-pattern", default=None,
                     help="exact parquet path under the data root (overrides --corpus "
                          "glob; e.g. us_filter/ldc_labeled.parquet)")
-    args = ap.parse_args()
+    ap.add_argument("--backbone-weights", default=None,
+                    help="backbone .weights.h5 to load instead of the US sidecar's own "
+                         "backbone_weights_path (e.g. a fine-tuned backbone from "
+                         "extract_tuned_backbone.py). Default: unchanged prior behavior.")
+    return ap
+
+
+if __name__ == "__main__":
+    args = build_arg_parser().parse_args()
     years = None
     if args.years is not None:
         lo, hi = args.years.split("-")
@@ -389,4 +434,5 @@ if __name__ == "__main__":
         lead_column=args.lead_column, label_column=args.label_column,
         include_year=args.include_year, limit=args.limit,
         source_pattern=args.source_pattern,
+        backbone_weights=args.backbone_weights,
     )

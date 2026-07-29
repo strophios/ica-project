@@ -11,10 +11,12 @@ import polars as pl
 import pytest
 
 from src.embed_corpus import (
+    build_arg_parser,
     stratified_sample_by_year,
     select_articles,
     write_shard,
     load_cache,
+    provenance_record,
 )
 
 
@@ -90,3 +92,76 @@ def test_write_shard_rejects_misaligned():
     meta = pl.DataFrame({"id": ["a"], "year": ["1965"], "us_logit": [0.0]})
     with pytest.raises(ValueError, match="cls rows"):
         write_shard(__import__("pathlib").Path("/tmp"), 0, cls, meta)
+
+
+# ---------------------------------------------------------------------------
+# provenance_record: backbone_weights_override (additive field)
+# ---------------------------------------------------------------------------
+def test_provenance_record_override_absent_is_null(tmp_path):
+    backbone = tmp_path / "dapt_backbone.weights.h5"
+    backbone.write_bytes(b"x")
+    us_weights = tmp_path / "us_classifier.weights.h5"
+    us_weights.write_bytes(b"y")
+
+    prov = provenance_record(
+        backbone_weights=backbone, us_weights=us_weights, seq_length=128,
+        text_channel="headline_with_lead", stamp="20260729",
+        n_rows=10, n_included=2, sample_n=8, full=False,
+    )
+    assert prov["backbone_weights_override"] is None
+    # existing field's meaning is preserved: stat of the backbone actually used.
+    assert prov["backbone_weights"]["path"] == str(backbone)
+    assert prov["backbone_weights"]["exists"] is True
+
+
+def test_provenance_record_override_present_is_recorded(tmp_path):
+    default_backbone = tmp_path / "dapt_backbone.weights.h5"
+    default_backbone.write_bytes(b"x")
+    tuned_backbone = tmp_path / "tuned_backbone.job8823087.weights.h5"
+    tuned_backbone.write_bytes(b"tuned")
+    us_weights = tmp_path / "us_classifier.weights.h5"
+    us_weights.write_bytes(b"y")
+
+    prov = provenance_record(
+        backbone_weights=tuned_backbone,  # the ACTUAL backbone used
+        us_weights=us_weights, seq_length=128, text_channel="headline_with_lead",
+        stamp="20260729", n_rows=10, n_included=2, sample_n=8, full=False,
+        backbone_weights_override=tuned_backbone,
+    )
+    assert prov["backbone_weights"]["path"] == str(tuned_backbone)
+    assert prov["backbone_weights_override"]["path"] == str(tuned_backbone)
+    assert prov["backbone_weights_override"]["exists"] is True
+    assert prov["backbone_weights_override"]["size"] == len(b"tuned")
+
+
+def test_provenance_record_override_missing_file_still_recorded(tmp_path):
+    # A typo'd override path shouldn't crash provenance -- it should surface
+    # as exists=False so the run is auditable even if something else fails.
+    missing = tmp_path / "does_not_exist.weights.h5"
+    us_weights = tmp_path / "us_classifier.weights.h5"
+    us_weights.write_bytes(b"y")
+
+    prov = provenance_record(
+        backbone_weights=missing, us_weights=us_weights, seq_length=128,
+        text_channel="headline_with_lead", stamp="20260729",
+        n_rows=10, n_included=2, sample_n=8, full=False,
+        backbone_weights_override=missing,
+    )
+    assert prov["backbone_weights_override"]["exists"] is False
+    assert prov["backbone_weights_override"]["size"] is None
+
+
+# ---------------------------------------------------------------------------
+# CLI: --backbone-weights default
+# ---------------------------------------------------------------------------
+def test_backbone_weights_flag_defaults_to_none():
+    args = build_arg_parser().parse_args(["--stamp", "20260729", "--out-suffix", "test"])
+    assert args.backbone_weights is None
+
+
+def test_backbone_weights_flag_accepts_a_path():
+    args = build_arg_parser().parse_args([
+        "--stamp", "20260729", "--out-suffix", "test",
+        "--backbone-weights", "relevance/tuned_backbone.job8823087.weights.h5",
+    ])
+    assert args.backbone_weights == "relevance/tuned_backbone.job8823087.weights.h5"
