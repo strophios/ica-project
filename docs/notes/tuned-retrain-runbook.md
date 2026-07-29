@@ -10,6 +10,15 @@ calibrator below already has (or now has, per the accompanying diff) the knobs
 this runbook uses; see the "What changed" section at the bottom for the diff
 summary and the "Gaps" section for what's explicitly NOT fixed here.*
 
+
+> **PATH CAVEAT (learned the hard way, 2026-07-29):** the `--out`/`--weights`
+> arguments are resolved against the CURRENT WORKING DIRECTORY, and per project
+> convention all commands run from the REPO ROOT — but the artifacts live at
+> the DATA root one level up. All commands below therefore use `../`-prefixed
+> paths (on the cluster: `/projects/ahd/...` absolute). The first execution of
+> this runbook lost three completed trainings to bare `us_filter/...`-style
+> paths failing at save time.
+
 ## Naming convention used throughout
 
 | Artifact | Production path | Tuned path (this runbook's convention) |
@@ -50,8 +59,8 @@ below).
 ```
 uv run python -m src.run_us_features \
     --suffix us_train_ldc_tuned \
-    --out us_filter/us_classifier_full_tuned.weights.h5 \
-    --backbone-weights relevance/tuned_backbone.<jobtag>.weights.h5
+    --out ../us_filter/us_classifier_full_tuned.weights.h5 \
+    --backbone-weights ../relevance/tuned_backbone.<jobtag>.weights.h5
 ```
 
 ## Step 2 — retrain CCA (tuned cache)
@@ -65,8 +74,8 @@ reuse it, so the comparison isolates the encoder change from a prior change.
 uv run python -m src.run_cca_doca \
     --prior <production prior> \
     --suffix train250k_tuned \
-    --out cca_doca/cca_doca_tuned.weights.h5 \
-    --us-weights us_filter/us_classifier_full_tuned.weights.h5
+    --out ../cca_doca/cca_doca_tuned.weights.h5 \
+    --us-weights ../us_filter/us_classifier_full_tuned.weights.h5
 ```
 
 `--us-weights` re-scores the US-restriction gate against the just-retrained
@@ -83,7 +92,7 @@ varying just the CCA head.
 uv run python -m src.run_relevance \
     --prior <production prior> \
     --suffix relevance_train_tuned \
-    --out relevance/relevance_tuned.weights.h5
+    --out ../relevance/relevance_tuned.weights.h5
 ```
 
 **Gap (not fixed here):** `run_relevance.py` has no `--us-weights` rescore
@@ -113,9 +122,9 @@ parameterized (`--suffix`, `--weights`), no changes needed.
 
 ```
 uv run python -m src.validation.run_cca_eval \
-    --suffix train250k_tuned --weights cca_doca/cca_doca_tuned.weights.h5
+    --suffix train250k_tuned --weights ../cca_doca/cca_doca_tuned.weights.h5
 uv run python -m src.validation.run_cca_eval \
-    --suffix train250k --weights cca_doca/cca_doca.weights.h5   # production baseline, for the same-session comparison
+    --suffix train250k --weights ../cca_doca/cca_doca.weights.h5   # production baseline, for the same-session comparison
 ```
 
 **All three heads, own-terms:** `scripts/eval_heads_own_terms.py` — extended
@@ -126,11 +135,11 @@ you'll overwrite the production comparison file).
 
 ```
 uv run python -m scripts.eval_heads_own_terms \
-    --cca-weights cca_doca/cca_doca_tuned.weights.h5 \
-    --rel-weights relevance/relevance_tuned.weights.h5 \
-    --us-weights us_filter/us_classifier_full_tuned.weights.h5 \
+    --cca-weights ../cca_doca/cca_doca_tuned.weights.h5 \
+    --rel-weights ../relevance/relevance_tuned.weights.h5 \
+    --us-weights ../us_filter/us_classifier_full_tuned.weights.h5 \
     --cache-suffix relevance_train_tuned \
-    --out cca_doca/experiments/eval_heads_own_terms_tuned.json
+    --out ../cca_doca/experiments/eval_heads_own_terms_tuned.json
 ```
 
 Note `--cache-suffix` here must be a cache that has ALL of headline,
@@ -160,11 +169,11 @@ automatically correct for whichever cache's CLS you pass in.
 
 ```
 uv run python -m src.calibrate_us_filter \
-    --suffix us_train_ldc_tuned --out us_filter/us_classifier_full_tuned.weights.h5
+    --suffix us_train_ldc_tuned --out ../us_filter/us_classifier_full_tuned.weights.h5
 uv run python -m src.calibrate_cca \
-    --suffix train250k_tuned --weights cca_doca/cca_doca_tuned.weights.h5
+    --suffix train250k_tuned --weights ../cca_doca/cca_doca_tuned.weights.h5
 uv run python -m src.calibrate_relevance \
-    --suffix relevance_train_tuned --out relevance/relevance_tuned.weights.h5
+    --suffix relevance_train_tuned --out ../relevance/relevance_tuned.weights.h5
 ```
 
 Each writes its `.calibration.json` next to the given weights path
@@ -234,9 +243,9 @@ from src.embed_corpus import load_cache
 import src.config as config
 
 model = IcaModel(
-    us_weights_path="us_filter/us_classifier_full_tuned.weights.h5",
-    cca_weights_path="cca_doca/cca_doca_tuned.weights.h5",
-    rel_weights_path="relevance/relevance_tuned.weights.h5",
+    us_weights_path="../us_filter/us_classifier_full_tuned.weights.h5",
+    cca_weights_path="../cca_doca/cca_doca_tuned.weights.h5",
+    rel_weights_path="../relevance/relevance_tuned.weights.h5",
     fusion_path="cca_doca/ica_fusion_tuned.fusion.json",  # from Step 6, once fixed;
                                                             # or omit for the partial
                                                             # comparison (production fusion)
