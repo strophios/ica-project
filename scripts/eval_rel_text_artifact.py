@@ -188,7 +188,12 @@ def score_text_model(eval_df: pl.DataFrame, weights_path: Path) -> np.ndarray:
     run_config = cca_config.RunConfig.from_json(cca_config.config_path_for_weights(weights_path))
     head_cfg = run_config.heads[0]
 
-    backbone = load_dapt_backbone(run_config.backbone_weights_path)
+    # Backbone path comes from the PLATFORM-RESOLVED config constant, NOT the
+    # artifact's sidecar: sidecars written on the cluster record the cluster's
+    # absolute path (/projects/ahd/...), which doesn't exist locally. The DAPT
+    # backbone is the same frozen artifact on every platform -- the sidecar's
+    # value is provenance, not a load instruction.
+    backbone = load_dapt_backbone(config.DAPT_BACKBONE_WEIGHTS)
     run_config.validate_against_backbone(backbone)
 
     head = ClassificationHead(hidden_dim=head_cfg.hidden_dim, name=head_cfg.name)
