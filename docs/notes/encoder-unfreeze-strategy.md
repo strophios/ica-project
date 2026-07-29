@@ -115,6 +115,28 @@ bottleneck); or the rel-first run showing the encoder needs more signal than
 one head provides (e.g., rel gains but immediately overfits its 17k positives —
 the case where CCA's 15k DoCA positives as a sibling signal would regularize).
 
+## Execution findings (added as the arc ran)
+
+- **2026-07-28/29, the η=0 collapse and its resolution:** text-mode unfreezing
+  at the canonical rel config (η=0, π=0.05) collapsed into the nnPU
+  all-positive basin (job 8808071); η=0.25 stabilized but taxed ranking
+  (echoing the historical η-sweep); DEDPUL re-estimation gave π̂=0.02, and
+  **η=0 at π̂ trains cleanly and wins on gold** (job 8823087: own-terms 0.833,
+  vs-ICA 0.854 vs frozen 0.782, diaspora recall 0.662 vs 0.382 @ 0.30 review
+  rate). The wrong prior was the dominant collapse cause; unfrozen capacity
+  was the amplifier. Full mechanism + solution-space taxonomy: session notes
+  2026-07-29 / `us-head-retrain-plan.md` addendum's sibling finding.
+- **Multiplier-freezing is not `trainable=False` (2026-07-29):** AdamW's
+  decoupled weight decay applies to every trainable variable *regardless of
+  the gradient multiplier*, so zero-multiplier "frozen" layers drift by
+  lr·wd·var each step — measured ~2.3e-3 max-abs over 5 epochs vs 1.19e-1 for
+  the deliberately-tuned layer (~40× separation; benign here, compounds on
+  longer runs). If exact freezing ever matters (e.g., cache-reuse arguments
+  that assume lower layers are bit-identical), either set
+  `layer.trainable=False` for permanently-frozen blocks or exclude
+  zero-multiplier groups from weight decay. Recorded empirically by
+  `src/extract_tuned_backbone.py`'s layer-diff verification.
+
 ## Sources
 
 Kurin et al. 2022 arXiv:2201.04122; Xin et al. 2022 arXiv:2209.11379; Shi et
