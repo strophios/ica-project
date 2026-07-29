@@ -143,8 +143,8 @@ def _default_rel_text_config(epochs: int = 7) -> cca_config.RunConfig:
 DEFAULT_REL_TEXT_CONFIG = _default_rel_text_config()
 
 
-def apply_cli_overrides(cfg, eta=None, peak_lr=None):
-    """Pure: apply the --eta / --peak-lr CLI overrides to a run config.
+def apply_cli_overrides(cfg, eta=None, peak_lr=None, prior=None):
+    """Pure: apply the --eta / --peak-lr / --prior CLI overrides to a run config.
 
     - `eta`: sets `nnpnu_eta` on the rel head's FLPU loss, forcing
       `kiryo_clawback=False` when eta > 0 (the loss rejects that combination:
@@ -155,12 +155,25 @@ def apply_cli_overrides(cfg, eta=None, peak_lr=None):
     - `peak_lr`: sets `lr_schedule.warmup_target`, scaling `initial_lr` to
       keep the default 10:1 peak:initial ratio. The 1e-3 default is a
       features-mode head LR; text-mode encoder fine-tuning wants ~1e-4.
+    - `prior`: sets `prior` on the rel head's FLPU loss (the default 0.05 is a
+      placeholder; `src.run_relevance_prior`'s DEDPUL re-estimate supersedes
+      it once run). Validated by `FLPULossConfig.__post_init__` (raises
+      `ValueError` for a prior outside (0, 1)) -- no separate validation here.
+
+    `eta` and `prior` both replace the head's `FLPULossConfig` via
+    `dataclasses.replace`; each block re-reads `cfg.heads[0]` so the two
+    compose regardless of which is passed (last-applied wins per-field, both
+    fields survive when both are given).
     """
     if eta is not None:
         head = cfg.heads[0]
         new_loss = dataclasses.replace(
             head.loss, nnpnu_eta=eta, kiryo_clawback=False if eta > 0 else head.loss.kiryo_clawback
         )
+        cfg = dataclasses.replace(cfg, heads=(dataclasses.replace(head, loss=new_loss),))
+    if prior is not None:
+        head = cfg.heads[0]
+        new_loss = dataclasses.replace(head.loss, prior=prior)
         cfg = dataclasses.replace(cfg, heads=(dataclasses.replace(head, loss=new_loss),))
     if peak_lr is not None:
         cfg = dataclasses.replace(
@@ -438,6 +451,9 @@ if __name__ == "__main__":
     ap.add_argument("--peak-lr", type=float, default=None,
                      help="override the LR schedule's warmup_target (peak LR); initial_lr "
                           "scales to keep the 10:1 peak:initial ratio.")
+    ap.add_argument("--prior", type=float, default=None,
+                     help="override the rel head's FLPU prior (canonical default 0.05; "
+                          "must be in (0, 1), validated by FLPULossConfig).")
     ap.add_argument("--epochs", type=int, default=7)
     ap.add_argument("--max-steps", type=int, default=None)
     ap.add_argument("--batch-size", type=int, default=256)
@@ -464,7 +480,7 @@ if __name__ == "__main__":
             else DEFAULT_REL_TEXT_CONFIG.layer_multipliers
         ),
     )
-    cfg = apply_cli_overrides(cfg, eta=args.eta, peak_lr=args.peak_lr)
+    cfg = apply_cli_overrides(cfg, eta=args.eta, peak_lr=args.peak_lr, prior=args.prior)
     tb_timestamp = datetime.datetime.now(datetime.timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     tensorboard_dir = resolve_tensorboard_dir(args.tensorboard_dir, args.tensorboard, tb_timestamp)
     main(

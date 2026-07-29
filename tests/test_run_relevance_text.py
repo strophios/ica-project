@@ -316,3 +316,22 @@ class TestApplyCliOverrides:
         cfg = apply_cli_overrides(DEFAULT_REL_TEXT_CONFIG, eta=0.25, peak_lr=2e-4)
         assert cfg.heads[0].loss.nnpnu_eta == 0.25
         assert cfg.lr_schedule.warmup_target == pytest.approx(2e-4)
+
+    def test_prior_sets_loss_prior(self):
+        cfg = apply_cli_overrides(DEFAULT_REL_TEXT_CONFIG, prior=0.02)
+        assert cfg.heads[0].loss.prior == pytest.approx(0.02)
+        # unrelated loss fields untouched
+        assert cfg.heads[0].loss.nnpnu_eta == DEFAULT_REL_TEXT_CONFIG.heads[0].loss.nnpnu_eta
+        assert cfg.heads[0].loss.kiryo_clawback == DEFAULT_REL_TEXT_CONFIG.heads[0].loss.kiryo_clawback
+
+    def test_prior_and_eta_compose(self):
+        cfg = apply_cli_overrides(DEFAULT_REL_TEXT_CONFIG, prior=0.02, eta=0.3)
+        assert cfg.heads[0].loss.prior == pytest.approx(0.02)
+        assert cfg.heads[0].loss.nnpnu_eta == pytest.approx(0.3)
+        assert cfg.heads[0].loss.kiryo_clawback is False
+
+    def test_invalid_prior_raises(self):
+        with pytest.raises(ValueError):
+            apply_cli_overrides(DEFAULT_REL_TEXT_CONFIG, prior=1.5)
+        with pytest.raises(ValueError):
+            apply_cli_overrides(DEFAULT_REL_TEXT_CONFIG, prior=0.0)
