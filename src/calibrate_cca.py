@@ -28,6 +28,7 @@ import keras
 import polars as pl
 
 import src.config as config
+from src.artifact_guard import check_no_production_overwrite
 from src.embed_corpus import load_cache
 from src.validation.cca_slice_eval import band_ipw_weights, restrict_label_to_form
 from src.validation.run_cca_eval import (
@@ -43,9 +44,20 @@ from src.calibration.sidecar import calibration_path_for_weights, save_calibrati
 keras.config.set_dtype_policy(config.DTYPE_POLICY)
 keras.utils.set_random_seed(200)
 
+# main()'s own --suffix default; also the "production cache" identity that
+# check_no_production_overwrite compares an explicit --suffix against.
+DEFAULT_SUFFIX = "train250k"
 
-def main(weights_path=None, suffix="train250k", coded_path=None, form_filter=None):
+
+def main(weights_path=None, suffix=DEFAULT_SUFFIX, coded_path=None, form_filter=None):
     weights_path = config.CCA_DOCA_WEIGHTS if weights_path is None else Path(weights_path)
+    check_no_production_overwrite(
+        cache_suffix=suffix,
+        production_cache_suffix=DEFAULT_SUFFIX,
+        weights_path=weights_path,
+        production_weights_path=config.CCA_DOCA_WEIGHTS,
+        artifact_label="CCA calibration",
+    )
     coded_path = (
         config.VALIDATION_DIR / "cca_coding_first500_coded.csv"
         if coded_path is None else Path(coded_path)
@@ -91,8 +103,10 @@ def main(weights_path=None, suffix="train250k", coded_path=None, form_filter=Non
 
 if __name__ == "__main__":
     ap = argparse.ArgumentParser(description="Fit IPW-weighted Platt calibration for a CCA model.")
-    ap.add_argument("--weights", default=None, help="CCA weights (default: CCA_DOCA_WEIGHTS)")
-    ap.add_argument("--suffix", default="train250k", help="embedding cache subdir")
+    ap.add_argument("--weights", default=None,
+                    help="CCA weights (default: CCA_DOCA_WEIGHTS). Must be a "
+                         "non-production path when --suffix is non-default.")
+    ap.add_argument("--suffix", default=DEFAULT_SUFFIX, help="embedding cache subdir")
     ap.add_argument("--coded", default=None, help="coded gold CSV (default: first500)")
     ap.add_argument("--form-filter", default=None,
                     choices=["any_street", "any_boycott", "any_conventional", "any_lawsuit"],

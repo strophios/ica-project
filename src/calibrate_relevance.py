@@ -26,6 +26,7 @@ import keras
 import polars as pl
 
 import src.config as config
+from src.artifact_guard import check_no_production_overwrite
 from src.data_setup.data import create_relevance_data
 from src.embed_corpus import load_cache
 from src.validation.relevance_slice_eval import apply_relevance_model
@@ -36,13 +37,24 @@ from src.calibration.sidecar import save_calibration, calibration_path_for_weigh
 keras.config.set_dtype_policy(config.DTYPE_POLICY)
 keras.utils.set_random_seed(200)
 
+# main()'s own --suffix default; also the "production cache" identity that
+# check_no_production_overwrite compares an explicit --suffix against.
+DEFAULT_SUFFIX = "relevance_train"
 
-def main(suffix="relevance_train", weights_path=None,
+
+def main(suffix=DEFAULT_SUFFIX, weights_path=None,
          fit_population="relevance_train_val_natural_balance"):
     weights_path = (
         config.RELEVANCE_DOCA_WEIGHTS
         if weights_path is None
         else Path(weights_path)
+    )
+    check_no_production_overwrite(
+        cache_suffix=suffix,
+        production_cache_suffix=DEFAULT_SUFFIX,
+        weights_path=weights_path,
+        production_weights_path=config.RELEVANCE_DOCA_WEIGHTS,
+        artifact_label="relevance calibration",
     )
 
     meta, cls = load_cache(config.CCA_EMBED_CACHE_DIR / suffix)
@@ -88,8 +100,9 @@ def main(suffix="relevance_train", weights_path=None,
 
 if __name__ == "__main__":
     ap = argparse.ArgumentParser(description="Fit + save Platt calibration for the relevance head.")
-    ap.add_argument("--suffix", default="relevance_train", help="embedding cache subdir")
+    ap.add_argument("--suffix", default=DEFAULT_SUFFIX, help="embedding cache subdir")
     ap.add_argument("--out", default=None,
-                    help="relevance weights path (default: relevance/relevance.weights.h5)")
+                    help="relevance weights path (default: relevance/relevance.weights.h5). "
+                         "Must be a non-production path when --suffix is non-default.")
     args = ap.parse_args()
     main(suffix=args.suffix, weights_path=args.out)

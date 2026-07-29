@@ -25,6 +25,7 @@ import keras
 
 import src.config as config
 import src.cca_config as cca_config
+from src.artifact_guard import check_no_production_overwrite
 from src.cca_metrics import make_cca_metrics
 from src.diagnostics.distribution_metrics import make_distribution_metrics
 import polars as pl
@@ -46,6 +47,9 @@ keras.utils.set_random_seed(200)
 
 BATCH_SIZE = 256
 SHUFFLE_BUFFER = 100_000
+# `main()`'s own --suffix default; also the "production cache" identity that
+# check_no_production_overwrite compares an explicit --suffix against.
+DEFAULT_SUFFIX = "train250k"
 
 
 def _config_with_prior(prior: float, epochs: int) -> cca_config.RunConfig:
@@ -99,9 +103,16 @@ def _rescore_us_restriction(meta, cls, us_weights_path: Path):
     return meta.with_columns(pl.Series("us_logit", cal.transform(logit)))
 
 
-def main(prior, suffix="train250k", threshold=0.0, epochs=7, max_steps=None,
+def main(prior, suffix=DEFAULT_SUFFIX, threshold=0.0, epochs=7, max_steps=None,
          holdout_ids=None, weights_path=None, form_filter=None, us_weights_path=None):
     weights_path = config.CCA_DOCA_WEIGHTS if weights_path is None else Path(weights_path)
+    check_no_production_overwrite(
+        cache_suffix=suffix,
+        production_cache_suffix=DEFAULT_SUFFIX,
+        weights_path=weights_path,
+        production_weights_path=config.CCA_DOCA_WEIGHTS,
+        artifact_label="CCA",
+    )
     run_config = _config_with_prior(prior, epochs)
     head_cfg = run_config.heads[0]
 
@@ -235,7 +246,7 @@ def main(prior, suffix="train250k", threshold=0.0, epochs=7, max_steps=None,
 if __name__ == "__main__":
     ap = argparse.ArgumentParser(description="Train CCA head (features-mode) on cached embeddings.")
     ap.add_argument("--prior", type=float, required=True, help="FLPU class prior (DEDPUL re-estimate)")
-    ap.add_argument("--suffix", default="train250k", help="embedding cache subdir")
+    ap.add_argument("--suffix", default=DEFAULT_SUFFIX, help="embedding cache subdir")
     ap.add_argument("--threshold", type=float, default=0.0, help="US logit threshold")
     ap.add_argument("--epochs", type=int, default=7)
     ap.add_argument("--max-steps", type=int, default=None)
@@ -244,7 +255,8 @@ if __name__ == "__main__":
                          "dropped from the training pool (leakage guard)")
     ap.add_argument("--out", default=None,
                     help="output weights .h5 path (default: CCA_DOCA_WEIGHTS); the "
-                         "sidecar is derived from it (per-experiment weights)")
+                         "sidecar is derived from it (per-experiment weights). Must "
+                         "be a non-production path when --suffix is non-default.")
     ap.add_argument("--form-filter", default=None,
                     choices=["any_street", "any_boycott", "any_conventional",
                              "any_lawsuit", "no_form"],

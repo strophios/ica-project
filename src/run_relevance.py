@@ -27,6 +27,7 @@ import argparse
 import dataclasses
 import datetime
 import math
+from pathlib import Path
 
 import keras
 import numpy as np
@@ -34,6 +35,7 @@ import polars as pl
 
 import src.config as config
 import src.cca_config as cca_config
+from src.artifact_guard import check_no_production_overwrite
 from src.build_cca_doca_table import label_and_restrict
 from src.cca_metrics import make_cca_metrics
 from src.data_setup.data import (
@@ -60,13 +62,21 @@ from src.run_cca_doca import (
 
 RELEVANCE_DIR = config.PROJECT_ROOT / "relevance"
 DEFAULT_WEIGHTS = RELEVANCE_DIR / "relevance.weights.h5"
+# main()'s own --suffix default; also the "production cache" identity that
+# check_no_production_overwrite compares an explicit --suffix against.
+DEFAULT_SUFFIX = "relevance_train"
 
 
-
-
-def main(prior, suffix="relevance_train", threshold=0.5, epochs=7, max_steps=None,
+def main(prior, suffix=DEFAULT_SUFFIX, threshold=0.5, epochs=7, max_steps=None,
          holdout_ids=None, weights_path=None, nnpnu_eta=0.0, neg_weight=0.15):
-    weights_path = weights_path or DEFAULT_WEIGHTS
+    weights_path = Path(weights_path) if weights_path else DEFAULT_WEIGHTS
+    check_no_production_overwrite(
+        cache_suffix=suffix,
+        production_cache_suffix=DEFAULT_SUFFIX,
+        weights_path=weights_path,
+        production_weights_path=DEFAULT_WEIGHTS,
+        artifact_label="relevance",
+    )
     run_config = _config_with_prior(prior, epochs)
     # Set the nnPNU mixing weight on the (frozen) loss config so it is recorded in
     # the run sidecar. eta=0 leaves the head as pure nnPU (CCA-identical).
@@ -227,13 +237,15 @@ def main(prior, suffix="relevance_train", threshold=0.5, epochs=7, max_steps=Non
 if __name__ == "__main__":
     ap = argparse.ArgumentParser(description="Train relevance head (features-mode).")
     ap.add_argument("--prior", type=float, required=True, help="FLPU class prior")
-    ap.add_argument("--suffix", default="relevance_train", help="embedding cache subdir")
+    ap.add_argument("--suffix", default=DEFAULT_SUFFIX, help="embedding cache subdir")
     ap.add_argument("--threshold", type=float, default=0.5, help="calibrated US prob gate")
     ap.add_argument("--epochs", type=int, default=7)
     ap.add_argument("--max-steps", type=int, default=None)
     ap.add_argument("--holdout-ids", default=None,
                     help="parquet of ids (with `id` col) to drop from the unlabeled pool")
-    ap.add_argument("--out", default=None, help="weights output path")
+    ap.add_argument("--out", default=None,
+                    help="weights output path. Must be a non-production path when "
+                         "--suffix is non-default.")
     ap.add_argument("--eta", type=float, default=0.0,
                     help="nnPNU PU<->PN mixing weight (0 = pure nnPU)")
     ap.add_argument("--neg-weight", type=float, default=0.15,

@@ -32,6 +32,7 @@ import polars as pl
 
 import src.config as config
 import src.us_config as us_config
+from src.artifact_guard import check_no_production_overwrite
 from src.us_config import config_path_for_weights
 from src.data_setup.data import create_us_filter_data, dataset_from_embeddings
 from src.embed_corpus import load_cache
@@ -48,6 +49,9 @@ keras.utils.set_random_seed(200)
 
 BATCH_SIZE = 256
 SHUFFLE_BUFFER = 100_000
+# `main()`'s own --suffix default; also the "production cache" identity that
+# check_no_production_overwrite compares an explicit --suffix against.
+DEFAULT_SUFFIX = "us_train_ldc"
 
 
 def _gather(cls: np.ndarray, group: pl.DataFrame):
@@ -58,16 +62,35 @@ def _gather(cls: np.ndarray, group: pl.DataFrame):
     return feats, labels
 
 
-def main(suffix="us_train_ldc", epochs=10, max_steps=None, weights_path=None):
+def main(suffix=DEFAULT_SUFFIX, epochs=10, max_steps=None, weights_path=None,
+         backbone_weights=None):
     weights_path = (
         config.US_FILTER_FULL_WEIGHTS
         if weights_path is None
         else Path(weights_path)
     )
+    check_no_production_overwrite(
+        cache_suffix=suffix,
+        production_cache_suffix=DEFAULT_SUFFIX,
+        weights_path=weights_path,
+        production_weights_path=config.US_FILTER_FULL_WEIGHTS,
+        artifact_label="US filter",
+    )
     # Reuse the canonical US config (LR schedule, optimizer, diagnostics) but allow
     # more epochs than the smoke run — the features-mode pass is cheap, so a real
     # train to convergence (early-stopped) is affordable.
     run_config = dataclasses.replace(us_config.DEFAULT_US_CONFIG, epochs=epochs)
+    if backbone_weights is not None:
+        # Bookkeeping only -- features-mode training never loads a backbone, but
+        # the sidecar's backbone_weights_path is read by token-mode consumers
+        # (src.validation.slice_eval.apply_us_model) to rebuild the encoder at
+        # eval time. Training on a `*_tuned` cache without recording the tuned
+        # backbone here would leave those consumers silently re-embedding text
+        # through the WRONG (production) backbone -- a features/backbone
+        # mismatch that produces incoherent scores without erroring.
+        run_config = dataclasses.replace(
+            run_config, backbone_weights_path=str(backbone_weights)
+        )
     head_cfg = run_config.head
 
     meta, cls = load_cache(config.CCA_EMBED_CACHE_DIR / suffix)
@@ -177,11 +200,19 @@ if __name__ == "__main__":
     ap = argparse.ArgumentParser(
         description="Train US filter head (features-mode) on cached embeddings."
     )
-    ap.add_argument("--suffix", default="us_train_ldc", help="embedding cache subdir")
+    ap.add_argument("--suffix", default=DEFAULT_SUFFIX, help="embedding cache subdir")
     ap.add_argument("--epochs", type=int, default=10)
     ap.add_argument("--max-steps", type=int, default=None)
     ap.add_argument("--out", default=None,
-                    help="output weights .h5 (default: us_filter/us_classifier_full.weights.h5)")
+                    help="output weights .h5 (default: us_filter/us_classifier_full.weights.h5). "
+                         "Must be a non-production path when --suffix is non-default.")
+    ap.add_argument("--backbone-weights", default=None,
+                    help="backbone weights path to record in the sidecar (bookkeeping "
+                         "only -- training itself is features-mode and never loads a "
+                         "backbone). Pass the tuned backbone's path (from "
+                         "extract_tuned_backbone.py) when --suffix selects a '_tuned' "
+                         "cache, so token-mode consumers (apply_us_model) re-embed "
+                         "through the matching backbone at eval time.")
     args = ap.parse_args()
     main(suffix=args.suffix, epochs=args.epochs, max_steps=args.max_steps,
-         weights_path=args.out)
+         weights_path=args.out, backbone_weights=args.backbone_weights)

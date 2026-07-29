@@ -27,6 +27,7 @@ import polars as pl
 
 import src.config as config
 import src.us_config as us_config
+from src.artifact_guard import check_no_production_overwrite
 from src.us_config import config_path_for_weights
 from src.data_setup.data import create_us_filter_data
 from src.embed_corpus import load_cache
@@ -39,13 +40,24 @@ from src.calibration.sidecar import save_calibration, calibration_path_for_weigh
 keras.config.set_dtype_policy(config.DTYPE_POLICY)
 keras.utils.set_random_seed(200)
 
+# main()'s own --suffix default; also the "production cache" identity that
+# check_no_production_overwrite compares an explicit --suffix against.
+DEFAULT_SUFFIX = "us_train_ldc"
 
-def main(suffix="us_train_ldc", weights_path=None,
+
+def main(suffix=DEFAULT_SUFFIX, weights_path=None,
          fit_population="ldc_labeled_val_natural_balance"):
     weights_path = (
         config.US_FILTER_FULL_WEIGHTS
         if weights_path is None
         else Path(weights_path)
+    )
+    check_no_production_overwrite(
+        cache_suffix=suffix,
+        production_cache_suffix=DEFAULT_SUFFIX,
+        weights_path=weights_path,
+        production_weights_path=config.US_FILTER_FULL_WEIGHTS,
+        artifact_label="US filter calibration",
     )
     run_config = us_config.UsRunConfig.from_json(config_path_for_weights(weights_path))
     head_cfg = run_config.head
@@ -85,8 +97,9 @@ def main(suffix="us_train_ldc", weights_path=None,
 
 if __name__ == "__main__":
     ap = argparse.ArgumentParser(description="Fit + save Platt calibration for the US filter.")
-    ap.add_argument("--suffix", default="us_train_ldc", help="embedding cache subdir")
+    ap.add_argument("--suffix", default=DEFAULT_SUFFIX, help="embedding cache subdir")
     ap.add_argument("--out", default=None,
-                    help="US filter weights path (default: us_filter/us_classifier_full.weights.h5)")
+                    help="US filter weights path (default: us_filter/us_classifier_full.weights.h5). "
+                         "Must be a non-production path when --suffix is non-default.")
     args = ap.parse_args()
     main(suffix=args.suffix, weights_path=args.out)

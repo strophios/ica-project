@@ -24,8 +24,10 @@ breaking the src.* imports)
 
 from __future__ import annotations
 
+import argparse
 import json
 from datetime import datetime, timezone
+from pathlib import Path
 
 import numpy as np
 import polars as pl
@@ -47,6 +49,13 @@ from src.validation.slice_eval import apply_us_model
 
 EVAL_CSV = config.PROJECT_ROOT / "validation" / "ica_coding_template_coded.csv"
 THRESHOLDS = [0.3, 0.5, 0.7]
+# The cache this eval joins the eval-set ids against by default -- matches
+# fit_fusion.py's Step 1 (see module docstring). A tuned comparison run passes
+# a matching `*_tuned` cache via --cache-suffix so CCA/rel features (and the
+# US head's headline/lead text, which is cache-independent) line up with the
+# tuned weights under evaluation.
+DEFAULT_CACHE_SUFFIX = "relevance_train"
+DEFAULT_OUT = config.CCA_DOCA_DIR / "experiments" / "eval_heads_own_terms.json"
 
 
 def head_metrics(p: np.ndarray, y: np.ndarray) -> dict:
@@ -75,12 +84,31 @@ def head_metrics(p: np.ndarray, y: np.ndarray) -> dict:
     }
 
 
-def main() -> dict:
+def main(
+    cca_weights: Path | str | None = None,
+    rel_weights: Path | str | None = None,
+    us_weights: Path | str | None = None,
+    cache_suffix: str = DEFAULT_CACHE_SUFFIX,
+    out_path: Path | str | None = None,
+) -> dict:
+    """Score all three heads' own-terms ROC/PR-AUC/calibration on the eval set.
+
+    Defaults reproduce the production own-terms eval byte-for-byte. Pass
+    `cca_weights`/`rel_weights`/`us_weights` (each falls back independently to
+    its production default) plus a matching `cache_suffix` to run the SAME
+    eval against a tuned artifact for a negative-transfer comparison; pass
+    `out_path` so the tuned run doesn't overwrite the production JSON.
+    """
+    cca_weights = Path(cca_weights) if cca_weights is not None else config.CCA_DOCA_WEIGHTS
+    rel_weights = Path(rel_weights) if rel_weights is not None else config.RELEVANCE_DOCA_WEIGHTS
+    us_weights = Path(us_weights) if us_weights is not None else config.US_FILTER_FULL_WEIGHTS
+    out_path = Path(out_path) if out_path is not None else DEFAULT_OUT
+
     eval_df = pl.read_csv(EVAL_CSV)
     n_raw = eval_df.shape[0]
 
     # Join to the embed cache used by fit_fusion (drives CCA/rel scoring)
-    meta_full, cls = load_cache(config.CCA_EMBED_CACHE_DIR / "relevance_train")
+    meta_full, cls = load_cache(config.CCA_EMBED_CACHE_DIR / cache_suffix)
     meta_by_id = meta_full.with_columns(
         pl.col("id").cast(pl.Utf8).alias("id_str")
     ).select(["id_str", "emb_row"])
@@ -96,16 +124,12 @@ def main() -> dict:
     features = cls[eval_df["emb_row"].to_numpy().astype(int)]
 
     # --- score all three calibrated heads (same recipe as fit_fusion.py) ---
-    cca_logits = apply_cca_model(features, weights_path=config.CCA_DOCA_WEIGHTS)
-    cca_cal = load_calibration(calibration_path_for_weights(config.CCA_DOCA_WEIGHTS))
+    cca_logits = apply_cca_model(features, weights_path=cca_weights)
+    cca_cal = load_calibration(calibration_path_for_weights(cca_weights))
     p_cca = cca_cal.transform(cca_logits)
 
-    rel_logits = apply_relevance_model(
-        features, weights_path=config.RELEVANCE_DOCA_WEIGHTS
-    )
-    rel_cal = load_calibration(
-        calibration_path_for_weights(config.RELEVANCE_DOCA_WEIGHTS)
-    )
+    rel_logits = apply_relevance_model(features, weights_path=rel_weights)
+    rel_cal = load_calibration(calibration_path_for_weights(rel_weights))
     p_rel = rel_cal.transform(rel_logits)
 
     texts = [
@@ -114,9 +138,11 @@ def main() -> dict:
             eval_df["headline"].to_list(), eval_df["lead_paragraph"].to_list()
         )
     ]
-    p_us = apply_us_model(
-        texts, weights_path=config.US_FILTER_FULL_WEIGHTS, skip_mismatch=True
-    )
+    # apply_us_model rebuilds a token-mode backbone from the US sidecar's own
+    # backbone_weights_path -- a tuned us_weights sidecar (recorded via
+    # run_us_features.py --backbone-weights) re-embeds through the matching
+    # tuned backbone automatically; no extra knob needed here.
+    p_us = apply_us_model(texts, weights_path=us_weights, skip_mismatch=True)
 
     for name, p in [("us", p_us), ("cca", p_cca), ("rel", p_rel)]:
         assert np.isfinite(p).all(), f"non-finite {name} probabilities"
@@ -134,6 +160,12 @@ def main() -> dict:
         "n_coded_rows": n_raw,
         "n_missing_embeddings": n_missing_emb,
         "n_scored": int(eval_df.shape[0]),
+        "cache_suffix": cache_suffix,
+        "weights": {
+            "cca": str(cca_weights),
+            "rel": str(rel_weights),
+            "us": str(us_weights),
+        },
         "note": (
             "Eval set is boundary-enriched for ICA (cca x relevance score-band strata "
             "+ DoCA anchors), so per-dimension base rates and precision are "
@@ -157,7 +189,7 @@ def main() -> dict:
         )
         results["heads"][name] = m
 
-    out_path = config.CCA_DOCA_DIR / "experiments" / "eval_heads_own_terms.json"
+    out_path.parent.mkdir(parents=True, exist_ok=True)
     out_path.write_text(json.dumps(results, indent=2))
     print(f"wrote {out_path}\n")
 
@@ -181,4 +213,28 @@ def main() -> dict:
 
 
 if __name__ == "__main__":
-    main()
+    ap = argparse.ArgumentParser(
+        description="Per-head own-terms eval on the hand-coded ICA eval set."
+    )
+    ap.add_argument("--cca-weights", default=None, help="default: CCA_DOCA_WEIGHTS")
+    ap.add_argument("--rel-weights", default=None, help="default: RELEVANCE_DOCA_WEIGHTS")
+    ap.add_argument("--us-weights", default=None, help="default: US_FILTER_FULL_WEIGHTS")
+    ap.add_argument(
+        "--cache-suffix", default=DEFAULT_CACHE_SUFFIX,
+        help="embed cache subdir the eval-set ids are joined against "
+             "(default: relevance_train)",
+    )
+    ap.add_argument(
+        "--out", default=None,
+        help="output JSON path (default: cca_doca/experiments/eval_heads_own_terms.json "
+             "-- pass a distinct path for a tuned-artifact run so it doesn't overwrite "
+             "the production comparison)",
+    )
+    args = ap.parse_args()
+    main(
+        cca_weights=args.cca_weights,
+        rel_weights=args.rel_weights,
+        us_weights=args.us_weights,
+        cache_suffix=args.cache_suffix,
+        out_path=args.out,
+    )
