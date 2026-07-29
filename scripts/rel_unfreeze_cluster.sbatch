@@ -75,23 +75,19 @@ UNFREEZE_TOP_N="${2:-1}"
 GRADED_DECAY="${3:-}"     # empty = flat encoder_top scheme
 MODE="${1:-full}"
 EXTRA_ARGS=("${@:4}")     # passed through to the trainer, e.g. --eta 0.5 --peak-lr 1e-4
+
+# Job-unique weights path: concurrent jobs MUST NOT save to the same .h5 --
+# HDF5 file locking on this filesystem makes the loser die at save time
+# (job 8822394 lost its trained weights this way). HDF5_USE_FILE_LOCKING off
+# as belt-and-suspenders for Lustre lock flakiness.
+export HDF5_USE_FILE_LOCKING=FALSE
+WEIGHTS_OUT="/projects/ahd/relevance/relevance_text.job${SLURM_JOB_ID:-manual}.weights.h5"
 if [ "$MODE" = "short" ]; then
     uv run --frozen python -m src.run_relevance_text --unfreeze-top-n "$UNFREEZE_TOP_N" --epochs 1 --max-steps 200 \
         ${GRADED_DECAY:+--graded-decay "$GRADED_DECAY"} --tensorboard-dir "$TB_LOG_DIR" \
-        ${EXTRA_ARGS[@]+"${EXTRA_ARGS[@]}"}
+        --weights-out "$WEIGHTS_OUT" ${EXTRA_ARGS[@]+"${EXTRA_ARGS[@]}"}
 else
     uv run --frozen python -m src.run_relevance_text --unfreeze-top-n "$UNFREEZE_TOP_N" --epochs 7 \
         ${GRADED_DECAY:+--graded-decay "$GRADED_DECAY"} --tensorboard-dir "$TB_LOG_DIR" \
-        ${EXTRA_ARGS[@]+"${EXTRA_ARGS[@]}"}
+        --weights-out "$WEIGHTS_OUT" ${EXTRA_ARGS[@]+"${EXTRA_ARGS[@]}"}
 fi
-
-# Preserve this job's artifact pair under a job-id-suffixed name: successive
-# runs OVERWRITE relevance_text.*, so without this each experiment clobbers
-# the previous candidate. The suffixed copies keep every run comparable via
-# scripts/eval_rel_text_artifact.py --weights <path>.
-for ext in weights.h5 config.json; do
-    src="/projects/ahd/relevance/relevance_text.${ext}"
-    if [ -f "$src" ]; then
-        cp "$src" "/projects/ahd/relevance/relevance_text.job${SLURM_JOB_ID:-manual}.${ext}"
-    fi
-done

@@ -32,6 +32,7 @@ import argparse
 import dataclasses
 import datetime
 import math
+from pathlib import Path
 
 import keras
 import numpy as np
@@ -188,7 +189,8 @@ def apply_cli_overrides(cfg, eta=None, peak_lr=None, prior=None):
 # ---------------------------------------------------------------------------
 # Imperative shell
 # ---------------------------------------------------------------------------
-def main(run_config=None, max_steps=None, batch_size=256, tensorboard_dir=None):
+def main(run_config=None, max_steps=None, batch_size=256, tensorboard_dir=None,
+         weights_out=None):
     """
     Train the relevance head in text mode, with optional encoder unfreezing.
 
@@ -405,9 +407,16 @@ def main(run_config=None, max_steps=None, batch_size=256, tensorboard_dir=None):
     )
 
     # -------------------------------------------------------------------------
-    # Save weights + config sidecar (records the escalation knobs used)
+    # Save weights + config sidecar (records the escalation knobs used).
+    # `weights_out` overrides the canonical path -- REQUIRED for concurrent
+    # cluster jobs: two jobs saving to the same canonical .h5 race on the HDF5
+    # file lock (observed: job 8822394 died with BlockingIOError EAGAIN while
+    # 8822390 held the lock, losing its trained weights). The sbatch passes a
+    # job-id-unique path; the sidecar name derives from whatever path is used.
     # -------------------------------------------------------------------------
-    weights_path = config.RELEVANCE_TEXT_WEIGHTS
+    weights_path = (
+        config.RELEVANCE_TEXT_WEIGHTS if weights_out is None else Path(weights_out)
+    )
     rel_model.save_weights(str(weights_path))
     run_config.to_json(config_path_for_weights(weights_path))
 
@@ -451,6 +460,9 @@ if __name__ == "__main__":
     ap.add_argument("--peak-lr", type=float, default=None,
                      help="override the LR schedule's warmup_target (peak LR); initial_lr "
                           "scales to keep the 10:1 peak:initial ratio.")
+    ap.add_argument("--weights-out", type=str, default=None,
+                     help="override the weights output path (REQUIRED for concurrent "
+                          "cluster jobs -- the canonical path races on the HDF5 lock)")
     ap.add_argument("--prior", type=float, default=None,
                      help="override the rel head's FLPU prior (canonical default 0.05; "
                           "must be in (0, 1), validated by FLPULossConfig).")
@@ -488,4 +500,5 @@ if __name__ == "__main__":
         max_steps=args.max_steps,
         batch_size=args.batch_size,
         tensorboard_dir=tensorboard_dir,
+        weights_out=args.weights_out,
     )
