@@ -137,6 +137,23 @@ the case where CCA's 15k DoCA positives as a sibling signal would regularize).
   zero-multiplier groups from weight decay. Recorded empirically by
   `src/extract_tuned_backbone.py`'s layer-diff verification.
 
+- **The backbone-clobber bug (2026-07-29, found via the transfer check):**
+  `embed_corpus._build_embed_model` loaded the `us_weights` file over the full
+  inference model AFTER the `--backbone-weights` override — and the default
+  us-weights file (`us_classifier.weights.h5`, the old 200-step smoke) is a
+  FULL-model save, so the load silently restored the smoke's frozen-DAPT
+  backbone. Harmless for every production cache (smoke backbone == exact DAPT)
+  but it voided the first tuned re-embed: the 2026-07-29 "tuned" caches were
+  DAPT embeds (their fresh-probe evals reproducing production numbers was the
+  tell; co-trained-head mismatch at ROC 0.67 and local-vs-cache CLS cosine 0.6
+  were the smoking guns). Fixed by re-applying the override after the us-load;
+  proof: co-trained rel head on fixed-path local tuned CLS recovers
+  0.833/0.851 (vs the artifact's own 0.833/0.854). Corollary finding:
+  **the tuned gain TRANSPORTS through features-mode** — the co-trained head +
+  genuine tuned cache preserves the vs-ICA improvement, so the deployed
+  features-mode pattern works; deploy the co-trained head rather than a fresh
+  probe. Void caches/artifacts renamed `*.VOID*`; cluster re-embed required.
+
 ## Sources
 
 Kurin et al. 2022 arXiv:2201.04122; Xin et al. 2022 arXiv:2209.11379; Shi et

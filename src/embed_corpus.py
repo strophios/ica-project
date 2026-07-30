@@ -233,6 +233,17 @@ def _build_embed_model(us_weights: Path, backbone_weights: Path | str | None = N
         backbone=backbone, heads={us_cfg.head.name: us_head}, seq_length=us_cfg.seq_length
     )
     inf.load_weights(str(us_weights), skip_mismatch=False)
+    # CRITICAL ORDER FIX (2026-07-29): `us_weights` may be a FULL-model save
+    # (us_classifier.weights.h5, the 503MB text-mode smoke, is the default) --
+    # loading it over the inference model OVERWRITES the backbone, silently
+    # undoing any `backbone_weights` override loaded above. Harmless for every
+    # production cache (the smoke's backbone is exact frozen DAPT, so the
+    # clobber was a no-op) but it voided the first tuned re-embed: all three
+    # "tuned" caches of 2026-07-29 were actually DAPT embeds. Re-applying the
+    # override AFTER the us-weights load guarantees the requested backbone is
+    # the one that embeds.
+    if backbone_weights is not None:
+        backbone.load_weights(str(backbone_path), skip_mismatch=False)
     # Dual-output graph on the now-weighted instances.
     tok = keras.Input(shape=(us_cfg.seq_length,), dtype="int32", name="token_ids")
     pad = keras.Input(shape=(us_cfg.seq_length,), dtype="int32", name="padding_mask")
