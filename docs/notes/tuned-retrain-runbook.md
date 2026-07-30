@@ -42,6 +42,35 @@ clobbering production.
 
 ## Step 0 — confirm the caches landed
 
+## Step 0b — MANDATORY: assert the representation actually changed
+
+Any re-embed whose premise is "the backbone changed" must prove it before
+anything trains on the new cache (the 2026-07-29 clobber bug produced
+DAPT-identical "tuned" caches that quietly reproduced production numbers
+through an entire retrain+eval round). Twenty seconds per cache:
+
+```python
+# uv run python - <<'PY'  (per cache pair old/new)
+import numpy as np, polars as pl, glob
+from src.embed_corpus import load_cache
+import src.config as config
+m_old, c_old = load_cache(config.CCA_EMBED_CACHE_DIR / "relevance_train")
+m_new, c_new = load_cache(config.CCA_EMBED_CACHE_DIR / "relevance_train_tuned")
+j = m_old.with_row_index("r_old").join(
+    m_new.with_row_index("r_new").select(["id", "r_new"]), on="id").head(500)
+a, b = c_old[j["r_old"].to_numpy()], c_new[j["r_new"].to_numpy()]
+cos = np.sum(a*b, 1)/(np.linalg.norm(a, axis=1)*np.linalg.norm(b, axis=1))
+print(f"cosine old-vs-new: mean={cos.mean():.4f} min={cos.min():.4f}")
+# EXPECTATION with a genuinely tuned backbone: mean clearly < 0.99 (the
+# extraction's layer-diff magnitude predicts a visible shift). mean >= 0.999
+# means the new cache is the OLD representation -- STOP, do not train.
+```
+
+Corollary heuristic (learned the hard way): downstream results that match the
+null *too* precisely (fresh retrains reproducing production metrics to the
+third decimal) are as suspicious as results that are too good — check the
+inputs changed before celebrating "no regression".
+
 ```
 ls cca_doca/embed_cache/us_train_ldc_tuned
 ls cca_doca/embed_cache/train250k_tuned
