@@ -154,6 +154,24 @@ the case where CCA's 15k DoCA positives as a sibling signal would regularize).
   features-mode pattern works; deploy the co-trained head rather than a fresh
   probe. Void caches/artifacts renamed `*.VOID*`; cluster re-embed required.
 
+- **The transfer verdict (2026-07-29/30, genuine tuned caches):** rel-first
+  sequential produced exactly the two-sided outcome the pre-registration
+  anticipated. **rel: clear win** (fresh probe own-terms 0.836, vs-ICA 0.853
+  vs production 0.783; diaspora recall 0.662 vs 0.382 @0.30) — and the fresh
+  probe MATCHES the co-trained head on true tuned features (0.8526 vs 0.8508),
+  so co-training carries nothing beyond the representation; probe deploys, for
+  pipeline uniformity. **CCA: severe negative transfer** (own-terms 0.927 →
+  0.739); **US: real, milder** (0.925 → 0.830; dateline test F1 0.97 → 0.938).
+  **Per the pre-registration: NO wholesale encoder swap.**
+  **Hand-composed mixed stack** (tuned rel on tuned CLS; production CCA/US on
+  production CLS; production fusion/gate/calibrations unchanged — conservative):
+  composed ICA ROC **0.797 → 0.820**, diaspora recall@0.10 0.221 → 0.250.
+  A genuine system gain from the rel swap alone, at the cost of TWO embed
+  passes per corpus at apply (the known two-encoder trade-off). The joint
+  CCA+rel escalation (pre-registered above) is now evidence-motivated as the
+  route back to a single shared encoder carrying both gains. Cross-platform
+  embed consistency (cluster vs local) verified exactly post-clobber-fix.
+
 ## Sources
 
 Kurin et al. 2022 arXiv:2201.04122; Xin et al. 2022 arXiv:2209.11379; Shi et
