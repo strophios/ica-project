@@ -1,11 +1,12 @@
 # Roadmap & index — current live next-steps
 
-*Created 2026-06-19, last touched 2026-07-23. THIS is the single live list of
-what's next and what's deferred. Reconciled 2026-07-23 with the 2026-07-10 team
-meeting (`docs/meetings/20260710_notes.md`) and the external task plan
-(`~/tasks/projects/ica-project.md`); the active thread below is the pre-Aug-6
-refine-and-apply arc. The root `CLAUDE.md`/`README.md` rewrite is in progress
-this session (was deferred until a working multi-head landed — condition met).*
+*Created 2026-06-19, last touched 2026-07-30. THIS is the single live list of
+what's next and what's deferred. The pre-Aug-6 refine-and-apply arc (§A) is
+CLOSED at the 2026-07-30 write-up freeze; the **active thread is now §A1, the
+post-meeting model arc**. Reconciled 2026-07-30 with the encoder-unfreeze arc
+outcome (`encoder-unfreeze-strategy.md`, `tuned-retrain-runbook.md`) and the July
+memo (`ml_memo/ica_model_update_2026-07.md`). Root `CLAUDE.md` reconciled
+2026-07-30 for this arc; `README.md` still predates `cca-doca-retrain`.*
 
 ## Where to look (index)
 
@@ -32,14 +33,17 @@ consolidated **here** so nothing drifts out of sight.
 ## Status snapshot
 
 Multi-head `IcaModel` — assembled, calibrated, applied (candidates exist for
-API 1960–1995 and LDC 1996–2007). Per-head own-terms eval done (US 0.925 /
-CCA 0.927 / rel 0.829 ROC — rel is the weak head at its own job; the US head's
-0.86 event-location recall is the diaspora ceiling). Team meeting 2026-07-10 set
-the direction: **refine the model, generate post-1995 ICA candidates, and check
-recall against DoCA + the team's ICA dataset — write-up to the team by Aug 1,
-meeting Aug 6.**
+API 1960–1995 and LDC 1996–2007); **deployed model unchanged this arc.** The
+pre-Aug-6 arc closed 2026-07-30: US-head retrain executed → no swap; encoder
+unfreeze (rel-first sequential) executed → **rel wins big, CCA/US negative
+transfer caught by the pre-registered check; a validated but un-deployed
+mixed-stack candidate lifts composed ICA 0.80→0.82 and diaspora recall@0.10
+0.221→0.250** (`encoder-unfreeze-strategy.md`). Corpus expanded to 1960–2025.
+Memo drafted (`ml_memo/ica_model_update_2026-07.md`, operator reviewing).
+**Next: productionize the mixed stack, then the joint CCA+rel escalation, then
+apply to the expanded corpus** (§A1). Aug 1 = send memo; Aug 6 = meeting.
 
-## A. Active thread — pre-Aug-6 refine-and-apply arc
+## A. Pre-Aug-6 refine-and-apply arc — CLOSED 2026-07-30 (kept for the record)
 
 Milestone: **write-up in the team's hands by 2026-08-01** (meeting 08-06).
 Reconciles the meeting outcomes with the external task plan. Two scope tiers
@@ -159,6 +163,50 @@ schedule; conditions are checkable, not vibes:
   then. Stretch work continuing past the freeze targets the post-meeting arc,
   not the memo.
 
+## A1. Active thread — post-meeting model arc (priority order)
+
+The engineering follow-through from the §A arc outcome. In priority order; each
+1–2 lines, pointers to the runbook/notes for detail. (§A2 below is the broader
+research agenda from the 2026-07-10 meeting; this list is the immediate model
+work.)
+
+1. **Mixed-stack productionization.** Adopt the validated mixed stack (tuned rel
+   on tuned CLS + production CCA/US) properly: **parameterize `src/fit_fusion.py`**
+   first (it is fully hardcoded — cca/rel/us weights + cache; `output_dir` silently
+   defaults to the *production* fusion path; exact call sites in
+   `tuned-retrain-runbook.md` §"Step 6" / "Gaps"), **refit fusion on mixed scores**,
+   add **two-cache `IcaModel` support** (two encoder passes per corpus at apply),
+   then the swap decision. The +0.02 composed gain reuses the old combiner unchanged,
+   so it is a floor not a ceiling.
+2. **Joint CCA+rel fine-tune** — the pre-registered escalation
+   (`encoder-unfreeze-strategy.md`), now **evidence-motivated** by the rel-first
+   negative-transfer result. Same population/channel/loss family → same batches
+   carry both labels, one λ (3-point grid), no PU-interleaving risk. The route back
+   to a single shared encoder carrying both gains. Three-head joint stays out.
+3. **Apply to the expanded corpus** — post-1995 candidates through 2025. Needs the
+   coalesce `lead_fallback_column` embed knob (`headline + "</s>" +
+   coalesce(lead_paragraph, abstract)`) + a 1996–2025 embed; **era-slice any
+   2025+ eval** (abstract-register shift). Then re-report CCA recall vs DoCA and
+   ICA recall vs the team's coded events (the potential methods piece).
+4. **Paired 1970s lead-vs-abstract channel experiment** — pre-registered
+   (`roadmap.md` §A item 1 detail); run BEFORE any *historical* coalesce, since
+   historical abstracts are NYT-Index register not article text. Score identical
+   1970s articles (both fields present) under headline+lead vs headline+abstract;
+   compare distributions + gold-slice metrics.
+5. **Backward densify pull** — operator-side, ongoing (`r/api_ingest/pull_archive.R`
+   `--skeleton` → densify).
+6. **Small gaps:**
+   - `src/run_relevance.py` has no `--us-weights` rescore knob (unlike
+     `run_cca_doca.py`) — its US-restriction is whatever `us_logit` the cache was
+     built with (`tuned-retrain-runbook.md` §"Step 3" / "Gaps" #1).
+   - **991 duplicate `id`s** in `api_corpus/` (1960–2025) — dedupe before train/apply.
+   - **`eval_heads_own_terms` step-order:** calibration is required BEFORE the eval;
+     the runbook's Step 4 (eval) currently precedes Step 5 (calibrate) — swap them
+     or note the dependency when next running the tuned compare.
+   - γ-on-positive-risk-only FLPU experiment — pinned (`pinned-questions.md`).
+   - rel DEDPUL robustness re-run (kde_mode / seed sweep) — π̂=0.02 was a single
+     estimate; §B item 6.
+
 ## A2. Post-meeting arc (from the 2026-07-10 meeting — not before Aug 6)
 
 - **1950s backward test** — apply the (contemporary-trained) model to 1950s
@@ -228,7 +276,8 @@ same content signal). Machinery retained; η=0 canonical.
   greedily (pulls in `audit/api_ldc_matched.parquet`, no `id` → crash). Apply the
   additive `pattern=` fix (as done for `data_from_parquet`) when next touched —
   the US-head retrain (thread A item 2) is the likely next touch.
-- **CLAUDE.md / README.md reconciliation** — in progress 2026-07-23.
+- **README.md reconciliation** — still predates `cca-doca-retrain`. (Root
+  `CLAUDE.md` reconciled 2026-06-26, again 2026-07-30 for the encoder-unfreeze arc.)
 
 ## D. Older deferred (indexed, not duplicated)
 
@@ -250,6 +299,13 @@ same content signal). Machinery retained; η=0 canonical.
 
 ## History (landed major arcs)
 
+- **Encoder-unfreeze / tuned-cache arc (2026-07-23→30)** — US-head v1 retrain
+  (no swap), rel-first sequential encoder unfreeze (rel wins, CCA/US negative
+  transfer, mixed-stack +0.023 composed ICA), corpus expansion to 1960–2025,
+  the PU-collapse methods finding. Detail: `encoder-unfreeze-strategy.md`,
+  `tuned-retrain-runbook.md`, `us-head-retrain-plan.md` addendum,
+  `ml_memo/ica_model_update_2026-07.md`; artifact delta in
+  `project-state-and-data-map.md` §"Delta 2026-07-30".
 - **Multi-head ICA assembly (2026-06-26)** — design
   `docs/design-plans/2026-06-19-multi-head-ica-assembly.md`, all 6 phases landed:
   harmonized CCA+rel retrain, three Platt calibrators, empirically-chosen fusion

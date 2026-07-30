@@ -1,8 +1,10 @@
 # Project state and data map
 
-*Last updated: 2026-07-23 (added the 2026-07-10 per-head own-terms eval; refreshed
-the lead summary and branch note; the rest of the doc is the 2026-06-26
-filesystem-verified snapshot). The **data/artifact
+*Last updated: 2026-07-30 (appended the encoder-unfreeze / tuned-cache / corpus-
+expansion delta at the BOTTOM — "Delta 2026-07-30"; the 2026-06-26 snapshot above
+it is unchanged). Previously 2026-07-23 (added the 2026-07-10 per-head own-terms
+eval; refreshed the lead summary and branch note; the rest of the doc is the
+2026-06-26 filesystem-verified snapshot). The **data/artifact
 MAP** — where things live and what state they're in. For **what's next / deferred**, see `docs/notes/roadmap.md` (the
 live roadmap + index). The top-level `CLAUDE.md` was reconciled 2026-06-26 for the
 multi-head assembly; `README.md` (April) still predates the `cca-doca-retrain` arc.
@@ -229,3 +231,79 @@ applied to the full API corpus (`us_filter/api_us_scores/` absent — that's the
 pulling in `audit/api_ldc_matched.parquet` (no `id` column → crash). Fixed with an additive `pattern`
 override. `run_us_classification.py` still reads `us_filter` via the greedy glob and will hit the same
 crash on its next run — apply the same fix when that path is next touched.
+
+---
+
+## Delta 2026-07-30 — encoder-unfreeze / tuned-cache arc + corpus expansion
+
+*Appended after the pre-Aug-6 refine-and-apply arc. The 2026-06-26 snapshot above
+is unchanged. Reasoning/narrative lives in `docs/notes/encoder-unfreeze-strategy.md`
+(execution findings), `docs/notes/tuned-retrain-runbook.md`, and `docs/notes/roadmap.md`;
+this section is the filesystem delta. Deployed `IcaModel` unchanged; a validated
+mixed-stack rel candidate now exists but is NOT productionized.*
+
+### Corpus expansion (parent + grandparent)
+
+- **`../api_corpus/` now spans 1960–2025** — 66 per-year parquet files, ~6.37M rows
+  (was 1960–1995 / ~3.7M / 36 files). **991 duplicate `id`s — unresolved
+  data-quality flag**, dedupe before any train/apply on the expansion.
+- **`../../nyt_archive_raw/` (GRANDPARENT level, `00_ML_data_expansion/`)** — the
+  resumable Archive-API pull's raw JSON checkpoints, including a **1870–1959
+  rotating-month skeleton** (raw-only by design — not yet transformed to parquet).
+  Pull + transform tooling is in-repo: `r/api_ingest/{pull_archive,archive_transform}.R`.
+- **Lead/abstract missingness (full-span audit, 2026-07-27/28):** `lead_paragraph`
+  is ~100% EMPTY for 2025 and for several pre-1981 eras (1960–63, 1965–69, 1980;
+  1964 an island); healthy 1970–79 and 1981–2024 (one bad patch: 2005). Pre-1960
+  skeleton: lead ~0%, abstract 48–80%. **Modern (2025) abstracts are contemporaneous
+  editorial text (coalesce is sound); HISTORICAL abstracts are NYT-Index register**
+  (telegraphic) — a real channel change, to be validated (the pre-registered 1970s
+  paired lead-vs-abstract experiment) not adopted silently. Coalesce policy +
+  `lead_fallback_column` plan: `docs/notes/roadmap.md` §A item 1.
+
+### New embed caches (`../cca_doca/embed_cache/`)
+
+- **`{train250k_tuned, us_train_ldc_tuned, relevance_train_tuned}`** — genuine
+  tuned-backbone CLS embeds (Step-0b verified: cosine ~0.65 vs the DAPT originals,
+  i.e. the representation actually moved). Their meta `us_logit` was **PATCHED
+  per-id from the production caches** to hold population identity fixed across the
+  encoder change (`.bak` meta files sit beside the patched ones).
+- **`{train250k_tuned, us_train_ldc_tuned, relevance_train_tuned}.VOID-dapt-clobber`**
+  — the backbone-clobber-bug round (DAPT-identical "tuned" caches that reproduced
+  production numbers). **Do not use.** See the clobber-bug finding in
+  `encoder-unfreeze-strategy.md`.
+
+### New artifacts
+
+- **Tuned backbone + text-mode rel:** `../relevance/tuned_backbone.job8823087.weights.h5`
+  (extracted tuned encoder, via `src/extract_tuned_backbone.py`);
+  `../relevance/relevance_text.job8823087.weights.h5` + sidecar (the winning
+  η=0 / π̂=0.02 text-mode unfreeze run); `../relevance/relevance_text_table.parquet`
+  (the text-bearing rel population).
+- **Mixed-stack rel head:** `../relevance/relevance_tuned.{weights.h5,config.json,calibration.json}`
+  — the validated fresh probe on true tuned features (fresh probe == co-trained head,
+  0.8526 vs 0.8508, so the probe deploys). **This is the mixed-stack candidate's rel head.**
+- **Negative-transfer-damaged (kept for the record, NOT for use):**
+  `../us_filter/us_classifier_full_tuned.*` and `../cca_doca/cca_doca_tuned.*` —
+  US/CCA features-retrained on the tuned cache; both regressed (CCA own-terms
+  0.927→0.739, US 0.925→0.830).
+- **`.VOID` renames** beside `relevance_tuned.*`, `cca_doca_tuned.*`,
+  `us_classifier_full_tuned.*`, and `eval_heads_own_terms_tuned.json` — the void
+  (clobber) round's outputs; superseded by the genuine-cache reruns.
+- **Rel prior:** `../relevance/prior_estimate.json` (π̂ = 0.02, DEDPUL via
+  `src/run_relevance_prior.py`) — supersedes the old 0.05-by-analogy default.
+- **US-retrain arc (2026-07-24):** `../us_filter/us_pnu.{weights.h5,config.json}` +
+  `../us_filter/us_pnu_table.parquet`; `validation/ica_holdout_ids_ldc.parquet`
+  (dual-id-space eval-anchor holdout). Kept for the record; no swap (see
+  `us-head-retrain-plan.md`).
+- **Experiment JSONs (`../cca_doca/experiments/`):** `eval_heads_own_terms_tuned.json`
+  (tuned per-head eval), `eval_rel_text.json` (text-mode rel eval), `us_pnu_eta_grid.json`
+  + `eval_us_retrain.json` (US-retrain arc).
+
+### Model state after this arc
+
+- **Deployed `IcaModel` unchanged** (all-frozen-DAPT). The mixed stack (tuned rel on
+  tuned CLS; production CCA/US on production CLS; production fusion/gate/calibrations)
+  lifts composed ICA ROC **0.797→0.820** and diaspora recall@0.10 0.221→0.250 — a
+  genuine gain from the rel swap alone, at the cost of TWO encoder passes per corpus
+  at apply. Productionization (fusion refit on mixed scores + two-cache `IcaModel`)
+  and the joint CCA+rel escalation are the post-meeting arc (`roadmap.md` §A2).
