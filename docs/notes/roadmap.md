@@ -130,6 +130,19 @@ with a pre-registered promotion rule (below).
    specifically (this comparison is a potential methods piece).
 6. **Write-up** — findings memo to the team by **08-01**.
 
+### Arc outcome (2026-07-30, at the write-up freeze)
+
+Items 2–3 done with findings (US retrain: no-swap; encoder unfreeze: rel-first
+executed — rel wins big, CCA/US negative transfer caught by the pre-registered
+check, mixed stack lifts composed ICA 0.80→0.82 and diaspora recall 0.38→0.66;
+full record in `encoder-unfreeze-strategy.md` execution findings). Item 4
+(cluster tuning) subsumed into the unfreeze runs. Item 5 (apply to expanded
+corpus) and mixed-stack productionization + joint CCA+rel escalation move to
+the post-meeting arc. Item 6: write-up drafted
+(`ml_memo/ica_model_update_2026-07.md`). Stretch items (VAT, temporal) were
+not promoted — the collapse investigation consumed the stretch window and was
+worth more.
+
 ### Stretch scope + promotion rule (pre-registered 2026-07-23)
 
 Stretch items are attempted **only** if the committed scope is ahead of
