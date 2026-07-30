@@ -18,11 +18,14 @@ and the assembled `IcaModel` producing ICA candidates (see below).*
 The assembled multi-head `IcaModel` (frozen DAPT encoder + calibrated US/CCA/rel heads +
 empirically-chosen fusion) exists and has been applied: ranked ICA candidates cover the API
 corpus (1960–1995) and LDC (1996–2007). All heads train in minutes because they run
-features-mode on cached frozen-DAPT CLS embeddings (768-d), not live forward passes. Honest
+features-mode on cached CLS embeddings (768-d), not live forward passes. Honest
 hand-coded eval sets exist (500-row CCA gold set; 1,131-row ICA eval set with 214 positives).
-The known system ceiling is the US head's diaspora-recall gap (dateline labels encode filing
-location, not event location); its retrain is the active thread in `roadmap.md`. All large
-data and weights live *outside* this repo, in sibling and grandparent directories.
+**As of 2026-07-30** (see the Delta section at the bottom): the corpus spans 1960–2025 plus an
+1870–1959 raw skeleton; a validated-but-undeployed **mixed-stack candidate** (encoder fine-tuned
+for the rel head only) lifts composed ICA 0.80→0.82 and diaspora recall 0.38→0.66 on the eval
+set; the US-head retrain concluded no-swap. Productionizing the mixed stack is the active
+thread in `roadmap.md` §A1. All large data and weights live *outside* this repo, in sibling
+and grandparent directories.
 
 ## Out-of-repo directory map
 
