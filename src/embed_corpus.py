@@ -89,6 +89,34 @@ def select_articles(
     return pl.concat([included, sampled])
 
 
+def dedupe_by_id(df: pl.DataFrame) -> pl.DataFrame:
+    """Resolve duplicate ids deterministically (post-1995 API pull overlaps).
+
+    Preference per id: a copy with a non-empty effective lead (detected as
+    `headline_with_lead` NOT ending in the bare separator "</s>"), then the
+    earliest year (when a `year` column exists), then lexical text order — so
+    the survivor is invariant under input permutation. Run BEFORE any year
+    filter: split year-range embed jobs then agree globally on which copy is
+    canonical (a cross-year dup's survivor lands in exactly one job's range).
+    """
+    sort_cols = (
+        ["id", "_lead_empty"]
+        + (["year"] if "year" in df.columns else [])
+        + ["headline_with_lead"]
+    )
+    # Empty/null ids are untraceable junk (2025 transform artifacts: 13 rows
+    # with no headline/lead/abstract) — drop them rather than collapse to one.
+    df = df.filter(pl.col("id").is_not_null() & (pl.col("id") != ""))
+    return (
+        df.with_columns(
+            pl.col("headline_with_lead").str.ends_with("</s>").alias("_lead_empty")
+        )
+        .sort(sort_cols)
+        .unique(subset="id", keep="first", maintain_order=True)
+        .drop("_lead_empty")
+    )
+
+
 def provenance_record(
     *,
     backbone_weights: Path,
@@ -275,6 +303,8 @@ def main(
     limit=None,
     source_pattern=None,
     backbone_weights=None,
+    lead_fallback_column=None,
+    dedupe_ids=False,
 ):
     keras.config.set_dtype_policy(config.DTYPE_POLICY)
     keras.utils.set_random_seed(200)
@@ -298,9 +328,17 @@ def main(
     corpus = data_from_parquet(
         config.PROJECT_ROOT, corpus_subdir, addl_columns=addl,
         lead_column=lead_column, pattern=source_pattern,
+        lead_fallback_column=lead_fallback_column,
     )
     if include_year and year_column != "year":
         corpus = corpus.rename({year_column: "year"})
+    # Dedupe BEFORE the year filter (see dedupe_by_id: split year-range jobs
+    # must agree globally on the canonical copy of a cross-year duplicate).
+    if dedupe_ids:
+        before = corpus.height
+        corpus = dedupe_by_id(corpus)
+        print(f"dedupe_ids: {before} -> {corpus.height} rows "
+              f"({before - corpus.height} duplicate rows dropped)")  # LOG
     # Drop unlabeled rows when a label channel is requested (mirrors
     # create_us_filter_data's null-label drop) — embedding them would waste the pass.
     if label_column is not None:
@@ -383,7 +421,9 @@ def main(
     prov["years"] = list(years) if years is not None else None
     prov["shard_offset"] = shard_offset
     prov["lead_column"] = lead_column
+    prov["lead_fallback_column"] = lead_fallback_column
     prov["label_column"] = label_column
+    prov["dedupe_ids"] = dedupe_ids
     (cache_dir / f"provenance.{shard_offset:03d}.json").write_text(
         json.dumps(prov, indent=2)
     )
@@ -413,6 +453,11 @@ def build_arg_parser() -> argparse.ArgumentParser:
                     help="name of the year column in the corpus (LDC: publication_year)")
     ap.add_argument("--lead-column", default="lead_paragraph",
                     help="text column feeding headline+lead (US filter: stripped_text)")
+    ap.add_argument("--lead-fallback-column", default=None,
+                    help="column supplying the post-separator text where the lead is "
+                         "empty (post-1995 API embed: abstrct — the coalesce policy of "
+                         "roadmap §A item 1; NOT for pre-1996 eras without the "
+                         "pre-registered channel experiment)")
     ap.add_argument("--label-column", default=None,
                     help="label column to carry into shard meta + drop nulls "
                          "(US-filter training cache: us_label)")
@@ -423,6 +468,10 @@ def build_arg_parser() -> argparse.ArgumentParser:
     ap.add_argument("--source-pattern", default=None,
                     help="exact parquet path under the data root (overrides --corpus "
                          "glob; e.g. us_filter/ldc_labeled.parquet)")
+    ap.add_argument("--dedupe-ids", dest="dedupe_ids", action="store_true",
+                    help="deterministically resolve duplicate ids before embedding "
+                         "(required for the 1996-2025 API corpus: 911 pull-overlap "
+                         "dup ids; default off keeps the loud duplicate-id guard)")
     ap.add_argument("--backbone-weights", default=None,
                     help="backbone .weights.h5 to load instead of the US sidecar's own "
                          "backbone_weights_path (e.g. a fine-tuned backbone from "
@@ -446,4 +495,6 @@ if __name__ == "__main__":
         include_year=args.include_year, limit=args.limit,
         source_pattern=args.source_pattern,
         backbone_weights=args.backbone_weights,
+        lead_fallback_column=args.lead_fallback_column,
+        dedupe_ids=args.dedupe_ids,
     )

@@ -38,9 +38,28 @@ from src.preproc.us_location import gold_first_us_gate
 logger = logging.getLogger(__name__)
 
 
+def _filter_years(
+    meta: pl.DataFrame, cls_features: np.ndarray, years: tuple[int, int]
+) -> tuple[pl.DataFrame, np.ndarray]:
+    """Restrict (meta, cls) to an inclusive year range, keeping row alignment.
+
+    Uses the `emb_row` index into the ORIGINAL cls matrix (the load_cache
+    contract). Year is cast to Int64 — cache metas carry string years for the
+    API corpus and ints for synthetic/LDC caches. No-op if no year column.
+    """
+    if "year" not in meta.columns:
+        return meta, cls_features
+    lo, hi = years
+    filtered = meta.filter(pl.col("year").cast(pl.Int64).is_between(lo, hi))
+    emb_rows = filtered["emb_row"].to_numpy()
+    return filtered, cls_features[emb_rows]
+
+
 def apply_ica_api(
     cache_suffix: str = "full",
     limit: int | None = None,
+    out_name: str | None = None,
+    years: tuple[int, int] | None = None,
 ) -> None:
     """Apply IcaModel over API corpus (1960-1995 or whatever years cache covers).
 
@@ -50,7 +69,12 @@ def apply_ica_api(
     Args:
         cache_suffix: cache subdirectory name (default "full")
         limit: optional row limit for smoke testing
+        out_name: candidates filename (default "api_1960_1995.parquet" —
+            unchanged legacy name; the forward run passes "api_1996_2025.parquet")
+        years: optional inclusive (lo, hi) restriction on the cache rows
     """
+    if out_name is None:
+        out_name = "api_1960_1995.parquet"
     logger.info(f"Loading API cache: {cache_suffix}")
     cache_dir = config.CCA_EMBED_CACHE_DIR / cache_suffix
     if not cache_dir.exists():
@@ -58,6 +82,10 @@ def apply_ica_api(
 
     meta, cls_features = load_cache(cache_dir)
     logger.info(f"Loaded {meta.height} rows, {cls_features.shape[1]}d features")
+
+    if years is not None:
+        meta, cls_features = _filter_years(meta, cls_features, years)
+        logger.info(f"Filtered to {years[0]}-{years[1]}: {meta.height} rows")
 
     # Apply limit if specified (smoke test)
     if limit is not None:
@@ -109,7 +137,7 @@ def apply_ica_api(
         "id", "year", "us_score", "cca_score", "rel_score", "ica_score", "gated"
     ]).sort("ica_score", descending=True)
 
-    candidates_path = candidates_dir / "api_1960_1995.parquet"
+    candidates_path = candidates_dir / out_name
     candidates_output.write_parquet(candidates_path)
     logger.info(f"Wrote ranked ICA candidates to {candidates_path}: {candidates_output.height} rows")
 
@@ -130,6 +158,8 @@ def apply_ica_api(
 def apply_ica_ldc(
     cache_suffix: str = "ldc_9507",
     limit: int | None = None,
+    out_name: str | None = None,
+    years: tuple[int, int] = (1996, 2007),
 ) -> None:
     """Apply IcaModel over LDC corpus (1996-2007) with gold-first US gating.
 
@@ -140,7 +170,12 @@ def apply_ica_ldc(
     Args:
         cache_suffix: cache subdirectory name (default "ldc_9507")
         limit: optional row limit for smoke testing
+        out_name: candidates filename (default "ldc_1996_2007.parquet")
+        years: inclusive (lo, hi) restriction (default the 1996-2007 expansion
+            window — the pre-parameterization hardcoded behavior)
     """
+    if out_name is None:
+        out_name = "ldc_1996_2007.parquet"
     logger.info(f"Loading LDC cache: {cache_suffix}")
     cache_dir = config.CCA_EMBED_CACHE_DIR / cache_suffix
     if not cache_dir.exists():
@@ -149,15 +184,9 @@ def apply_ica_ldc(
     meta, cls_features = load_cache(cache_dir)
     logger.info(f"Loaded {meta.height} rows, {cls_features.shape[1]}d features")
 
-    # Filter to 1996-2007 if year column exists
-    if "year" in meta.columns:
-        meta_filtered = meta.filter((pl.col("year") >= 1996) & (pl.col("year") <= 2007))
-        # Get the row indices to filter cls_features
-        emb_rows = meta_filtered["emb_row"].to_numpy()
-        cls_features_filtered = cls_features[emb_rows]
-        meta = meta_filtered
-        cls_features = cls_features_filtered
-        logger.info(f"Filtered to 1996-2007: {meta.height} rows")
+    # Filter to the target year range if a year column exists
+    meta, cls_features = _filter_years(meta, cls_features, years)
+    logger.info(f"Filtered to {years[0]}-{years[1]}: {meta.height} rows")
 
     # Apply limit if specified (smoke test)
     if limit is not None:
@@ -226,7 +255,7 @@ def apply_ica_ldc(
         "id", "year", "us_score", "cca_score", "rel_score", "ica_score", "gated", "gate_source"
     ]).sort("ica_score", descending=True)
 
-    candidates_path = candidates_dir / "ldc_1996_2007.parquet"
+    candidates_path = candidates_dir / out_name
     candidates_output.write_parquet(candidates_path)
     logger.info(f"Wrote LDC ICA candidates to {candidates_path}: {candidates_output.height} rows")
 
@@ -254,6 +283,8 @@ def main(
     corpus: Literal["api", "ldc"] = "api",
     cache_suffix: str | None = None,
     limit: int | None = None,
+    out_name: str | None = None,
+    years: tuple[int, int] | None = None,
 ) -> None:
     """Apply IcaModel over API or LDC corpus.
 
@@ -261,6 +292,8 @@ def main(
         corpus: "api" or "ldc"
         cache_suffix: cache subdirectory name (auto-default based on corpus)
         limit: optional row limit for smoke testing
+        out_name: candidates filename (default: the per-corpus legacy name)
+        years: optional inclusive (lo, hi) year restriction (LDC default 1996-2007)
     """
     logging.basicConfig(level=logging.INFO)
 
@@ -268,14 +301,18 @@ def main(
         cache_suffix = "full" if corpus == "api" else "ldc_9507"
 
     if corpus == "api":
-        apply_ica_api(cache_suffix=cache_suffix, limit=limit)
+        apply_ica_api(cache_suffix=cache_suffix, limit=limit,
+                      out_name=out_name, years=years)
     elif corpus == "ldc":
-        apply_ica_ldc(cache_suffix=cache_suffix, limit=limit)
+        ldc_kwargs = {} if years is None else {"years": years}
+        apply_ica_ldc(cache_suffix=cache_suffix, limit=limit,
+                      out_name=out_name, **ldc_kwargs)
     else:
         raise ValueError(f"Unknown corpus: {corpus}")
 
 
-if __name__ == "__main__":
+def build_arg_parser() -> argparse.ArgumentParser:
+    """Construct the CLI parser (importable so tests can check flag defaults)."""
     parser = argparse.ArgumentParser(
         description="Apply assembled IcaModel over API/LDC corpora"
     )
@@ -298,10 +335,33 @@ if __name__ == "__main__":
         default=None,
         help="Limit rows for smoke testing",
     )
+    parser.add_argument(
+        "--out-name",
+        type=str,
+        default=None,
+        help="Candidates parquet filename (default: legacy per-corpus name; "
+             "forward run: api_1996_2025.parquet)",
+    )
+    parser.add_argument(
+        "--years",
+        type=str,
+        default=None,
+        help="Inclusive year range 'LO-HI' to score (default: whole cache for "
+             "api, 1996-2007 for ldc)",
+    )
+    return parser
 
-    args = parser.parse_args()
+
+if __name__ == "__main__":
+    args = build_arg_parser().parse_args()
+    years = None
+    if args.years is not None:
+        lo, hi = args.years.split("-")
+        years = (int(lo), int(hi))
     main(
         corpus=args.corpus,
         cache_suffix=args.cache_suffix,
         limit=args.limit,
+        out_name=args.out_name,
+        years=years,
     )

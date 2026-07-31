@@ -23,7 +23,6 @@ so that only `id`, `headline`, `lead_paragraph` are needed in the fixture data.
 """
 
 import polars as pl
-import pytest
 
 from src.data_setup.data import data_from_parquet
 
@@ -37,28 +36,34 @@ def _write_parquet(
     rows: list[dict],
     db_folder: str = "ldc_corpus",
     lead_column: str = "lead_paragraph",
+    fallback_column: str | None = None,
 ) -> None:
     """Write a list of row-dicts to a parquet file under
     `tmp_path / db_folder / test_data.parquet`.
 
-    Each dict must have keys: id, headline, and the specified lead_column name.
-    Use None for a true polars null.
+    Each dict must have keys: id, headline, and the specified lead_column name
+    (plus `fallback_column` when given). Use None for a true polars null.
     """
     corpus_dir = tmp_path / db_folder
     corpus_dir.mkdir(parents=True, exist_ok=True)
-    df = pl.DataFrame(
-        {
-            "id": [r["id"] for r in rows],
-            "headline": pl.Series(
-                "headline", [r["headline"] for r in rows], dtype=pl.Utf8
-            ),
-            lead_column: pl.Series(
-                lead_column,
-                [r[lead_column] for r in rows],
-                dtype=pl.Utf8,
-            ),
-        }
-    )
+    data = {
+        "id": [r["id"] for r in rows],
+        "headline": pl.Series(
+            "headline", [r["headline"] for r in rows], dtype=pl.Utf8
+        ),
+        lead_column: pl.Series(
+            lead_column,
+            [r[lead_column] for r in rows],
+            dtype=pl.Utf8,
+        ),
+    }
+    if fallback_column is not None:
+        data[fallback_column] = pl.Series(
+            fallback_column,
+            [r[fallback_column] for r in rows],
+            dtype=pl.Utf8,
+        )
+    df = pl.DataFrame(data)
     df.write_parquet(corpus_dir / "test_data.parquet")
 
 
@@ -258,4 +263,101 @@ class TestLeadColumnParameterization:
         assert _row_by_id(result, "r1")["headline_with_lead"][0] == "Title A</s>"
         assert _row_by_id(result, "r2")["headline_with_lead"][0] == "Title B</s>"
         assert _row_by_id(result, "r3")["headline_with_lead"][0] == "Title C</s>Real text."
+
+
+class TestLeadFallbackColumn:
+    """Tests for the `lead_fallback_column` parameter in `data_from_parquet`.
+
+    Policy (roadmap §A item 1): for the post-1995 API embed the text channel is
+    `headline + "</s>" + coalesce(lead_paragraph, abstrct)` — the fallback fills
+    in ONLY where the normalized lead is empty (null, "", or "NA"). The fallback
+    column gets the same null/"NA" normalization as the lead. Default `None`
+    preserves prior behavior byte-for-byte (no fallback column required in the
+    source parquet).
+    """
+
+    def test_fallback_ignored_when_lead_present(self, tmp_path):
+        """A non-empty lead wins; the fallback is not consulted."""
+        _write_parquet(
+            tmp_path,
+            [{"id": "r1", "headline": "Title", "lead_paragraph": "Real lead.",
+              "abstrct": "Abstract text."}],
+            fallback_column="abstrct",
+        )
+        result = data_from_parquet(
+            tmp_path, db_folder="ldc_corpus", lead_fallback_column="abstrct"
+        )
+        assert _row_by_id(result, "r1")["headline_with_lead"][0] == "Title</s>Real lead."
+
+    def test_fallback_used_when_lead_null(self, tmp_path):
+        """Null lead → the fallback column supplies the text after the separator."""
+        _write_parquet(
+            tmp_path,
+            [{"id": "r1", "headline": "Title", "lead_paragraph": None,
+              "abstrct": "Abstract text."}],
+            fallback_column="abstrct",
+        )
+        result = data_from_parquet(
+            tmp_path, db_folder="ldc_corpus", lead_fallback_column="abstrct"
+        )
+        assert _row_by_id(result, "r1")["headline_with_lead"][0] == "Title</s>Abstract text."
+
+    def test_fallback_used_when_lead_na_string(self, tmp_path):
+        """Literal "NA" lead is empty after normalization → fallback used."""
+        _write_parquet(
+            tmp_path,
+            [{"id": "r1", "headline": "Title", "lead_paragraph": "NA",
+              "abstrct": "Abstract text."}],
+            fallback_column="abstrct",
+        )
+        result = data_from_parquet(
+            tmp_path, db_folder="ldc_corpus", lead_fallback_column="abstrct"
+        )
+        assert _row_by_id(result, "r1")["headline_with_lead"][0] == "Title</s>Abstract text."
+
+    def test_fallback_normalized_like_lead(self, tmp_path):
+        """Null and "NA" in the FALLBACK column also normalize to "" — a row
+        missing both lead and fallback yields headline + "</s>"."""
+        _write_parquet(
+            tmp_path,
+            [
+                {"id": "r1", "headline": "Title A", "lead_paragraph": None, "abstrct": None},
+                {"id": "r2", "headline": "Title B", "lead_paragraph": None, "abstrct": "NA"},
+            ],
+            fallback_column="abstrct",
+        )
+        result = data_from_parquet(
+            tmp_path, db_folder="ldc_corpus", lead_fallback_column="abstrct"
+        )
+        assert _row_by_id(result, "r1")["headline_with_lead"][0] == "Title A</s>"
+        assert _row_by_id(result, "r2")["headline_with_lead"][0] == "Title B</s>"
+
+    def test_mixed_rows_coalesce_independently(self, tmp_path):
+        """Per-row coalesce: lead-bearing rows keep their lead, lead-empty rows
+        ride the fallback (the 2025 shape: all leads null, abstracts present)."""
+        _write_parquet(
+            tmp_path,
+            [
+                {"id": "r1", "headline": "A", "lead_paragraph": "Lead A.", "abstrct": "Abs A."},
+                {"id": "r2", "headline": "B", "lead_paragraph": None, "abstrct": "Abs B."},
+                {"id": "r3", "headline": "C", "lead_paragraph": "", "abstrct": "Abs C."},
+            ],
+            fallback_column="abstrct",
+        )
+        result = data_from_parquet(
+            tmp_path, db_folder="ldc_corpus", lead_fallback_column="abstrct"
+        )
+        assert _row_by_id(result, "r1")["headline_with_lead"][0] == "A</s>Lead A."
+        assert _row_by_id(result, "r2")["headline_with_lead"][0] == "B</s>Abs B."
+        assert _row_by_id(result, "r3")["headline_with_lead"][0] == "C</s>Abs C."
+
+    def test_default_none_requires_no_fallback_column(self, tmp_path):
+        """Back-compat: default lead_fallback_column=None reads a parquet with
+        NO fallback column and produces the prior behavior."""
+        _write_parquet(
+            tmp_path,
+            [{"id": "r1", "headline": "Title", "lead_paragraph": None}],
+        )
+        result = data_from_parquet(tmp_path, db_folder="ldc_corpus")
+        assert _row_by_id(result, "r1")["headline_with_lead"][0] == "Title</s>"
 

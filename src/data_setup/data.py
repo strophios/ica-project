@@ -6,7 +6,7 @@ import tensorflow as tf
 
 def data_from_parquet(
     project_root, db_folder="ldc_corpus", addl_columns=None, lead_column="lead_paragraph",
-    pattern=None,
+    pattern=None, lead_fallback_column=None,
 ):
     # `pattern` (relative to project_root) overrides the default recursive glob.
     # Needed when a folder holds multiple parquets with different schemas — e.g.
@@ -14,11 +14,21 @@ def data_from_parquet(
     # (the latter lacking `id`), so the default `us_filter/**/*.parquet` glob fails
     # with ColumnNotFoundError. Pass pattern="us_filter/ldc_labeled.parquet" to read
     # exactly one file. Default (None) preserves the `{db_folder}/**/*.parquet` glob.
+    #
+    # `lead_fallback_column` (default None = prior behavior): when set, rows whose
+    # normalized lead is empty take their post-separator text from this column
+    # instead — `headline + "</s>" + coalesce(lead, fallback)`. The fallback gets
+    # the same null/"NA" normalization as the lead. Adopted for the post-1995 API
+    # embed where 2025 has no lead_paragraph at all (roadmap §A item 1); do NOT
+    # use for pre-1996 eras without the pre-registered channel experiment
+    # (historical abstracts are NYT-Index register, not article text).
     glob = pattern if pattern is not None else f"{db_folder}/**/*.parquet"
     ldc_pq = pl.scan_parquet(
         f"{project_root}/{glob}", hive_partitioning=True
     )
     cols_to_select = ["id", "headline", lead_column]
+    if lead_fallback_column is not None:
+        cols_to_select.append(lead_fallback_column)
     if addl_columns is not None:
         [cols_to_select.append(x) for x in addl_columns]
 
@@ -28,29 +38,37 @@ def data_from_parquet(
     # may appear either as the literal string "NA" (legacy upstream export
     # convention) or as a true polars null; both need to become "" before
     # the string concatenation below, which would otherwise raise on None.
-    ldc_data = ldc_data.with_columns(
-        pl.col("headline").fill_null(""),
-        pl.col(lead_column).fill_null(""),
+    text_cols = ["headline", lead_column] + (
+        [lead_fallback_column] if lead_fallback_column is not None else []
     )
     ldc_data = ldc_data.with_columns(
-        pl.when(pl.col.headline == "NA")
-        .then(pl.lit(""))
-        .otherwise(pl.col.headline)
-        .alias("headline"),
-        pl.when(pl.col(lead_column) == "NA")
-        .then(pl.lit(""))
-        .otherwise(pl.col(lead_column))
-        .alias(lead_column),
+        [pl.col(c).fill_null("") for c in text_cols]
+    )
+    ldc_data = ldc_data.with_columns(
+        [
+            pl.when(pl.col(c) == "NA")
+            .then(pl.lit(""))
+            .otherwise(pl.col(c))
+            .alias(c)
+            for c in text_cols
+        ]
     )
     # joining the headlines and leads, including the RoBERTa separator token (which I'm fairly certain does not
     # get spaces on either side; at least not added ones)
     # note that, if we create "headline_with_lead" ourselves, we don't need to built in MaskedLM preprocessor,
     # since we'll have a single series of strings, each of which needs to be packed, padded, and masked separately.
+    if lead_fallback_column is not None:
+        lead_series = ldc_data.select(
+            pl.when(pl.col(lead_column) == "")
+            .then(pl.col(lead_fallback_column))
+            .otherwise(pl.col(lead_column))
+            .alias("_effective_lead")
+        ).get_column("_effective_lead")
+    else:
+        lead_series = ldc_data.get_column(lead_column)
     headline_lead = [
         x + "</s>" + y
-        for x, y in zip(
-            ldc_data.get_column("headline"), ldc_data.get_column(lead_column)
-        )
+        for x, y in zip(ldc_data.get_column("headline"), lead_series)
     ]
     ldc_data = ldc_data.with_columns(
         pl.Series(name="headline_with_lead", values=headline_lead)

@@ -460,3 +460,142 @@ def test_apply_ica_ldc_gold_first_gating(synthetic_cache_ldc):
         # Row 1 should be gated out (gold=False overrides high us_score)
         assert row_1["gated"] is False, "Row 1 with gold=False should be gated out"
         assert row_1["gate_source"] == "gold", "Row 1 should use gold source"
+
+
+# =============================================================================
+# Tests: out_name + years parameterization (the 1996-2025 forward apply)
+# =============================================================================
+
+
+def _mock_api_apply(mock_config, cache_dir, meta, cls_features, mock_load_cache, mock_ica_model):
+    """Shared mock wiring for the API path (mirrors test_apply_ica_api_output_schema)."""
+    mock_config.CCA_EMBED_CACHE_DIR = cache_dir.parent
+    mock_config.US_FILTER_SCORES_DIR = Path(mock_config.CCA_EMBED_CACHE_DIR) / "us_scores"
+    mock_config.CCA_DOCA_SCORES_DIR = Path(mock_config.CCA_EMBED_CACHE_DIR) / "cca_scores"
+    mock_config.ICA_CANDIDATES_DIR = Path(mock_config.CCA_EMBED_CACHE_DIR) / "ica_candidates"
+    mock_load_cache.return_value = (meta, cls_features)
+
+    model_instance = mock_ica_model.return_value
+
+    def predict(features, gate_override=None):
+        n = features.shape[0]
+        rng = np.random.default_rng(7)
+        return {
+            "us": rng.uniform(0, 1, n).astype(np.float32),
+            "cca": rng.uniform(0, 1, n).astype(np.float32),
+            "rel": rng.uniform(0, 1, n).astype(np.float32),
+            "ica_score": rng.uniform(0, 1, n).astype(np.float32),
+        }
+
+    model_instance.predict_ica_from_features.side_effect = predict
+    model_instance.fusion_config.gate_threshold = 0.5
+    return model_instance
+
+
+def test_apply_ica_api_custom_out_name(synthetic_cache_api):
+    """out_name routes the candidates parquet (forward run: api_1996_2025.parquet)."""
+    from src.apply_ica import apply_ica_api
+
+    cache_dir, meta, cls_features = synthetic_cache_api
+    with mock.patch("src.apply_ica.config") as mock_config, \
+         mock.patch("src.apply_ica.load_cache") as mock_load_cache, \
+         mock.patch("src.apply_ica.IcaModel") as mock_ica_model:
+        _mock_api_apply(mock_config, cache_dir, meta, cls_features,
+                        mock_load_cache, mock_ica_model)
+        apply_ica_api(cache_suffix="test_cache", out_name="api_1996_2025.parquet")
+        out_dir = Path(mock_config.ICA_CANDIDATES_DIR)
+        assert (out_dir / "api_1996_2025.parquet").exists()
+        assert not (out_dir / "api_1960_1995.parquet").exists()
+
+
+def test_apply_ica_api_years_filter(synthetic_cache_api):
+    """years=(lo, hi) restricts scoring to that inclusive range, keeping
+    meta rows and CLS features row-aligned."""
+    from src.apply_ica import apply_ica_api
+
+    cache_dir, meta, cls_features = synthetic_cache_api
+    with mock.patch("src.apply_ica.config") as mock_config, \
+         mock.patch("src.apply_ica.load_cache") as mock_load_cache, \
+         mock.patch("src.apply_ica.IcaModel") as mock_ica_model:
+        model_instance = _mock_api_apply(mock_config, cache_dir, meta, cls_features,
+                                         mock_load_cache, mock_ica_model)
+        apply_ica_api(cache_suffix="test_cache", years=(1960, 1961))
+        expected_rows = meta.filter(
+            pl.col("year").cast(pl.Int64).is_between(1960, 1961)
+        ).height
+        candidates = pl.read_parquet(
+            Path(mock_config.ICA_CANDIDATES_DIR) / "api_1960_1995.parquet"
+        )
+        assert candidates.height == expected_rows
+        assert set(candidates["year"].to_list()) == {1960, 1961}
+        # The model must only have been fed the filtered feature rows.
+        (called_features,), _ = model_instance.predict_ica_from_features.call_args
+        assert called_features.shape[0] == expected_rows
+
+
+def test_apply_ica_ldc_years_parameterized(synthetic_cache_ldc):
+    """apply_ica_ldc accepts years + out_name (default stays 1996-2007 /
+    ldc_1996_2007.parquet — covered by the existing schema test)."""
+    from src.apply_ica import apply_ica_ldc
+
+    cache_dir, meta, cls_features = synthetic_cache_ldc
+    with mock.patch("src.apply_ica.config") as mock_config, \
+         mock.patch("src.apply_ica.load_cache") as mock_load_cache, \
+         mock.patch("src.apply_ica.IcaModel") as mock_ica_model:
+        mock_config.CCA_EMBED_CACHE_DIR = cache_dir.parent
+        mock_config.ICA_CANDIDATES_DIR = Path(mock_config.CCA_EMBED_CACHE_DIR) / "ica_candidates"
+        gold_labels = pl.DataFrame({
+            "id": meta["id"].to_list()[:4],
+            "us_label": [True, False, None, None],
+        })
+        gold_labels_path = Path(mock_config.CCA_EMBED_CACHE_DIR) / "ldc_labeled.parquet"
+        gold_labels.write_parquet(gold_labels_path)
+        mock_config.US_FILTER_LABELED_PARQUET = gold_labels_path
+        mock_load_cache.return_value = (meta, cls_features)
+
+        model_instance = mock_ica_model.return_value
+
+        def predict(features, gate_override=None):
+            n = features.shape[0]
+            rng = np.random.default_rng(7)
+            return {
+                "us": rng.uniform(0, 1, n).astype(np.float32),
+                "cca": rng.uniform(0, 1, n).astype(np.float32),
+                "rel": rng.uniform(0, 1, n).astype(np.float32),
+                "ica_score": rng.uniform(0, 1, n).astype(np.float32),
+            }
+
+        model_instance.predict_ica_from_features.side_effect = predict
+        model_instance.fusion_config.gate_threshold = 0.5
+
+        apply_ica_ldc(cache_suffix="test_cache_ldc", years=(1996, 2000),
+                      out_name="ldc_1996_2000.parquet")
+        candidates = pl.read_parquet(
+            Path(mock_config.ICA_CANDIDATES_DIR) / "ldc_1996_2000.parquet"
+        )
+        expected_rows = meta.filter(
+            pl.col("year").cast(pl.Int64).is_between(1996, 2000)
+        ).height
+        assert candidates.height == expected_rows
+        assert candidates["year"].cast(pl.Int64).is_between(1996, 2000).all()
+
+
+def test_apply_ica_parser_defaults():
+    """CLI parser: --out-name and --years default to None (function defaults
+    preserve today's output names and ranges)."""
+    from src.apply_ica import build_arg_parser
+
+    args = build_arg_parser().parse_args(["--corpus", "api"])
+    assert args.out_name is None
+    assert args.years is None
+
+
+def test_apply_ica_parser_accepts_out_name_and_years():
+    from src.apply_ica import build_arg_parser
+
+    args = build_arg_parser().parse_args([
+        "--corpus", "api", "--cache-suffix", "api_9625",
+        "--out-name", "api_1996_2025.parquet", "--years", "1996-2025",
+    ])
+    assert args.out_name == "api_1996_2025.parquet"
+    assert args.years == "1996-2025"
