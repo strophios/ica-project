@@ -106,3 +106,55 @@ New/changed data products (gitignored):
 - `relevance/relevance.{weights.h5,config.json,calibration.json}` — retrained `rel`
   head + calibrator.
 - `cca_doca/cca_doca*.weights.h5` — retrained CCA heads (all-forms + any_street).
+
+---
+
+## 2026-07-31 forward apply — finish 1960-1995 + embed/apply 1996-2025
+
+*Added 2026-07-31. Goal: topline numbers for the Aug 6 meeting — complete the
+1960-1995 candidates (the `full` cache was 1960-1975 only) and produce forward
+candidates through 2025, both with the DEPLOYED frozen stack (mixed-stack
+productionization deliberately deferred to avoid extra encoder passes; see
+roadmap §A1). Local engineering landed in commit d0c0898: `--lead-fallback-column`
+(coalesce channel), `--dedupe-ids`, `apply_ica --out-name/--years`.*
+
+### Channel + hygiene decisions (do not re-litigate at the terminal)
+
+- **1976-1995 embed: raw channel, NO coalesce** — pre-1996 stays exactly on the
+  trained channel; the lead-free eras (1960-63, 65-69, 80) remain headline-only.
+  Historical coalesce is gated behind the pre-registered 1970s experiment.
+- **1996-2025 embed: `headline</s>coalesce(lead_paragraph, abstrct)`** — 2025
+  has zero leads (contemporaneous abstracts, sound); pre-2025 the fallback only
+  fills gaps (2005 is the known bad patch, ~15% both-missing).
+- **`--dedupe-ids` on the 9625 embed only**: resolves the 911 pull-overlap dup
+  ids (prefer non-empty lead, then earliest year — runs before the year filter
+  so the two parts agree on cross-year dups) and drops 13 empty-id 2025 junk
+  rows. Expected log line: `6366847 -> 6365855 rows (992 duplicate rows dropped)`.
+
+### Operator sequence
+
+1. **Sync up**: the 1996-2025 `api_corpus/*.parquet` files (1960-1995 files are
+   unchanged since Jun 10; end state = 66 files incl. `2025.parquet` — the
+   preflight asserts this), and `git pull` the repo on the cluster.
+2. **Smokes first** (minutes each; inspect stats + provenance, then rm the
+   throwaway suffix):
+   `sbatch scripts/embed_apply_9625.sbatch smoke`
+   `sbatch scripts/embed_finish_full.sbatch smoke`
+3. **Jobs** (independent — can run concurrently):
+   `sbatch scripts/embed_finish_full.sbatch all`   (~1.9M rows + apply)
+   `sbatch scripts/embed_apply_9625.sbatch all`    (~2.7M rows in 2 parts + apply)
+   Each stage is individually resubmittable (`embed|apply` /
+   `part1|part2|apply`); the scripts carry preflight guards and the
+   **resume rule** (a part that died mid-run left no `provenance.<offset>.json`
+   — delete that part's partial shards before resubmitting it).
+4. **Sync back** (small files only; leave the ~20GB of CLS shards on-cluster):
+   - `cca_doca/ica_candidates/api_1960_1995.parquet` (now truly 1960-1995)
+   - `cca_doca/ica_candidates/api_1996_2025.parquet`
+   - `cca_doca/embed_cache/{full,api_9625}/provenance.*.json` (for the record)
+   - optionally `us_filter/api_us_scores/` + `cca_doca/api_cca_scores/` per-year files
+5. **Topline eval** (local; scripts under construction — roadmap §A1 item 3):
+   CCA/composed recall vs DoCA on full 1960-1995; ranks of the 214 hand-coded
+   ICA positives; per-year candidate rates 1996-2025 **with 2025 sliced
+   separately** (abstract-register shift); top-K face-validity CSVs. The
+   1996-2007 overlap with the existing LDC gold-first candidates doubles as a
+   cross-corpus consistency check (API ML-gate vs LDC gold-first).

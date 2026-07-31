@@ -1,0 +1,67 @@
+#!/bin/bash
+#SBATCH --job-name=embed-full-7695
+#SBATCH --partition=gpu
+#SBATCH --gres=gpu:h200
+#SBATCH --time=06:00:00
+#SBATCH --mem=64G
+#SBATCH --output=/projects/ahd/cca_logs/slurm-%j.out
+
+# Finish the `full` API cache (1976-1995) and re-apply the deployed IcaModel
+# over the complete 1960-1995 range. Runbook:
+# docs/notes/ica-apply-results-and-cluster-runbook.md ("2026-07-31 forward apply").
+#
+# Stages (argument, default `all` = embed + apply):
+#   sbatch scripts/embed_finish_full.sbatch smoke   # 200-row smoke, throwaway suffix
+#   sbatch scripts/embed_finish_full.sbatch embed   # 1976-1995 append into `full`
+#   sbatch scripts/embed_finish_full.sbatch apply   # apply_ica over the completed cache
+#   sbatch scripts/embed_finish_full.sbatch all
+#
+# RESUME RULE: `--append` continues shard NUMBERING, not row-level progress.
+# If the embed stage dies mid-part, its provenance.008.json will be ABSENT;
+# delete the partial shards (shard_008_* and up) before resubmitting:
+#   rm /projects/ahd/cca_doca/embed_cache/full/shard_0{08..99}_* 2>/dev/null
+# Expected runtime: ~1.9M rows; the July tuned re-embed did ~1.15M rows
+# inside a 4h window on h200, so 6h has headroom. If the job is still queued
+# or running past ~6h wall, check the log before any resubmit.
+
+set -euo pipefail
+
+module load use.own uv
+
+cd "/projects/ahd/ica-project"
+export ICA_ENV=cluster
+
+STAGE="${1:-all}"
+CACHE=/projects/ahd/cca_doca/embed_cache/full
+STAMP=20260731
+
+preflight_embed() {
+    # Corpus must carry the years we embed; NO coalesce for 1976-1995
+    # (pre-1996 stays on the trained raw channel — roadmap A1 item 3 note).
+    [ -f /projects/ahd/api_corpus/1995.parquet ] || { echo "FATAL: api_corpus/1995.parquet missing (sync the corpus)"; exit 1; }
+    # Idempotence guard: exactly the 8 part-1 shards, not already appended.
+    n_shards=$(ls "$CACHE"/shard_*_cls.npy 2>/dev/null | wc -l)
+    [ "$n_shards" -eq 8 ] || { echo "FATAL: expected 8 existing shards in $CACHE, found $n_shards (already appended, or partial state — see RESUME RULE)"; exit 1; }
+    [ ! -f "$CACHE/provenance.008.json" ] || { echo "FATAL: provenance.008.json exists — 1976-1995 already appended"; exit 1; }
+}
+
+if [ "$STAGE" = "smoke" ]; then
+    uv run python -m src.embed_corpus --full --years 1976-1976 --limit 200 \
+        --out-suffix smoke_full_7695 --stamp "$STAMP"
+    echo "SMOKE OK — inspect stats above, then: rm -r /projects/ahd/cca_doca/embed_cache/smoke_full_7695"
+    exit 0
+fi
+
+if [ "$STAGE" = "embed" ] || [ "$STAGE" = "all" ]; then
+    preflight_embed
+    uv run python -m src.embed_corpus --full --years 1976-1995 --append \
+        --out-suffix full --stamp "$STAMP"
+    [ -f "$CACHE/provenance.008.json" ] || { echo "FATAL: append finished without provenance.008.json"; exit 1; }
+fi
+
+if [ "$STAGE" = "apply" ] || [ "$STAGE" = "all" ]; then
+    # Deployed frozen-stack IcaModel; ML US gate (API has no dateline labels).
+    # Writes cca_doca/ica_candidates/api_1960_1995.parquet (now truly 1960-1995)
+    # + per-year us_filter/api_us_scores/ and cca_doca/api_cca_scores/.
+    uv run python -m src.apply_ica --corpus api
+fi
