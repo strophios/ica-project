@@ -39,7 +39,7 @@ import tensorflow as tf
 import src.config as config
 from src.data_setup.data import data_from_parquet
 from src.preproc.preprocessor import ClassifierPreprocessor
-from src.model_setup.backbone import load_dapt_backbone
+from src.model_setup.backbone import load_dapt_backbone, resolve_backbone_path
 from src.model_setup.heads import ClassificationHead
 from src.model_setup.assembly import build_inference_model
 from src.us_config import UsRunConfig, config_path_for_weights
@@ -251,8 +251,12 @@ def _build_embed_model(us_weights: Path, backbone_weights: Path | str | None = N
     """
     us_cfg = UsRunConfig.from_json(config_path_for_weights(us_weights))
     us_head = ClassificationHead(hidden_dim=us_cfg.head.hidden_dim, name=us_cfg.head.name)
+    # Resolve here (not just inside load_dapt_backbone) so provenance records
+    # the path actually loaded, not a machine-foreign sidecar path.
     backbone_path = (
-        Path(backbone_weights) if backbone_weights is not None else Path(us_cfg.backbone_weights_path)
+        Path(backbone_weights)
+        if backbone_weights is not None
+        else resolve_backbone_path(us_cfg.backbone_weights_path)
     )
     backbone = load_dapt_backbone(backbone_path)
     us_cfg.validate_against_backbone(backbone)
