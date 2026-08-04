@@ -41,18 +41,26 @@ module load use.own uv
 
 cd "/projects/ahd/ica-project"
 export ICA_ENV=cluster
+# fp32, matching the locally-produced production caches the heads/calibrators
+# were fit on (full pt-1 / ldc_9507 are local fp32 — 2026-08-04 finding).
+export ICA_DTYPE_POLICY=float32
 
 STAGE="${1:-all}"
 CACHE=/projects/ahd/cca_doca/embed_cache/api_9625
 STAMP=20260731
-CHANNEL_ARGS=(--lead-fallback-column abstrct --dedupe-ids)
+# --source-pattern pins the population to the 66 TOP-LEVEL parquets: the
+# default corpus glob is recursive and swept in ~8.6M extra rows from
+# subdirectory parquets on the cluster (2026-08-04 smoke: 14.99M vs 6.37M).
+CHANNEL_ARGS=(--lead-fallback-column abstrct --dedupe-ids
+              --source-pattern 'api_corpus/*.parquet')
 
 preflight_corpus() {
-    # The 1996-2025 parquets were pulled on the operator's machine — the
-    # cluster copy must be synced first (66 files incl. 2025.parquet).
-    [ -f /projects/ahd/api_corpus/2025.parquet ] || { echo "FATAL: api_corpus/2025.parquet missing — sync the expanded corpus up first"; exit 1; }
-    n_files=$(ls /projects/ahd/api_corpus/*.parquet | wc -l)
-    [ "$n_files" -eq 66 ] || { echo "FATAL: expected 66 api_corpus parquets, found $n_files"; exit 1; }
+    # Bookend checks for the years this job embeds. NO total-file-count
+    # assert: the corpus legitimately grows (2026-07-31: the 1870-1959
+    # backward transform landed ~90 more per-year files) — the year filter
+    # inside embed_corpus is the real population pin.
+    [ -f /projects/ahd/api_corpus/1996.parquet ] || { echo "FATAL: api_corpus/1996.parquet missing — sync the corpus up first"; exit 1; }
+    [ -f /projects/ahd/api_corpus/2025.parquet ] || { echo "FATAL: api_corpus/2025.parquet missing — sync the corpus up first"; exit 1; }
 }
 
 if [ "$STAGE" = "smoke" ]; then

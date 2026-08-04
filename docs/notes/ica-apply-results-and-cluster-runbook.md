@@ -180,3 +180,45 @@ roadmap §A1). Local engineering landed in commit d0c0898: `--lead-fallback-colu
   time. An instant job death (~1s) with a created-but-empty log means the
   failure predates the script's first line — check the submission layer, not
   the script.
+
+### 2026-08-04 smoke findings — corpus growth, fp32 pin, population contract
+
+The first on-cluster smokes surfaced three findings; scripts updated accordingly.
+
+1. **The corpus grew underneath the arc (and that's fine, once pinned).** The
+   operator's backward transform ran 2026-07-31: `api_corpus/` now holds
+   **156 top-level per-year parquets, 1870-2025, 14,991,212 rows** locally
+   (~8.6M backward rows; the 1870-1959 skeleton is no longer raw-only). The
+   earlier "66 files" preflight assert is retired — **the year filter inside
+   `embed_corpus` is the population pin**, and it held (2025 = 47,798 rows on
+   both machines; the extra dedupe drops, 1072 vs 992, are within-backward-set
+   rotating-month overlaps that cannot cross the 1959/1996 divide). Preflights
+   now check year *bookends* (1976+1995 / 1996+2025). Embeds pass
+   `--source-pattern 'api_corpus/*.parquet'` (top-level only) for explicitness.
+   NOTE: root `CLAUDE.md` + `project-state-and-data-map.md` still describe the
+   66-file corpus — reconcile after this arc; the 1870-1959 era still owes the
+   pre-registered schema/missingness/register audit before anything trains or
+   applies on it.
+2. **Precision pinned to fp32.** The production caches (`full` part-1,
+   `ldc_9507`, `train250k`) were produced LOCALLY in float32 (verified via
+   their provenance paths); cluster default is `mixed_float16`. Both scripts
+   now `export ICA_DTYPE_POLICY=float32` (new env override in `src/config.py`)
+   so the appended/new shards are precision-uniform with what the heads and
+   calibrators were fit on — and so no fp16/fp32 seam lands on the 1975/76
+   era boundary of an era-comparison cache.
+3. **us_logit vintage check (open until re-smoke).** Cluster smoke produced
+   identical CLS stats (cls_std 0.3806) but shifted us_logit
+   (mean 1.99 vs 2.91 local) on the same 200 rows. fp32 re-smoke
+   discriminates: if it matches local exactly, it was fp16 numerics; if not,
+   the cluster's `us_classifier.weights.h5` is a different vintage (local:
+   503,758,392 bytes) — re-sync it + its `.config.json`. Either way the
+   apply path is insulated (IcaModel rescores US from CLS via
+   `us_classifier_full`; cached `us_logit` is inert for apply), but the
+   cached `us_logit` matters for future table builds, so pin it.
+
+**Re-smoke acceptance criteria (cluster, after git pull):**
+`(6366847, 6)` corpus load if the backward files are nested on the cluster
+(or `(14991212, 6)` if top-level — either is fine, the year filter pins);
+`dedupe` line consistent with the loaded set; `year filter 2025-2025: 47798`;
+us_logit `min/mean/max = -4.91/2.91/7.59` matching local; provenance carries
+`lead_fallback_column=abstrct`, `dedupe_ids=true`. Then submit both `all` jobs.

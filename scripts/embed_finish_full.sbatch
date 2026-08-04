@@ -31,14 +31,22 @@ module load use.own uv
 
 cd "/projects/ahd/ica-project"
 export ICA_ENV=cluster
+# fp32: the existing 8 part-1 shards are locally-produced float32 — an fp16
+# append would seam the cache numerically at the 1975/76 era boundary.
+export ICA_DTYPE_POLICY=float32
 
 STAGE="${1:-all}"
 CACHE=/projects/ahd/cca_doca/embed_cache/full
 STAMP=20260731
+# Pin to the 66 top-level parquets (the default glob is recursive and the
+# cluster api_corpus/ has extra subdirectory parquets — 2026-08-04 finding).
+SOURCE_ARGS=(--source-pattern 'api_corpus/*.parquet')
 
 preflight_embed() {
-    # Corpus must carry the years we embed; NO coalesce for 1976-1995
-    # (pre-1996 stays on the trained raw channel — roadmap A1 item 3 note).
+    # Bookend checks only (no total-count assert — the corpus legitimately
+    # grows; the year filter is the population pin). NO coalesce for
+    # 1976-1995 (pre-1996 stays on the trained raw channel).
+    [ -f /projects/ahd/api_corpus/1976.parquet ] || { echo "FATAL: api_corpus/1976.parquet missing (sync the corpus)"; exit 1; }
     [ -f /projects/ahd/api_corpus/1995.parquet ] || { echo "FATAL: api_corpus/1995.parquet missing (sync the corpus)"; exit 1; }
     # Idempotence guard: exactly the 8 part-1 shards, not already appended.
     n_shards=$(ls "$CACHE"/shard_*_cls.npy 2>/dev/null | wc -l)
@@ -48,7 +56,7 @@ preflight_embed() {
 
 if [ "$STAGE" = "smoke" ]; then
     uv run python -m src.embed_corpus --full --years 1976-1976 --limit 200 \
-        --out-suffix smoke_full_7695 --stamp "$STAMP"
+        "${SOURCE_ARGS[@]}" --out-suffix smoke_full_7695 --stamp "$STAMP"
     echo "SMOKE OK — inspect stats above, then: rm -r /projects/ahd/cca_doca/embed_cache/smoke_full_7695"
     exit 0
 fi
@@ -56,7 +64,7 @@ fi
 if [ "$STAGE" = "embed" ] || [ "$STAGE" = "all" ]; then
     preflight_embed
     uv run python -m src.embed_corpus --full --years 1976-1995 --append \
-        --out-suffix full --stamp "$STAMP"
+        "${SOURCE_ARGS[@]}" --out-suffix full --stamp "$STAMP"
     [ -f "$CACHE/provenance.008.json" ] || { echo "FATAL: append finished without provenance.008.json"; exit 1; }
 fi
 

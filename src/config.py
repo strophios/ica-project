@@ -173,5 +173,22 @@ RELEVANCE_TEXT_WEIGHTS: Path = PROJECT_ROOT / "relevance" / "relevance_text.weig
 # precision pays off on the former and is unreliable / pointless on
 # the latter. Callers apply this explicitly via
 # `keras.config.set_dtype_policy(DTYPE_POLICY)`.
+#
+# `ICA_DTYPE_POLICY` overrides the platform rule. Motivating case
+# (2026-08-04): cluster embed jobs producing CLS caches that must be
+# precision-uniform with the locally-produced fp32 production caches
+# (`full` part-1, `ldc_9507`) — an fp16 append would put a numeric seam
+# exactly on the 1975/76 era boundary of an era-comparison cache.
+# Invalid values fail loudly at import; no silent fallback.
 
-DTYPE_POLICY: str = "mixed_float16" if IS_CLUSTER else "float32"
+_DTYPE_OVERRIDE = os.environ.get("ICA_DTYPE_POLICY")
+if _DTYPE_OVERRIDE is not None and _DTYPE_OVERRIDE not in ("float32", "mixed_float16"):
+    raise ValueError(
+        f"ICA_DTYPE_POLICY must be 'float32' or 'mixed_float16'; "
+        f"got {_DTYPE_OVERRIDE!r}"
+    )
+DTYPE_POLICY: str = (
+    _DTYPE_OVERRIDE
+    if _DTYPE_OVERRIDE is not None
+    else ("mixed_float16" if IS_CLUSTER else "float32")
+)
