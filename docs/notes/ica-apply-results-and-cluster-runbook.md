@@ -222,3 +222,45 @@ The first on-cluster smokes surfaced three findings; scripts updated accordingly
 `dedupe` line consistent with the loaded set; `year filter 2025-2025: 47798`;
 us_logit `min/mean/max = -4.91/2.91/7.59` matching local; provenance carries
 `lead_fallback_column=abstrct`, `dedupe_ids=true`. Then submit both `all` jobs.
+
+### 2026-08-04 (later): RESOLVED — the "us_logit mystery" was a LOCAL tensorflow-metal bug
+
+The smoke-discrepancy investigation concluded, and it inverts the earlier
+framing: **the cluster numbers were correct all along; the local (MPS)
+numbers are wrong.** Supersedes the "re-smoke acceptance criteria" above —
+the correct 2025-smoke us_logit stats are the CLUSTER's
+`min/mean/max = -4.53/1.99/6.05`, NOT the local -4.91/2.91/7.59.
+
+**Finding.** tensorflow-metal mis-executes the `ClassificationHead` dropout
+sub-path inside compiled `model.predict` graphs: deterministic per process,
+but wrong versus true math. Chain of evidence: cluster/local CLS bit-identical
+(7e-6) with us_logit shifted on all rows → head weights verified
+loaded-correctly on BOTH machines (h5 dataset comparison) → cluster cache
+self-consistent (head(CLS) == cached logits exactly) while the LOCAL cache is
+not → local predict-vs-direct disagrees (deterministically) on MPS and is
+EXACT on local CPU. Magnitudes on real CLS features: us mean +1.6 (maxabs
+5.5), cca -1.4, rel -0.7 logits.
+
+**Blast radius.** Every score product computed on local MPS predict paths:
+the cached `us_logit` in all locally-embedded caches (train250k spot check:
+mean -0.84 shift, ~2.9% of rows flip sign at the us_logit≥0 gate used for
+US-restriction of training tables), the June ica_candidates (both files),
+the three Platt calibration fits, the fusion fit, and the eval-set score
+products behind the memo numbers (ROC 0.80/0.82 etc. — measured through a
+consistently-distorted pipeline, so internally coherent but not the true
+model's numbers). CLS features themselves are CORRECT everywhere (the bug is
+head-path-only); trained weight artifacts are unaffected as artifacts.
+
+**Guard added.** `apply_ica.assert_scoring_integrity` (commit with this note)
+runs predict-vs-direct on a 256-row sample before writing any candidates and
+fails loudly on a distorted stack — local MPS apply now refuses to run, by
+design. Cluster (CUDA) and CPU pass.
+
+**Consequences for this arc.** The two cluster jobs are cleared to launch —
+cluster embeds + cluster applies produce TRUE scores end to end. Follow-ups
+(operator decision pending): re-apply LDC on the cluster (its CLS cache is
+valid; only scores need regenerating), refit calibrations/fusion on true
+logits (CPU or cluster), re-run the eval suite for true topline numbers, and
+adjust memo language if it has not gone out. Upstream: file a
+tensorflow-metal issue with the minimal repro (predict-vs-direct on a
+dropout-bearing MLP).

@@ -55,6 +55,33 @@ def _filter_years(
     return filtered, cls_features[emb_rows]
 
 
+def assert_scoring_integrity(model, features: np.ndarray, atol: float = 1e-3) -> None:
+    """Guard: the compiled predict path must match direct head computation.
+
+    2026-08-04 finding: tensorflow-metal (local MPS) mis-executes the
+    ClassificationHead dropout sub-path inside compiled predict graphs —
+    deterministic per process, wrong vs true math (us mean shift ~+1.6 on
+    real CLS features), while CUDA and CPU are exact. Every score product
+    computed on MPS before this date carries that distortion. This check
+    runs on a small sample before any candidates are written and fails
+    loudly rather than letting a distorted stack score a corpus.
+    """
+    sample = features[: min(len(features), 256)]
+    pred = model.model.predict({"features": sample}, verbose=0)
+    for name, head in (("us", model.us_head), ("cca", model.cca_head), ("rel", model.rel_head)):
+        direct = np.asarray(head(sample)).reshape(-1)
+        got = np.asarray(pred[name]).reshape(-1)
+        maxabs = float(np.max(np.abs(got - direct)))
+        if maxabs > atol:
+            raise RuntimeError(
+                f"scoring integrity check failed for head '{name}': compiled "
+                f"predict differs from direct computation (maxabs {maxabs:.4f} "
+                f"> atol {atol}). Known cause: the tensorflow-metal dropout "
+                f"mis-execution (2026-08-04) — run apply on CUDA or CPU, not MPS."
+            )
+    logger.info("scoring integrity check passed (predict == direct for us/cca/rel)")
+
+
 def apply_ica_api(
     cache_suffix: str = "full",
     limit: int | None = None,
@@ -96,6 +123,7 @@ def apply_ica_api(
     # Load and apply IcaModel
     logger.info("Loading IcaModel")
     model = IcaModel()
+    assert_scoring_integrity(model, cls_features)
 
     logger.info("Running predictions on API corpus")
     result = model.predict_ica_from_features(cls_features)
@@ -197,6 +225,7 @@ def apply_ica_ldc(
     # Load IcaModel
     logger.info("Loading IcaModel")
     model = IcaModel()
+    assert_scoring_integrity(model, cls_features)
 
     # Run predictions (with ML US gate initially)
     logger.info("Running predictions on LDC corpus")

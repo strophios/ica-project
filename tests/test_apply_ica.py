@@ -243,7 +243,8 @@ def test_apply_ica_api_output_schema(synthetic_cache_api):
 
     with mock.patch("src.apply_ica.config") as mock_config, \
          mock.patch("src.apply_ica.load_cache") as mock_load_cache, \
-         mock.patch("src.apply_ica.IcaModel") as mock_ica_model:
+         mock.patch("src.apply_ica.IcaModel") as mock_ica_model, \
+         mock.patch("src.apply_ica.assert_scoring_integrity"):
 
         # Mock config paths
         mock_config.CCA_EMBED_CACHE_DIR = cache_dir.parent
@@ -311,7 +312,8 @@ def test_apply_ica_ldc_output_schema(synthetic_cache_ldc):
 
     with mock.patch("src.apply_ica.config") as mock_config, \
          mock.patch("src.apply_ica.load_cache") as mock_load_cache, \
-         mock.patch("src.apply_ica.IcaModel") as mock_ica_model:
+         mock.patch("src.apply_ica.IcaModel") as mock_ica_model, \
+         mock.patch("src.apply_ica.assert_scoring_integrity"):
 
         # Mock config
         mock_config.CCA_EMBED_CACHE_DIR = cache_dir.parent
@@ -380,7 +382,8 @@ def test_apply_ica_ldc_gold_first_gating(synthetic_cache_ldc):
 
     with mock.patch("src.apply_ica.config") as mock_config, \
          mock.patch("src.apply_ica.load_cache") as mock_load_cache, \
-         mock.patch("src.apply_ica.IcaModel") as mock_ica_model:
+         mock.patch("src.apply_ica.IcaModel") as mock_ica_model, \
+         mock.patch("src.apply_ica.assert_scoring_integrity"):
 
         # Mock config
         mock_config.CCA_EMBED_CACHE_DIR = cache_dir.parent
@@ -499,7 +502,8 @@ def test_apply_ica_api_custom_out_name(synthetic_cache_api):
     cache_dir, meta, cls_features = synthetic_cache_api
     with mock.patch("src.apply_ica.config") as mock_config, \
          mock.patch("src.apply_ica.load_cache") as mock_load_cache, \
-         mock.patch("src.apply_ica.IcaModel") as mock_ica_model:
+         mock.patch("src.apply_ica.IcaModel") as mock_ica_model, \
+         mock.patch("src.apply_ica.assert_scoring_integrity"):
         _mock_api_apply(mock_config, cache_dir, meta, cls_features,
                         mock_load_cache, mock_ica_model)
         apply_ica_api(cache_suffix="test_cache", out_name="api_1996_2025.parquet")
@@ -516,7 +520,8 @@ def test_apply_ica_api_years_filter(synthetic_cache_api):
     cache_dir, meta, cls_features = synthetic_cache_api
     with mock.patch("src.apply_ica.config") as mock_config, \
          mock.patch("src.apply_ica.load_cache") as mock_load_cache, \
-         mock.patch("src.apply_ica.IcaModel") as mock_ica_model:
+         mock.patch("src.apply_ica.IcaModel") as mock_ica_model, \
+         mock.patch("src.apply_ica.assert_scoring_integrity"):
         model_instance = _mock_api_apply(mock_config, cache_dir, meta, cls_features,
                                          mock_load_cache, mock_ica_model)
         apply_ica_api(cache_suffix="test_cache", years=(1960, 1961))
@@ -541,7 +546,8 @@ def test_apply_ica_ldc_years_parameterized(synthetic_cache_ldc):
     cache_dir, meta, cls_features = synthetic_cache_ldc
     with mock.patch("src.apply_ica.config") as mock_config, \
          mock.patch("src.apply_ica.load_cache") as mock_load_cache, \
-         mock.patch("src.apply_ica.IcaModel") as mock_ica_model:
+         mock.patch("src.apply_ica.IcaModel") as mock_ica_model, \
+         mock.patch("src.apply_ica.assert_scoring_integrity"):
         mock_config.CCA_EMBED_CACHE_DIR = cache_dir.parent
         mock_config.ICA_CANDIDATES_DIR = Path(mock_config.CCA_EMBED_CACHE_DIR) / "ica_candidates"
         gold_labels = pl.DataFrame({
@@ -599,3 +605,67 @@ def test_apply_ica_parser_accepts_out_name_and_years():
     ])
     assert args.out_name == "api_1996_2025.parquet"
     assert args.years == "1996-2025"
+
+
+# =============================================================================
+# Tests: scoring-integrity guard (predict-vs-direct head check)
+# =============================================================================
+
+
+def test_scoring_integrity_check_passes_on_consistent_model(tiny_ica_model):
+    """When model.predict agrees with direct head computation the guard passes.
+
+    Hardware-independence note: predict is mocked to return exactly the direct
+    computation, because on a local MPS machine the REAL predict path fails
+    this guard — that is the live 2026-08-04 tensorflow-metal bug, and the
+    guard firing there is the desired production behavior (CUDA/CPU stacks
+    are exact and pass with real predict)."""
+    from src.apply_ica import assert_scoring_integrity
+    from src.assemble_ica import IcaModel
+
+    with mock.patch("src.assemble_ica.config") as mock_config:
+        tmpdir = tiny_ica_model["tmpdir"]
+        mock_config.US_FILTER_FULL_WEIGHTS = tiny_ica_model["us"]
+        mock_config.CCA_DOCA_WEIGHTS = tiny_ica_model["cca"]
+        mock_config.RELEVANCE_DOCA_WEIGHTS = tiny_ica_model["rel"]
+        mock_config.CCA_DOCA_DIR = tmpdir
+        model = IcaModel(fusion_path=tiny_ica_model["fusion_path"])
+    feats = np.random.default_rng(3).standard_normal((64, HIDDEN_DIM)).astype(np.float32) * 0.4
+
+    def consistent(inputs, verbose=0):
+        sample = inputs["features"]
+        return {
+            name: np.asarray(head(sample)).reshape(-1, 1)
+            for name, head in [("us", model.us_head), ("cca", model.cca_head),
+                               ("rel", model.rel_head)]
+        }
+
+    with mock.patch.object(model.model, "predict", side_effect=consistent):
+        assert_scoring_integrity(model, feats)  # must not raise
+
+
+def test_scoring_integrity_check_raises_on_distorted_predict(tiny_ica_model):
+    """If the compiled predict path disagrees with direct head computation
+    (the 2026-08-04 tensorflow-metal bug signature), the guard raises before
+    any candidates are written."""
+    from src.apply_ica import assert_scoring_integrity
+    from src.assemble_ica import IcaModel
+
+    with mock.patch("src.assemble_ica.config") as mock_config:
+        tmpdir = tiny_ica_model["tmpdir"]
+        mock_config.US_FILTER_FULL_WEIGHTS = tiny_ica_model["us"]
+        mock_config.CCA_DOCA_WEIGHTS = tiny_ica_model["cca"]
+        mock_config.RELEVANCE_DOCA_WEIGHTS = tiny_ica_model["rel"]
+        mock_config.CCA_DOCA_DIR = tmpdir
+        model = IcaModel(fusion_path=tiny_ica_model["fusion_path"])
+    feats = np.random.default_rng(3).standard_normal((64, HIDDEN_DIM)).astype(np.float32) * 0.4
+
+    real_predict = model.model.predict
+
+    def distorted(*args, **kwargs):
+        out = real_predict(*args, **kwargs)
+        return {k: v + 0.9 for k, v in out.items()}
+
+    with mock.patch.object(model.model, "predict", side_effect=distorted):
+        with pytest.raises(RuntimeError, match="scoring integrity"):
+            assert_scoring_integrity(model, feats)
