@@ -264,3 +264,19 @@ logits (CPU or cluster), re-run the eval suite for true topline numbers, and
 adjust memo language if it has not gone out. Upstream: file a
 tensorflow-metal issue with the minimal repro (predict-vs-direct on a
 dropout-bearing MLP).
+
+### 2026-08-04 (final): damage quantification — reported eval numbers hold to ~±0.01
+
+`scripts/compare_scoring_paths.py` scores the 1,131-row eval set through the
+exact own-terms/fusion recipe twice — default device (MPS = the distorted path
+that produced the memo numbers) vs CPU (exact) — same weights, calibrators,
+fusion. MPS column reproduces the production numbers (sanity anchor). Deltas
+(true − distorted): composed ICA ROC +0.003 (0.793→0.795), composed PR −0.005;
+us own-terms ROC −0.013 (0.925→0.912), rel −0.010 (0.829→0.819), cca +0.002;
+gate passes +3.8pp of eval rows under true scores at τ_us=0.02. Conclusion:
+the MPS bug's effect on reported metrics is within quoting noise; memo numbers
+stand with a one-line correction/footnote, and the calibration/fusion refit is
+a post-meeting hygiene item, not a blocker. (Known pre-existing wart observed
+en route, both paths equally: apply_us_model's text-mode reload emits a large
+skip_mismatch warning block — the production own-terms eval always ran through
+it; investigate on next touch of the token-mode eval path.)
