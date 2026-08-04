@@ -59,13 +59,19 @@ def main() -> None:
     print("dumped us_head_runtime_diag.npz (cwd)")
 
     # keras_hub preset cache fingerprint: the per-machine downloaded artifact.
-    kdir = os.path.expanduser(os.environ.get("KERAS_HOME", "~/.keras"))
-    print("preset cache under:", kdir)
-    for root, _dirs, files in os.walk(kdir):
-        if "roberta" in root.lower():
-            for fn in sorted(files):
-                p = os.path.join(root, fn)
-                print(f"  {p}  {os.path.getsize(p)} bytes")
+    # keras_hub 0.23 resolves presets through kagglehub (~/.cache/kagglehub),
+    # not KERAS_HOME — walk both plus the env overrides.
+    cache_roots = [
+        os.path.expanduser(os.environ.get("KERAS_HOME", "~/.keras")),
+        os.path.expanduser(os.environ.get("KAGGLEHUB_CACHE", "~/.cache/kagglehub")),
+    ]
+    for kdir in cache_roots:
+        print("preset cache under:", kdir)
+        for root, _dirs, files in os.walk(kdir):
+            if "roberta" in root.lower():
+                for fn in sorted(files):
+                    p = os.path.join(root, fn)
+                    print(f"  {p}  {os.path.getsize(p)} bytes")
 
 
 if __name__ == "__main__":
