@@ -305,3 +305,19 @@ unconditional first-line echo so no run can ever die log-silent again.
 pipefail; count with nullglob arrays.** The h200-vs-a100 node pattern in the
 earlier note was coincidence (the working probe was a --wrap with no
 counting; the failures were all `all`-stage runs).
+
+### 2026-08-04 addendum: the apply stage needs the model artifacts synced up
+
+The 9625 embed parts completed on an h200 in ~20 min (2,666,424 rows —
+exactly the expected 1996-2025 population), then the apply stage failed:
+`IcaModel()` loads the three June-trained artifact triples + fusion sidecar,
+which were produced LOCALLY and had never been synced (the embed stage only
+needs the DAPT backbone + the old us_classifier smoke, so the gap surfaces
+only at first cluster apply). **Add to the operator sync-up list** (10 files,
+~21MB): `cca_doca/cca_doca.{weights.h5,config.json,calibration.json}`,
+`cca_doca/ica_fusion.fusion.json`,
+`relevance/relevance.{weights.h5,config.json,calibration.json}`,
+`us_filter/us_classifier_full.{weights.h5,config.json,calibration.json}`.
+Then resubmit the failed stage only (`... apply` — a CPU partition works;
+the stage is features-mode). Expect the log line `scoring integrity check
+passed` before candidates are written.
