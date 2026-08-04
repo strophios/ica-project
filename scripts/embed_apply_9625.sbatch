@@ -1,8 +1,8 @@
 #!/bin/bash
 #SBATCH --job-name=embed-9625
 #SBATCH --partition=gpu
-#SBATCH --gres=gpu:h200
-#SBATCH --time=06:00:00
+#SBATCH --gres=gpu:1
+#SBATCH --time=08:00:00
 #SBATCH --mem=64G
 #SBATCH --output=/projects/ahd/cca_logs/slurm-%j.out
 
@@ -29,8 +29,11 @@
 # part2 -> provenance.<n_part1_shards>.json). If a part dies mid-run its
 # provenance file is ABSENT: delete that part's partial shards (index >= the
 # part's offset) and resubmit THAT part only.
-# Expected runtime: each part ~1.3-1.4M rows, well inside 6h on h200 (July
-# tuned re-embed: ~1.15M rows in a 4h window).
+# Expected runtime: each part ~1.3-1.4M rows — ~2h on an h200 (July tuned
+# re-embed rate: ~1.15M rows inside a 4h window), roughly double on an a100;
+# the 8h limit covers either. gres is gpu:1 (any GPU — a100 queues faster);
+# pin the fast card at submit time if you want it: CLI overrides the
+# directive, e.g. `sbatch --gres=gpu:h200 scripts/embed_apply_9625.sbatch all`.
 
 set -euo pipefail
 

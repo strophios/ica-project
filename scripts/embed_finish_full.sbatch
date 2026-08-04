@@ -1,8 +1,8 @@
 #!/bin/bash
 #SBATCH --job-name=embed-full-7695
 #SBATCH --partition=gpu
-#SBATCH --gres=gpu:h200
-#SBATCH --time=06:00:00
+#SBATCH --gres=gpu:1
+#SBATCH --time=08:00:00
 #SBATCH --mem=64G
 #SBATCH --output=/projects/ahd/cca_logs/slurm-%j.out
 
@@ -20,9 +20,10 @@
 # If the embed stage dies mid-part, its provenance.008.json will be ABSENT;
 # delete the partial shards (shard_008_* and up) before resubmitting:
 #   rm /projects/ahd/cca_doca/embed_cache/full/shard_0{08..99}_* 2>/dev/null
-# Expected runtime: ~1.9M rows; the July tuned re-embed did ~1.15M rows
-# inside a 4h window on h200, so 6h has headroom. If the job is still queued
-# or running past ~6h wall, check the log before any resubmit.
+# Expected runtime: ~1.9M rows — ~2.5h on an h200 (July tuned re-embed rate),
+# roughly double on an a100; the 8h limit covers either. gres is gpu:1 (any
+# GPU — a100 queues faster); pin via CLI if wanted:
+# `sbatch --gres=gpu:h200 scripts/embed_finish_full.sbatch all`.
 
 set -euo pipefail
 

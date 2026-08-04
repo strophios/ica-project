@@ -158,3 +158,25 @@ roadmap §A1). Local engineering landed in commit d0c0898: `--lead-fallback-colu
    separately** (abstract-register shift); top-K face-validity CSVs. The
    1996-2007 overlap with the existing LDC gold-first candidates doubles as a
    cross-corpus consistency check (API ML-gate vs LDC gold-first).
+
+### Cluster submission gotchas (learned 2026-08-03/04)
+
+- **The `gpu` partition's submit filter rejects gres-less or malformed gres
+  requests** with the unhelpful `Access/permission denied` — it is not a
+  privileges problem. `--gres=gpu:1` and `--gres=gpu:h200` both submit fine;
+  bare `--gres=gpu` does not. The scripts now default to `--gres=gpu:1`
+  (any GPU; a100s queue much faster than h200s) with an 8h limit sized for
+  a100 throughput; pin h200 via CLI override if the queue is kind.
+- **Sidecar backbone paths are machine-absolute** — fixed in code
+  (`resolve_backbone_path`, commit c155612): a synced sidecar recording the
+  writing machine's path now resolves to the platform-canonical
+  `DAPT_BACKBONE_WEIGHTS` with a loud log line. Expect
+  `backbone path /Users/... absent on this platform; resolved to canonical
+  /projects/ahd/dapt_backbone.weights.h5` in every cluster embed log — its
+  absence on a default-branch run would itself be suspicious.
+- **Diagnostic pattern that worked:** a `--wrap` probe echoing per-boundary
+  markers (log-write / module / cd / `bash -n` syntax) discriminates
+  environment-layer failures from script failures without burning GPU queue
+  time. An instant job death (~1s) with a created-but-empty log means the
+  failure predates the script's first line — check the submission layer, not
+  the script.
