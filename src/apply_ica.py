@@ -55,16 +55,23 @@ def _filter_years(
     return filtered, cls_features[emb_rows]
 
 
-def assert_scoring_integrity(model, features: np.ndarray, atol: float = 1e-3) -> None:
+def assert_scoring_integrity(model, features: np.ndarray, atol: float = 0.05) -> None:
     """Guard: the compiled predict path must match direct head computation.
 
     2026-08-04 finding: tensorflow-metal (local MPS) mis-executes the
     ClassificationHead dropout sub-path inside compiled predict graphs —
     deterministic per process, wrong vs true math (us mean shift ~+1.6 on
-    real CLS features), while CUDA and CPU are exact. Every score product
-    computed on MPS before this date carries that distortion. This check
-    runs on a small sample before any candidates are written and fails
+    real CLS features), while CUDA and CPU compute correctly. Every score
+    product computed on MPS before this date carries that distortion. This
+    check runs on a small sample before any candidates are written and fails
     loudly rather than letting a distorted stack score a corpus.
+
+    Tolerance calibration (two well-separated scales): benign cross-kernel
+    numerics between compiled predict and the direct eager call — CUDA
+    TF32/fusion/batching differences — measure maxabs ~5e-3 on the cluster;
+    the MPS bug signature is >= ~0.5 logits. atol=0.05 sits an order of
+    magnitude above the former and below the latter (the first cluster apply
+    tripped a 1e-3 atol on exactly that benign noise).
     """
     sample = features[: min(len(features), 256)]
     pred = model.model.predict({"features": sample}, verbose=0)

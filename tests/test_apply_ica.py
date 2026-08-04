@@ -669,3 +669,34 @@ def test_scoring_integrity_check_raises_on_distorted_predict(tiny_ica_model):
     with mock.patch.object(model.model, "predict", side_effect=distorted):
         with pytest.raises(RuntimeError, match="scoring integrity"):
             assert_scoring_integrity(model, feats)
+
+
+def test_scoring_integrity_tolerates_kernel_noise(tiny_ica_model):
+    """Benign cross-kernel numerics (CUDA TF32/fusion differences between
+    compiled predict and direct call, observed maxabs ~5e-3 on the cluster,
+    2026-08-04) must NOT trip the guard — the bug signature it exists to
+    catch is two orders of magnitude larger (>=~0.5 logits)."""
+    from src.apply_ica import assert_scoring_integrity
+    from src.assemble_ica import IcaModel
+
+    with mock.patch("src.assemble_ica.config") as mock_config:
+        tmpdir = tiny_ica_model["tmpdir"]
+        mock_config.US_FILTER_FULL_WEIGHTS = tiny_ica_model["us"]
+        mock_config.CCA_DOCA_WEIGHTS = tiny_ica_model["cca"]
+        mock_config.RELEVANCE_DOCA_WEIGHTS = tiny_ica_model["rel"]
+        mock_config.CCA_DOCA_DIR = tmpdir
+        model = IcaModel(fusion_path=tiny_ica_model["fusion_path"])
+    feats = np.random.default_rng(3).standard_normal((64, HIDDEN_DIM)).astype(np.float32) * 0.4
+
+    def noisy(inputs, verbose=0):
+        sample = inputs["features"]
+        rng = np.random.default_rng(11)
+        return {
+            name: np.asarray(head(sample)).reshape(-1, 1)
+            + rng.uniform(-0.01, 0.01, (sample.shape[0], 1)).astype(np.float32)
+            for name, head in [("us", model.us_head), ("cca", model.cca_head),
+                               ("rel", model.rel_head)]
+        }
+
+    with mock.patch.object(model.model, "predict", side_effect=noisy):
+        assert_scoring_integrity(model, feats)  # must not raise
