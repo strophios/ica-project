@@ -98,6 +98,20 @@ Usual caveat: the evaluation set was deliberately built to over-represent
 borderline articles, so these numbers compare models against each other on
 hard cases; they are not corpus-wide precision estimates.
 
+*A scoring-infrastructure note (added Aug 4): after this memo was drafted we
+found that the TensorFlow build our laptops use for Apple GPUs mis-executes
+one small component of the scoring pipeline — deterministically, so every
+number in this memo went through the same slightly-wrong arithmetic on both
+sides of every comparison. The comparisons above therefore stand as reported.
+Re-scoring the deployed (frozen) model with exact arithmetic shifts each
+metric by at most about ±0.01 — e.g., the combined score's 0.80 is 0.795
+exact, and the US head's "own job" 0.93 reads 0.91 exact — inside the
+resolution of a 1,131-article evaluation set. The bug is fixed (cluster and
+CPU scoring were never affected, and a guard now blocks the faulty path);
+corrected tables for both configurations will accompany the post-meeting
+model refresh, and the corpus-scale candidate lists discussed at the meeting
+are produced on the cluster with exact arithmetic throughout.*
+
 ## What's next on the model
 
 1. **Adopt the mixed configuration properly** — refit the score-combination
