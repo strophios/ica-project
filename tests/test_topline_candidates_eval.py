@@ -54,3 +54,17 @@ class TestRecallAtTop:
 
     def test_zero_anchors_is_zero(self):
         assert recall_at_top(np.array([]), n_anchors=0, k=10) == 0.0
+
+
+class TestRecallAtThreshold:
+    def test_fraction_of_all_anchors_scoring_at_or_above_t(self):
+        from scripts.memo_pr_tables import recall_at_threshold
+        import numpy as np
+        scores = np.array([0.9, 0.5, 0.1])   # scores of FOUND anchors
+        assert recall_at_threshold(scores, n_anchors=4, t=0.5) == 0.5  # 2 of 4
+
+    def test_boundary_inclusive_and_empty(self):
+        from scripts.memo_pr_tables import recall_at_threshold
+        import numpy as np
+        assert recall_at_threshold(np.array([0.5]), n_anchors=1, t=0.5) == 1.0
+        assert recall_at_threshold(np.array([]), n_anchors=0, t=0.5) == 0.0
