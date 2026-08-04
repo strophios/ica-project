@@ -36,6 +36,13 @@
 # directive, e.g. `sbatch --gres=gpu:h200 scripts/embed_apply_9625.sbatch all`.
 
 set -euo pipefail
+shopt -s nullglob
+# Counting convention: pure-bash glob arrays, NEVER `ls ... | wc -l` — under
+# pipefail an unmatched glob makes ls exit 2 with stderr suppressed, killing
+# the script silently (the 2026-08-04 empty-log job deaths, jobs 8910960/8935575/8935696).
+count_glob() { local -a m=("$@"); echo "${#m[@]}"; }
+
+echo "embed_apply_9625: stage=${1:-all} host=$(hostname) $(date)"  # never die log-silent
 
 module load use.own uv
 
@@ -74,7 +81,7 @@ fi
 
 if [ "$STAGE" = "part1" ] || [ "$STAGE" = "all" ]; then
     preflight_corpus
-    n_shards=$(ls "$CACHE"/shard_*_cls.npy 2>/dev/null | wc -l)
+    n_shards=$(count_glob "$CACHE"/shard_*_cls.npy)
     [ "$n_shards" -eq 0 ] || { echo "FATAL: $CACHE already has $n_shards shards — part1 must start clean (see RESUME RULE)"; exit 1; }
     uv run python -m src.embed_corpus --full --years 1996-2010 \
         "${CHANNEL_ARGS[@]}" --out-suffix api_9625 --stamp "$STAMP"
@@ -84,16 +91,16 @@ fi
 if [ "$STAGE" = "part2" ] || [ "$STAGE" = "all" ]; then
     preflight_corpus
     [ -f "$CACHE/provenance.000.json" ] || { echo "FATAL: part1 provenance missing — run part1 first"; exit 1; }
-    n_prov=$(ls "$CACHE"/provenance.*.json | wc -l)
+    n_prov=$(count_glob "$CACHE"/provenance.*.json)
     [ "$n_prov" -eq 1 ] || { echo "FATAL: expected exactly 1 provenance file before part2, found $n_prov"; exit 1; }
     uv run python -m src.embed_corpus --full --years 2011-2025 --append \
         "${CHANNEL_ARGS[@]}" --out-suffix api_9625 --stamp "$STAMP"
-    n_prov=$(ls "$CACHE"/provenance.*.json | wc -l)
+    n_prov=$(count_glob "$CACHE"/provenance.*.json)
     [ "$n_prov" -eq 2 ] || { echo "FATAL: part2 finished without its provenance file"; exit 1; }
 fi
 
 if [ "$STAGE" = "apply" ] || [ "$STAGE" = "all" ]; then
-    n_prov=$(ls "$CACHE"/provenance.*.json 2>/dev/null | wc -l)
+    n_prov=$(count_glob "$CACHE"/provenance.*.json)
     [ "$n_prov" -eq 2 ] || { echo "FATAL: cache incomplete ($n_prov/2 provenance files) — finish part1+part2 first"; exit 1; }
     # Deployed frozen-stack IcaModel; ML US gate (API has no dateline labels).
     # 2025 rows ride the abstract register — era-slice any eval (roadmap A1 item 3).

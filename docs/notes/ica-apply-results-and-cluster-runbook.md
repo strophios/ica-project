@@ -280,3 +280,28 @@ a post-meeting hygiene item, not a blocker. (Known pre-existing wart observed
 en route, both paths equally: apply_us_model's text-mode reload emits a large
 skip_mismatch warning block — the production own-terms eval always ran through
 it; investigate on next touch of the token-mode eval path.)
+
+### 2026-08-04 (later still): the silent job deaths were the SCRIPT, not the nodes
+
+Correction to the "submission gotchas" and "diagnostic pattern" notes above:
+the empty-log instant deaths (jobs 8910960, 8935575, 8935696 — h200 AND a100
+nodes) were caused by a bash footgun in the sbatch scripts themselves, not by
+the submission layer or node images (d4054/d4055 exonerated). Under
+`set -euo pipefail`, the stage guards counted files with
+`ls "$CACHE"/glob 2>/dev/null | wc -l`: when the glob doesn't match (the
+NORMAL part1 precondition — the cache doesn't exist yet), GNU ls exits 2 with
+its error suppressed by the 2>/dev/null, pipefail propagates the 2 through
+the pipeline, and set -e kills the script with nothing written. The
+interactive smokes never hit the line (the smoke stage has no shard count);
+the --wrap probes had no such construct; `bash -n` passes (runtime
+semantics, not syntax). Repro: `set -euo pipefail; n=$(ls /nope/x_* 2>/dev/null | wc -l)`
+— dies silently, exit 2 (GNU) / 1 (BSD — which is also why the bug never
+showed locally).
+
+Fix (committed with this note): pure-bash `count_glob` with `shopt -s
+nullglob` in both scripts — no subprocess, no pipefail interaction — plus an
+unconditional first-line echo so no run can ever die log-silent again.
+**Convention for all future sbatch scripts: never `ls | wc -l` under
+pipefail; count with nullglob arrays.** The h200-vs-a100 node pattern in the
+earlier note was coincidence (the working probe was a --wrap with no
+counting; the failures were all `all`-stage runs).

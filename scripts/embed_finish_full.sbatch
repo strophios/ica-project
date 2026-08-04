@@ -26,6 +26,13 @@
 # `sbatch --gres=gpu:h200 scripts/embed_finish_full.sbatch all`.
 
 set -euo pipefail
+shopt -s nullglob
+# Counting convention: pure-bash glob arrays, NEVER `ls ... | wc -l` — under
+# pipefail an unmatched glob makes ls exit 2 with stderr suppressed, killing
+# the script silently (the 2026-08-04 empty-log job deaths).
+count_glob() { local -a m=("$@"); echo "${#m[@]}"; }
+
+echo "embed_finish_full: stage=${1:-all} host=$(hostname) $(date)"  # never die log-silent
 
 module load use.own uv
 
@@ -49,7 +56,7 @@ preflight_embed() {
     [ -f /projects/ahd/api_corpus/1976.parquet ] || { echo "FATAL: api_corpus/1976.parquet missing (sync the corpus)"; exit 1; }
     [ -f /projects/ahd/api_corpus/1995.parquet ] || { echo "FATAL: api_corpus/1995.parquet missing (sync the corpus)"; exit 1; }
     # Idempotence guard: exactly the 8 part-1 shards, not already appended.
-    n_shards=$(ls "$CACHE"/shard_*_cls.npy 2>/dev/null | wc -l)
+    n_shards=$(count_glob "$CACHE"/shard_*_cls.npy)
     [ "$n_shards" -eq 8 ] || { echo "FATAL: expected 8 existing shards in $CACHE, found $n_shards (already appended, or partial state — see RESUME RULE)"; exit 1; }
     [ ! -f "$CACHE/provenance.008.json" ] || { echo "FATAL: provenance.008.json exists — 1976-1995 already appended"; exit 1; }
 }
