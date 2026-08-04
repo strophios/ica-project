@@ -321,3 +321,18 @@ only at first cluster apply). **Add to the operator sync-up list** (10 files,
 Then resubmit the failed stage only (`... apply` — a CPU partition works;
 the stage is features-mode). Expect the log line `scoring integrity check
 passed` before candidates are written.
+
+### 2026-08-04 addendum 2: `full` cache rebuilt fresh on-cluster (1960-1995)
+
+The finish-full job's preflight fired correctly: the June part-1 (1960-1975)
+cache exists only LOCALLY — never synced, same gap class as the model
+artifacts. Decision: **rebuild 1960-1995 fresh on the cluster instead of
+syncing part-1 up.** At the measured throughput (2.67M rows / ~20 min on
+h200) the full 3.7M-row rebuild is ~30 min — faster than uploading ~5.7GB —
+and it retires the part-1 metadata contamination (MPS-distorted us_logit,
+~3% sign flips at the us_logit>=0 gate) from the production cache. CLS
+changes only at kernel-noise level (7e-6 measured local-fp32 vs cluster).
+`embed_finish_full.sbatch` is now a fresh 1960-1995 build (empty-cache
+preflight, stamp 20260804, no append machinery). The LOCAL `full` cache
+(part-1, distorted us_logit) is superseded — do not build new tables from
+its us_logit column; the cluster cache is canonical going forward.
