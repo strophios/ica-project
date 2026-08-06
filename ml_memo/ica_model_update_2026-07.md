@@ -117,15 +117,17 @@ are produced on the cluster with exact arithmetic throughout.*
 Since the draft above was written, we ran the deployed model over the entire
 Archive corpus — **all 6.4M articles, 1960–2025** — on the cluster, with exact
 arithmetic throughout. Every article now carries the component scores and the
-combined ICA score, and ranked candidate lists exist for both the DoCA period
-(1960–1995) and the forward period (1996–2025). (These runs use the deployed
-June model; the improved relevance head from the previous section enters with
-the post-meeting engineering.)
+combined ICA score. The two periods answer different questions — the DoCA
+period is where we can *measure* against your coding; the forward period is
+new territory — so they're reported separately below. (These runs use the
+deployed June model; the improved relevance head enters with the post-meeting
+engineering.)
 
-**The precision/recall trade-off on the DoCA period.** Two ways to read the
-same ranking, at a few operating points. First, the collective-action score
-alone, against the ~15,600 DoCA-matched articles — precision here is the
-corpus-reweighted estimate from the 500-article hand-coded sample:
+### 1960–1995: measured against DoCA and the ICA dataset
+
+**Collective action vs the ~15,600 DoCA-matched articles.** Precision is the
+corpus-reweighted estimate from the 500-article hand-coded sample; both
+columns come from the same scoring run:
 
 | operating point | precision (corpus) | DoCA recall | articles flagged (of 3.7M) |
 |---|---|---|---|
@@ -134,17 +136,10 @@ corpus-reweighted estimate from the 500-article hand-coded sample:
 | balanced | ~0.72 | 40% | 40,000 |
 | permissive | ~0.45 | 63% | 119,000 |
 
-So: accept roughly one false positive in ten and you recover ~15% of DoCA;
-accept one in four and you recover ~40%. (One honest caveat: the DoCA
-articles include the model's training examples, so this is "re-find the
-known events," which will run a little higher than recall on never-seen
-events.)
-
-**The same trade-off for ICA specifically**, against the 552-event ICA
-subset of DoCA you built (recall is per event; an event counts as recovered
-when its article surfaces). Precision comes from the hand-coded evaluation
-set, which deliberately over-samples borderline cases — read it as an upper
-bound on corpus precision:
+**ICA specifically, vs the 552-event ICA subset you built** (recall is per
+event; an event counts as recovered when its article surfaces). Precision
+comes from the hand-coded evaluation set, which deliberately over-samples
+borderline cases — read it as an upper bound on corpus precision:
 
 | operating point | precision (eval set) | ICA-event recall | articles flagged |
 |---|---|---|---|
@@ -153,28 +148,62 @@ bound on corpus precision:
 | permissive | ~0.30 | 80% | 207,000 |
 | review-everything | ~0.25 | 89% | 432,000 |
 
-A check worth highlighting: 196 of the 552 events were fully held out from
-all model training, and their recall matches or slightly exceeds the rest at
-every operating point (e.g., 83% vs 79% at the permissive point) — the
-recall numbers are not inflated by the model having seen the events.
+Two integrity checks behind these tables. First, 196 of the 552 events were
+fully held out from all model training, and their recall matches or slightly
+exceeds the rest at every operating point (e.g., 83% vs 79% at the
+permissive point) — recall is not inflated by the model having seen the
+events. (The DoCA table lacks such a held-out split — those articles include
+training examples — so read it as "re-find the known events.") Second, the
+numbers are mutually consistent: 40,000 flagged at 0.72 precision is ~29,000
+true positives, which is 39% of the ~74,000 collective-action events a 2%
+base rate implies for this corpus — almost exactly the 40% recall measured
+independently against DoCA.
 
-**By domain**, at the permissive point (all events / held-out only):
-Documentation 94% / 100%, Access 77% / 74%, Exclusionary 76% / 77%,
-Diasporic 76% / 79%. Documentation events are the easiest to surface;
-the other three sit together in the mid-70s — including diasporic events,
-the category we've worried most about.
+**Why recall looks "low" next to the accuracy numbers we usually quote.**
+It isn't the ranking: measured over the whole corpus, both anchor sets rank
+near-perfectly (ROC-AUC ≈ 0.95; the median DoCA article sits in the top
+1.7% of 3.7M, the median ICA event in the top 0.8%). At a 2% base rate,
+though, recovering 80% of true events *mathematically requires* flagging
+100k+ articles — precision at high recall is a property of the haystack,
+not the detector. The residual misses are largely a channel ceiling: the
+model reads headline + first paragraph, your coders read whole articles.
+The worst-identified anchors make this concrete — a DoCA event whose
+article is headlined "'Annie Hall' Wins 4 Academy Awards" (the protest is
+deep in the piece), ICA events whose ledes read as crime stories ("Bomb in
+5th Ave. Tower Shatters Yugoslav Bank"). We've prepared best/median/worst
+example sheets for both anchor sets, alongside non-anchor articles drawn
+from the same score bands, so you can see what the model finds easy, hard,
+and what else lives at each score level.
 
-**The forward period (1996–2025), first pass.** Applying the same operating
-points to the 2.7M post-1995 articles yields, per year: at the balanced
-point roughly 1,100/year (1996–2011) rising to ~1,400/year (2012–2024); at
-the strict point ~105/year rising to ~135/year. The top of the forward
-ranking is face-valid ICA (asylum-seeker protests, the 2006 immigration
-marches, bodega strikes against the travel ban, 2025 ICE protests) — we've
-set aside top-100 lists from both periods for you to eyeball. **2025 reads
-2–3× higher than neighboring years at every operating point** (e.g., ~400
-strict-point candidates vs ~135/year before it). Some of that is plausibly
-real; some may be the abstract-substitution channel described below. We'll
-separate the two with the paired-channel test before quoting 2025 numbers.
+**Recall by domain across the whole curve** (all events / held-out only):
+
+| domain (n) | permissive (~0.30) | balanced (~0.50) | strict (~0.83) |
+|---|---|---|---|
+| Documentation (118) | 94% / 100% | 88% / 95% | 63% / 72% |
+| Access (77) | 77% / 74% | 60% / 53% | 16% / 21% |
+| Exclusionary (76) | 76% / 77% | 50% / 54% | 18% / 19% |
+| Diasporic (281) | 76% / 79% | 42% / 46% | 16% / 23% |
+
+The pattern matters for how the candidate lists get used: documentation
+events stay recoverable even at strict settings, while diasporic events
+fall off fastest through the middle of the curve — at strict operating
+points the model is disproportionately surfacing documentation-domain
+events, and recovering diaspora events specifically is what the permissive
+band buys.
+
+### 1996–2025: the forward corpus, first pass
+
+Applying the same operating points to the 2.7M post-1995 articles yields,
+per year: at the balanced point roughly 1,100/year (1996–2011) rising to
+~1,400/year (2012–2024); at the strict point ~105/year rising to ~135/year.
+The top of the forward ranking is face-valid ICA (asylum-seeker protests,
+the 2006 immigration marches, bodega strikes against the travel ban, 2025
+ICE protests) — we've set aside top-100 lists from both periods for you to
+eyeball. **2025 reads 2–3× higher than neighboring years at every operating
+point** (e.g., ~400 strict-point candidates vs ~135/year before it). Some
+of that is plausibly real; some may be the abstract-substitution channel
+described below. We'll separate the two with the paired-channel test before
+quoting 2025 numbers.
 
 Not yet re-scored: the LDC-corpus candidate list for 1996–2007 (a separate
 text source with its own strengths); it follows with the post-meeting
