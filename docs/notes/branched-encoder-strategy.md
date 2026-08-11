@@ -1,0 +1,186 @@
+# Branched-encoder strategy — the joint-fine-tune design space and the experiment ladder
+
+*Created 2026-08-11. Decision record for the post-meeting model arc: how to get
+the validated rel encoder gain into production, and whether the route is a
+joint CCA+rel fine-tune, a deeper unfreeze, or a branched (per-head top-K)
+encoder. Successor to `encoder-unfreeze-strategy.md`, which records the
+rel-first-vs-joint decision and the rel-first execution findings this note
+builds on. Written before execution; decision rules below are pre-registered.*
+
+## Context
+
+The rel-first sequential unfreeze (2026-07-28/30, `encoder-unfreeze-strategy.md`
+execution findings) produced a two-sided result: rel improved substantially
+(vs-ICA 0.783 → 0.853, own-terms 0.783 → 0.836, diaspora recall 0.382 → 0.662
+@ 0.30 review rate) while the tuned representation damaged the sibling heads
+(CCA own-terms 0.927 → 0.739, US 0.925 → 0.830). The validated-but-undeployed
+**mixed stack** (tuned rel head on tuned CLS, production CCA/US on production
+CLS) lifts composed ICA ROC 0.797 → 0.820 at the cost of two encoder passes
+per corpus at apply.
+
+Roadmap §A1 ordered the follow-through as (1) mixed-stack productionization,
+(2) joint CCA+rel fine-tune. A 2026-08-11 strategy review revisited that
+ordering. Two inputs:
+
+- **The 2026-08-06 team meeting produced no project feedback** — the session
+  was consumed by an R&R on an earlier (pre-ML) article from the project. The
+  internal priority order stands on its own reasoning.
+- The mixed stack as originally framed (two full encoder passes, two-cache
+  `IcaModel`) is machinery that exists only to serve a configuration the joint
+  fine-tune is meant to obsolete. Building it first risks dead code; but the
+  winning rel run's actual shape (below) collapses most of that cost.
+
+The winning rel run was `--unfreeze-top-n 1` (job 8823087; η=0, π̂=0.02):
+only transformer layer 12 received a real learning rate. Zero-multiplier
+"frozen" layers drifted only by AdamW weight decay — measured ~2.3e-3 max-abs
+over 5 epochs vs 1.19e-1 for the tuned layer, a ~40× separation
+(`extract_tuned_backbone.py` layer-diff verification). So the explored region
+is one point (N=1, rel-only) in a larger design space.
+
+## The design space
+
+Four candidate shapes, all answers to one question: **where does per-head
+adaptation capacity live, and what does it cost the one-encoder/one-cache
+economy?**
+
+1. **Joint CCA+rel, top-1 unfreeze.** Both losses negotiate one shared layer
+   via a scalarization weight λ. Preserves the single-cache economy fully.
+   The pre-registered escalation from `encoder-unfreeze-strategy.md`.
+2. **Joint, deeper unfreeze + per-layer discriminative LR.** More shared
+   capacity; hyperparameters multiply (N × decay × λ), all tuned against the
+   1,131-row hand-coded eval that is already double-booked (fusion fitting +
+   swap decisions). LP-FT (Kumar 2022) and the representational-collapse line
+   (Aghajanyan 2020/21) both say deeper fine-tuning distorts more — and
+   negative transfer was already observed at N=1.
+3. **Branched top-K.** Shared frozen trunk (embeddings + layers 1..12−K);
+   per-head *copies* of the top K layers, warm-started from DAPT, each tuned
+   on its own head's loss. Negative transfer is impossible by construction
+   (no gradient crosses branches), and the branch trainings are fully
+   independent — the population/channel disjointness that ruled out
+   three-head joint (US on stripped LDC; CCA/rel on raw API) is irrelevant
+   here. A head that wants no tuning keeps the *original* DAPT layers as its
+   branch: bit-identical to production, zero risk. Apply cost for B tuned
+   branches at depth K is ~(12 + K·B)/12 of one encoder pass, emitting one
+   CLS vector per branch in a single pass (the slim per-head CLS caches
+   survive; only the embed job's structure changes).
+4. **Deeper heads after the encoder.** Keep the shared encoder; add capacity
+   inside the heads. Not equivalent to (3): branch layers are warm-started
+   and see pre-pooling sequence state; appended head layers are random-init,
+   and if they're transformer layers the CLS pooling has to move after them
+   (sequence-level plumbing). Random-init transformer layers against rel's
+   ~17k positives is a data-hunger mismatch — dominated by (3) in
+   expectation. The degenerate cheap variant (a second Dense on the pooled
+   CLS, features-mode) survives as a control experiment, not a candidate
+   architecture (stage 2 below). Current head: Dense(768, relu) with dropout
+   → Dense(1) on the pooled CLS only (`src/model_setup/heads.py`).
+
+**The reframe that reorganizes the sequencing: the mixed stack is option 3
+with K=1, pending one verification.** If the ~2.3e-3 sub-branch drift is
+negligible, the tuned encoder differs from production DAPT only in layer 12 —
+so "two full passes + two caches" is really "shared pristine trunk + two
+layer-12 variants": ~13/12 ≈ 1.08× of one pass, not 2×. Mixed-stack
+productionization and the architecture exploration stop being rivals; the
+branched build *is* the productionization, and it generalizes to any future
+per-head branch.
+
+## What joint still offers, and its third success criterion
+
+Branching gives up two things only a shared tuned encoder provides: 1× apply
+with a single cache, and cross-task regularization (CCA's ~15k DoCA positives
+as a sibling signal against rel overfitting its ~17k). Joint CCA+rel remains
+worth running for that prize. But the rel-first result exposes a criterion
+the original pre-registration didn't state: **US isn't at the joint table**,
+and a rel-tuned encoder cost US 0.925 → 0.830 own-terms as a passenger. If
+the joint-tuned representation degrades US similarly, US needs a separate
+representation — two caches again, forfeiting joint's main prize. Joint's
+success test is therefore three-sided: rel gain holds, CCA holds, *and US
+survives features-retrained on the shared tuned cache*.
+
+## DECISION (2026-08-11): staged experiment ladder, cheap → expensive
+
+Each stage is pre-registered with its decision rule; each informs the next.
+No stage requires the 1996–2025 embed — the expanded-corpus embed waits for
+the encoder decision so it's paid once (roadmap §A1 item 4).
+
+1. **Graft test** (local, near-free). Compose pristine DAPT embeddings +
+   layers 1–11 with the tuned layer 12 from `relevance_tuned`; score the rel
+   evals (own-terms, vs-ICA, diaspora recall) against the full tuned encoder.
+   **Pass:** vs-ICA ROC within ~0.01 and diaspora recall within ~2 anchors of
+   0.853 / 0.662. Pass ⇒ the branched frame is real and the K=1 branched
+   mixed stack is the productionization path. **Fail ⇒** the sub-branch drift
+   is load-bearing; re-run the rel tune with hard freezing
+   (`layer.trainable=False` below the branch — the multiplier-freezing ≠
+   trainable=False finding, `encoder-unfreeze-strategy.md` 2026-07-29), one
+   known-recipe cluster job, after which the graft is exact by construction.
+2. **Head-capacity control** (features-mode, minutes). Add a second hidden
+   Dense to the rel head on the *production frozen* cache. This measures the
+   assumption underneath the whole encoder-tuning program — that the frozen
+   CLS representation, not head capacity, is rel's bottleneck.
+   **Interpretation rule:** if extra head depth recovers a substantial
+   fraction (≥ ~a third) of the tuned-encoder vs-ICA gain (0.783 → 0.853),
+   the representation-bottleneck story weakens and cheap head capacity
+   becomes the first-line lever; expected outcome is little gain, which
+   affirmatively licenses the encoder work.
+3. **Rel depth sweep** (cluster, one job per grid point). N ∈ {1, 2, 3},
+   flat vs graded decay (machinery: `--unfreeze-top-n`, `--graded-decay`),
+   hard freezing below the unfrozen block. **Pre-registered selection
+   metric:** vs-ICA ROC on gold (primary), diaspora recall @ 0.30 review
+   rate (secondary), rel own-terms as guardrail (no degradation vs N=1).
+   This fills in the depth axis rel-first never explored and fixes the K any
+   branch or joint run uses. Keep the grid at ≤6 points — every comparison
+   spends the double-booked eval set.
+4. **Joint CCA+rel at the chosen depth** (cluster, λ 3-point grid, same
+   harmonized population/channel/loss family as pre-registered in
+   `encoder-unfreeze-strategy.md`). Now a fair fight against a known branched
+   alternative at the same depth. **Joint wins only if:** rel matches its
+   branched counterpart within noise, AND CCA matches its branched-or-
+   production counterpart within noise, AND US features-retrained on the
+   joint cache holds own-terms (survives as a passenger; reference 0.925,
+   the rel-first passenger outcome 0.830 is a fail). Win ⇒ single-encoder
+   swap (re-embed, features-retrain, recalibrate, refit fusion, gold
+   re-eval — the `tuned-retrain-runbook.md` sequence). Lose on any side ⇒
+   **branched is the production architecture** and joint retires with a
+   clean negative result.
+
+### Companion decisions
+
+- **US gets no tuned branch.** US sits at 0.925 own-terms; its known
+  weaknesses (diaspora labels, foreign-leak separation —
+  `us-head-retrain-plan.md`) are label- and gate-problems, not
+  representation problems. US keeps the original DAPT top layers as its
+  branch (bit-identical) in any branched outcome.
+- **VAT/ALUM stays unbundled.** Its natural home is a Layer-4 addition to
+  whichever fine-tune wins (`pinned-questions.md` §1), run as a controlled
+  A/B on top of the stage-4 baseline — never bundled into the same run
+  (one channel change at a time, or attribution dies).
+- **Temporal signal stays evidence-gated.** It forces a DAPT re-run (the
+  most expensive single item) and no measurement yet shows era shift hurts.
+  The gate: era-sliced eval on the expanded-corpus apply + the 1970s
+  lead-vs-abstract channel experiment (roadmap §A1). Flat era slices ⇒ no
+  temporal work.
+
+## Engineering consequences
+
+- **`fit_fusion.py` parameterization stays first regardless** — every
+  outcome (branched, joint, any retrain) needs a fusion refit on new scores,
+  and the script is fully hardcoded with `output_dir` silently defaulting to
+  the production fusion path (`tuned-retrain-runbook.md` gaps).
+- **The `IcaModel` per-head-features change survives the reframe.** Branched
+  means rel reads a different CLS vector than CCA/US — exactly what
+  "two-cache support" meant. What the reframe cheapens is the *embed* side:
+  one branched pass emitting per-head CLS caches instead of two full passes.
+- **Hard freezing is now a requirement, not a nicety.** The branched frame's
+  correctness argument (shared trunk bit-identical across branches) needs
+  `trainable=False` sub-branch layers, not zero-multiplier layers that
+  drift under AdamW weight decay.
+- Small gaps carried from the runbook: `run_relevance.py` lacks a
+  `--us-weights` rescore knob; `eval_heads_own_terms` requires calibration
+  before eval (runbook step-order); both unchanged by this note.
+
+## Pointers
+
+`encoder-unfreeze-strategy.md` (predecessor decision + rel-first findings and
+literature survey); `tuned-retrain-runbook.md` (the retrain-and-compare
+command sequence and its gaps); `docs/notes/roadmap.md` §A1 (the live list
+this note reorders); `pinned-questions.md` §1 (VAT/nnPU composition);
+`us-head-retrain-plan.md` (why US's ceiling isn't representational).

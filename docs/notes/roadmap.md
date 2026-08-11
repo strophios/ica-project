@@ -1,12 +1,16 @@
 # Roadmap & index — current live next-steps
 
-*Created 2026-06-19, last touched 2026-07-30. THIS is the single live list of
+*Created 2026-06-19, last touched 2026-08-11. THIS is the single live list of
 what's next and what's deferred. The pre-Aug-6 refine-and-apply arc (§A) is
 CLOSED at the 2026-07-30 write-up freeze; the **active thread is now §A1, the
-post-meeting model arc**. Reconciled 2026-07-30 with the encoder-unfreeze arc
-outcome (`encoder-unfreeze-strategy.md`, `tuned-retrain-runbook.md`) and the July
-memo (`ml_memo/ica_model_update_2026-07.md`). Root `CLAUDE.md` reconciled
-2026-07-30 for this arc; `README.md` still predates `cca-doca-retrain`.*
+post-meeting model arc**, reordered 2026-08-11 by the branched-encoder decision
+(`branched-encoder-strategy.md`): the experiment ladder replaces "productionize
+the mixed stack, then joint" as items 1–2. The 2026-08-06 meeting produced no
+project feedback (consumed by an R&R on the earlier pre-ML article) — internal
+priorities stand. Previously reconciled 2026-07-30 with the encoder-unfreeze
+arc outcome (`encoder-unfreeze-strategy.md`, `tuned-retrain-runbook.md`) and the
+July memo (`ml_memo/ica_model_update_2026-07.md`). Root `CLAUDE.md` reconciled
+2026-08-11; `README.md` still predates `cca-doca-retrain`.*
 
 ## Where to look (index)
 
@@ -20,6 +24,7 @@ memo (`ml_memo/ica_model_update_2026-07.md`). Root `CLAUDE.md` reconciled
 | Relevance-head arc (detail/reasoning) | `relevance-head-handoff.md` |
 | US filter / dateline pipeline | `us-filter-*.md`, `r/CLAUDE.md` |
 | **US head retrain (diaspora recall)** | `us-head-retrain-plan.md` |
+| **Branched-encoder decision + experiment ladder (live)** | `branched-encoder-strategy.md` |
 | **ICA apply results + cluster runbook** | `ica-apply-results-and-cluster-runbook.md` |
 | Per-head own-terms eval (2026-07-10) | `ml_memo/ica_model_state_2026-06.md` ("The heads on their own terms"); `scripts/eval_heads_own_terms.py` |
 | Multi-head assembly design (landed) | `docs/design-plans/2026-06-19-multi-head-ica-assembly.md` |
@@ -39,9 +44,12 @@ unfreeze (rel-first sequential) executed → **rel wins big, CCA/US negative
 transfer caught by the pre-registered check; a validated but un-deployed
 mixed-stack candidate lifts composed ICA 0.80→0.82 and diaspora recall@0.10
 0.221→0.250** (`encoder-unfreeze-strategy.md`). Corpus expanded to 1960–2025.
-Memo drafted (`ml_memo/ica_model_update_2026-07.md`, operator reviewing).
-**Next: productionize the mixed stack, then the joint CCA+rel escalation, then
-apply to the expanded corpus** (§A1). Aug 1 = send memo; Aug 6 = meeting.
+Memo sent 2026-08-01 (`ml_memo/ica_model_update_2026-07.md`); the Aug 6 meeting
+did not reach this project (R&R on the earlier article), so no external
+re-prioritization. **Next: the branched-encoder experiment ladder
+(`branched-encoder-strategy.md` — graft test → head-capacity control → rel
+depth sweep → joint CCA+rel), with `fit_fusion.py` parameterization first;
+then productionize the winner; then apply to the expanded corpus** (§A1).
 
 ## A. Pre-Aug-6 refine-and-apply arc — CLOSED 2026-07-30 (kept for the record)
 
@@ -170,20 +178,28 @@ The engineering follow-through from the §A arc outcome. In priority order; each
 research agenda from the 2026-07-10 meeting; this list is the immediate model
 work.)
 
-1. **Mixed-stack productionization.** Adopt the validated mixed stack (tuned rel
-   on tuned CLS + production CCA/US) properly: **parameterize `src/fit_fusion.py`**
-   first (it is fully hardcoded — cca/rel/us weights + cache; `output_dir` silently
-   defaults to the *production* fusion path; exact call sites in
-   `tuned-retrain-runbook.md` §"Step 6" / "Gaps"), **refit fusion on mixed scores**,
-   add **two-cache `IcaModel` support** (two encoder passes per corpus at apply),
-   then the swap decision. The +0.02 composed gain reuses the old combiner unchanged,
-   so it is a floor not a ceiling.
-2. **Joint CCA+rel fine-tune** — the pre-registered escalation
-   (`encoder-unfreeze-strategy.md`), now **evidence-motivated** by the rel-first
-   negative-transfer result. Same population/channel/loss family → same batches
-   carry both labels, one λ (3-point grid), no PU-interleaving risk. The route back
-   to a single shared encoder carrying both gains. Three-head joint stays out.
-3. **Apply to the expanded corpus** — post-1995 candidates through 2025. Needs the
+1. **Parameterize `src/fit_fusion.py`** — needed by every downstream path
+   (branched, joint, any retrain). It is fully hardcoded — cca/rel/us weights +
+   cache; `output_dir` silently defaults to the *production* fusion path; exact
+   call sites in `tuned-retrain-runbook.md` §"Step 6" / "Gaps".
+2. **Branched-encoder experiment ladder** (`branched-encoder-strategy.md` —
+   the 2026-08-11 decision record; supersedes "mixed-stack productionization
+   then joint" as separate items). Pre-registered stages: (1) **graft test**
+   (tuned layer-12 on pristine trunk — decides whether the mixed stack is
+   really a K=1 branched model at ~1.08× apply, not 2×); (2) **head-capacity
+   control** (second hidden Dense on frozen features — checks the
+   representation-bottleneck assumption); (3) **rel depth sweep** (N ∈ {1,2,3}
+   × decay, hard freezing, pre-registered selection metric); (4) **joint
+   CCA+rel at the chosen depth** (λ 3-point grid; three-sided success rule
+   incl. US surviving as a passenger). Joint wins ⇒ single-encoder swap;
+   otherwise branched is the production architecture. Then productionize the
+   winner: fusion refit on new scores + per-head-features `IcaModel` support
+   (the surviving part of "two-cache support") + swap decision. US gets no
+   tuned branch; VAT unbundled (post-ladder A/B); temporal evidence-gated —
+   all per the note's companion decisions.
+3. **Apply to the expanded corpus** — post-1995 candidates through 2025. **Wait
+   for the ladder's encoder decision before paying the 1996–2025 embed** (the
+   embed is encoder-dependent; embedding twice is the waste). Needs the
    coalesce `lead_fallback_column` embed knob (`headline + "</s>" +
    coalesce(lead_paragraph, abstract)`) + a 1996–2025 embed; **era-slice any
    2025+ eval** (abstract-register shift). Then re-report CCA recall vs DoCA and
@@ -207,7 +223,10 @@ work.)
    - rel DEDPUL robustness re-run (kde_mode / seed sweep) — π̂=0.02 was a single
      estimate; §B item 6.
 
-## A2. Post-meeting arc (from the 2026-07-10 meeting — not before Aug 6)
+## A2. Post-meeting arc (from the 2026-07-10 meeting)
+
+*The 2026-08-06 meeting did not reach these (consumed by the R&R on the earlier
+pre-ML article) — still pending team discussion.*
 
 - **1950s backward test** — apply the (contemporary-trained) model to 1950s
   pulls; compare candidates against the hand-coders' output and the dictionary
@@ -292,8 +311,11 @@ same content signal). Machinery retained; η=0 canonical.
   `docs/implementation-plans/2026-06-06-us-filter/phase_*.md`. Partially
   superseded by the 06-18 features-mode retrain + validation; reconcile when the
   US head is next touched.
-- **VAT/ALUM + temporal signal** — now stretch items in thread A (promotion rule
-  above), not free-floating deferred items.
+- **VAT/ALUM + temporal signal** — dispositioned 2026-08-11
+  (`branched-encoder-strategy.md` companion decisions): VAT is a controlled
+  A/B on top of the ladder's stage-4 baseline, never bundled; temporal is
+  gated on era-sliced eval evidence from the expanded-corpus apply (it forces
+  a DAPT re-run — no measurement yet shows era shift hurts).
 - **Substantive deferred questions** (nnPU+α+γ composition, multi-class
   heads, preprocessor train/predict split) — `pinned-questions.md`.
 
