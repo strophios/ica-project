@@ -1,16 +1,20 @@
 # Roadmap & index — current live next-steps
 
-*Created 2026-06-19, last touched 2026-08-11. THIS is the single live list of
+*Created 2026-06-19, last touched 2026-08-12. THIS is the single live list of
 what's next and what's deferred. The pre-Aug-6 refine-and-apply arc (§A) is
-CLOSED at the 2026-07-30 write-up freeze; the **active thread is now §A1, the
+CLOSED at the 2026-07-30 write-up freeze; the **active thread is §A1, the
 post-meeting model arc**, reordered 2026-08-11 by the branched-encoder decision
 (`branched-encoder-strategy.md`): the experiment ladder replaces "productionize
 the mixed stack, then joint" as items 1–2. The 2026-08-06 meeting produced no
 project feedback (consumed by an R&R on the earlier pre-ML article) — internal
-priorities stand. Previously reconciled 2026-07-30 with the encoder-unfreeze
-arc outcome (`encoder-unfreeze-strategy.md`, `tuned-retrain-runbook.md`) and the
-July memo (`ml_memo/ica_model_update_2026-07.md`). Root `CLAUDE.md` reconciled
-2026-08-11; `README.md` still predates `cca-doca-retrain`.*
+priorities stand. Updated 2026-08-12: ladder stage 1 executed and passed; the
+**metal-execution finding** (`metal-execution-findings.md`) corrected the July
+tuned-head numbers; §A1 item 3 reconciled with the post-07-30 ops commits
+(d0c0898…acabb3b) this doc had missed. Previously reconciled 2026-07-30 with
+the encoder-unfreeze arc outcome (`encoder-unfreeze-strategy.md`,
+`tuned-retrain-runbook.md`) and the July memo
+(`ml_memo/ica_model_update_2026-07.md`). Root `CLAUDE.md` reconciled
+2026-08-12; `README.md` still predates `cca-doca-retrain`.*
 
 ## Where to look (index)
 
@@ -25,6 +29,7 @@ July memo (`ml_memo/ica_model_update_2026-07.md`). Root `CLAUDE.md` reconciled
 | US filter / dateline pipeline | `us-filter-*.md`, `r/CLAUDE.md` |
 | **US head retrain (diaspora recall)** | `us-head-retrain-plan.md` |
 | **Branched-encoder decision + experiment ladder (live)** | `branched-encoder-strategy.md` |
+| **Metal-execution finding + deployment rules (2026-08-12)** | `metal-execution-findings.md` |
 | **ICA apply results + cluster runbook** | `ica-apply-results-and-cluster-runbook.md` |
 | Per-head own-terms eval (2026-07-10) | `ml_memo/ica_model_state_2026-06.md` ("The heads on their own terms"); `scripts/eval_heads_own_terms.py` |
 | Multi-head assembly design (landed) | `docs/design-plans/2026-06-19-multi-head-ica-assembly.md` |
@@ -184,26 +189,38 @@ work.)
    call sites in `tuned-retrain-runbook.md` §"Step 6" / "Gaps".
 2. **Branched-encoder experiment ladder** (`branched-encoder-strategy.md` —
    the 2026-08-11 decision record; supersedes "mixed-stack productionization
-   then joint" as separate items). Pre-registered stages: (1) **graft test**
-   (tuned layer-12 on pristine trunk — decides whether the mixed stack is
-   really a K=1 branched model at ~1.08× apply, not 2×); (2) **head-capacity
-   control** (second hidden Dense on frozen features — checks the
-   representation-bottleneck assumption); (3) **rel depth sweep** (N ∈ {1,2,3}
-   × decay, hard freezing, pre-registered selection metric); (4) **joint
-   CCA+rel at the chosen depth** (λ 3-point grid; three-sided success rule
-   incl. US surviving as a passenger). Joint wins ⇒ single-encoder swap;
-   otherwise branched is the production architecture. Then productionize the
-   winner: fusion refit on new scores + per-head-features `IcaModel` support
-   (the surviving part of "two-cache support") + swap decision. US gets no
-   tuned branch; VAT unbundled (post-ladder A/B); temporal evidence-gated —
-   all per the note's companion decisions.
-3. **Apply to the expanded corpus** — post-1995 candidates through 2025. **Wait
-   for the ladder's encoder decision before paying the 1996–2025 embed** (the
-   embed is encoder-dependent; embedding twice is the waste). Needs the
-   coalesce `lead_fallback_column` embed knob (`headline + "</s>" +
-   coalesce(lead_paragraph, abstract)`) + a 1996–2025 embed; **era-slice any
-   2025+ eval** (abstract-register shift). Then re-report CCA recall vs DoCA and
-   ICA recall vs the team's coded events (the potential methods piece).
+   then joint" as separate items). **Stage 1 (graft test) PASSED 2026-08-12**:
+   graft == full-tuned within 4e-4 on all metrics; the mixed stack IS a K=1
+   branched model at ~1.08× apply (`graft_test_v2.json`). En route, the
+   **metal-execution finding** (`metal-execution-findings.md`): the July
+   tuned-head artifacts are execution-bound (trained on tensorflow-metal);
+   correct-math retrains confirm the rel gain (vs-ICA 0.852–0.855, diaspora
+   0.662) and correct the transfer verdict magnitudes (CCA 0.928→0.795, US
+   F1 0.97→0.951 — direction unchanged, branched still evidence-favored).
+   Remaining stages: (2) **head-capacity control** (second hidden Dense on
+   frozen features); (3) **rel depth sweep** (N ∈ {1,2,3} × decay, hard
+   freezing, pre-registered selection metric); (4) **joint CCA+rel at the
+   chosen depth** (λ 3-point grid; three-sided success rule incl. US
+   surviving as a passenger). Joint wins ⇒ single-encoder swap; otherwise
+   branched is the production architecture. Then productionize the winner:
+   fusion refit (re-measures the composed mixed-stack number, currently
+   metal-pending) + per-head-features `IcaModel` support + CPU-portable
+   replacement artifacts w/ calibrations + swap decision. All ladder runs
+   CPU-forced or cluster-side; new heads get the CPU-vs-GPU rank-consistency
+   acceptance check. US gets no tuned branch; VAT unbundled (post-ladder
+   A/B); temporal evidence-gated — per the note's companion decisions.
+3. **Apply to the expanded corpus** — post-1995 candidates through 2025.
+   *Reconciled 2026-08-12 with the post-07-30 ops commits this doc had missed:*
+   the coalesce `lead_fallback_column` embed knob, `--dedupe-ids` (resolves the
+   1996–2025 pull-overlap duplicates + drops the 13 empty-id 2025 rows), and
+   `apply_ica` `--out-name`/`--years` parameterization all **landed 2026-07-31**
+   (d0c0898, 1193 tests); cluster sbatch jobs for the 1976–1995 `full`-cache
+   completion and the 1996–2025 forward embed exist (492671e…acabb3b — check
+   cluster state for what actually ran). **Still wait for the ladder's encoder
+   decision before paying the 1996–2025 embed** (encoder-dependent; embedding
+   twice is the waste); **era-slice any 2025+ eval** (abstract-register shift).
+   Then re-report CCA recall vs DoCA and ICA recall vs the team's coded events
+   (the potential methods piece).
 4. **Paired 1970s lead-vs-abstract channel experiment** — pre-registered
    (`roadmap.md` §A item 1 detail); run BEFORE any *historical* coalesce, since
    historical abstracts are NYT-Index register not article text. Score identical
@@ -211,11 +228,31 @@ work.)
    compare distributions + gold-slice metrics.
 5. **Backward densify pull** — operator-side, ongoing (`r/api_ingest/pull_archive.R`
    `--skeleton` → densify).
-6. **Small gaps:**
+6. **Deep metal/numerics investigation** — operator-requested 2026-08-11
+   ("public and private good"). Minimal reproduction of the metal-vs-CPU
+   divergence (single Dense at ~100-logit scale; accumulation-order vs kernel
+   bug), whether metal *training* diverges from CPU training same-seed, then
+   file upstream. Scope + starting points: `metal-execution-findings.md`
+   §"Queued". Related: the US-head full-model load failure
+   (`diag_us_head_load.py` thread) that currently blocks local token-mode US
+   gold evals.
+7. **Small gaps:**
    - `src/run_relevance.py` has no `--us-weights` rescore knob (unlike
      `run_cca_doca.py`) — its US-restriction is whatever `us_logit` the cache was
      built with (`tuned-retrain-runbook.md` §"Step 3" / "Gaps" #1).
-   - **991 duplicate `id`s** in `api_corpus/` (1960–2025) — dedupe before train/apply.
+   - **991 duplicate `id`s** in `api_corpus/` (1960–2025) — the embed path now
+     has `--dedupe-ids` (d0c0898); still outstanding: dedupe inside
+     `load_location_signals` (`unique(subset="id", keep="first",
+     maintain_order=True)` + logged count) — one dup id
+     (`nyt://article/2f64313c-…`) fans out the training-table join and trips
+     the id-uniqueness assert; the 2026-08-12 scratch retrains monkeypatched it
+     (`metal-execution-findings.md` §"Incidental").
+   - **Calibration execution-path rule** (2026-08-12): Platt fits do not
+     transfer CPU↔GPU for large-logit heads; fit on the apply-time path and
+     record the path in the sidecar when the calibrators are next touched
+     (`metal-execution-findings.md` deployment rule 3).
+   - **CPU-force / acceptance-check the features-mode trainers** when next
+     touched (`metal-execution-findings.md` deployment rules 1–2).
    - **`eval_heads_own_terms` step-order:** calibration is required BEFORE the eval;
      the runbook's Step 4 (eval) currently precedes Step 5 (calibrate) — swap them
      or note the dependency when next running the tuned compare.

@@ -172,6 +172,17 @@ the case where CCA's 15k DoCA positives as a sibling signal would regularize).
   route back to a single shared encoder carrying both gains. Cross-platform
   embed consistency (cluster vs local) verified exactly post-clobber-fix.
 
+- **Correction (2026-08-12, `metal-execution-findings.md`):** the features-mode
+  numbers in the transfer verdict above were measured under tensorflow-metal
+  execution with metal-trained heads. The rel artifact
+  (`relevance_tuned.weights.h5`) is execution-bound (0.853 vs-ICA under metal,
+  0.386 under correct math); correct-math retrains reproduce the rel gain
+  (0.852–0.855 vs-ICA, diaspora 0.662) and correct the transfer magnitudes
+  (CCA 0.928→**0.795**, not 0.739; US features F1 0.97→**0.951**). The verdict
+  (rel wins; CCA severe negative transfer; US milder; no wholesale swap)
+  stands. The mixed-stack composed 0.797→0.820 is decomposed-verified,
+  composed-pending (re-measured at the fusion refit).
+
 ## Sources
 
 Kurin et al. 2022 arXiv:2201.04122; Xin et al. 2022 arXiv:2209.11379; Shi et

@@ -177,6 +177,38 @@ the encoder decision so it's paid once (roadmap §A1 item 4).
   `--us-weights` rescore knob; `eval_heads_own_terms` requires calibration
   before eval (runbook step-order); both unchanged by this note.
 
+## Execution record
+
+**Stage 1 — PASS (2026-08-12).** Run via `scripts/graft_test.py`
+(`cca_doca/experiments/graft_test_v2.json`): graft (pristine trunk + tuned
+`transformer_layer_11`) matches the full tuned encoder within **4e-4** on every
+metric (vs-ICA 0.8555 vs 0.8550; diaspora @0.30 0.662 == 0.662, @0.10 0.250 ==
+0.250; own-terms 0.8365 vs 0.8362), judged by a correct-math reference head.
+The sub-branch drift (max 3.3e-3, layers 7–9) carries nothing. **The branched
+frame is real: the mixed stack is a K=1 branched model at ~1.08× apply.**
+
+En route, stage 1 v1 exposed that the production `relevance_tuned` artifact is
+**tensorflow-metal-execution-bound** (vs-ICA 0.853 under metal, 0.386 under
+correct math — trained on metal, so the weights fit metal's distorted forward).
+Full investigation, corrected numbers, and deployment rules:
+`metal-execution-findings.md`. Consequences for this ladder:
+
+- The correct-math reference head is a fresh CPU-trained π=0.02 probe
+  (`relevance/scratch_diag/relevance_tuned_p02_cpu.weights.h5`); the rel gain
+  reproduces under correct math (so does a π=0.05 probe — the July artifact's
+  collapse was metal-specific, not prior-specific).
+- **Negative-transfer verdict re-measured under correct math: survives
+  qualitatively, magnitudes corrected** — CCA own-terms 0.928 → 0.795 (metal
+  said 0.739); US features test F1 0.97 → 0.951 (metal-era eval said 0.938
+  own-terms-equivalent). Branched remains evidence-favored; stage 4's
+  three-sided rule unchanged.
+- All ladder training/eval runs are CPU-forced or cluster-side from here; every
+  new head gets the CPU-vs-GPU rank-consistency acceptance check
+  (`metal-execution-findings.md` deployment rules).
+
+Stages 2 (head-capacity control), 3 (depth sweep), 4 (joint CCA+rel) — not yet
+run.
+
 ## Pointers
 
 `encoder-unfreeze-strategy.md` (predecessor decision + rel-first findings and
