@@ -197,11 +197,15 @@ work.)
    correct-math retrains confirm the rel gain (vs-ICA 0.852–0.855, diaspora
    0.662) and correct the transfer verdict magnitudes (CCA 0.928→0.795, US
    F1 0.97→0.951 — direction unchanged, branched still evidence-favored).
-   Remaining stages: (2) **head-capacity control** (second hidden Dense on
-   frozen features); (3) **rel depth sweep** (N ∈ {1,2,3} × decay, hard
-   freezing, pre-registered selection metric); (4) **joint CCA+rel at the
-   chosen depth** (λ 3-point grid; three-sided success rule incl. US
-   surviving as a passenger). Joint wins ⇒ single-encoder swap; otherwise
+   **Stage 2 (head-capacity control) DONE 2026-08-12** — expected outcome:
+   depth on frozen features buys nothing (deep 0.779 vs shallow-control 0.788
+   vs-ICA); representation bottleneck affirmed; single-run noise measured at
+   ~±0.015 vs-ICA (stage-3 rule: treat smaller single-run deltas as ties).
+   Remaining stages (cluster-side): (3) **rel depth sweep** (N ∈ {1,2,3} ×
+   decay, hard freezing, pre-registered selection metric, ≥2 seeds or
+   tie-aware reads per the noise floor); (4) **joint CCA+rel at the chosen
+   depth** (λ 3-point grid; three-sided success rule incl. US surviving as a
+   passenger). Joint wins ⇒ single-encoder swap; otherwise
    branched is the production architecture. Then productionize the winner:
    fusion refit (re-measures the composed mixed-stack number, currently
    metal-pending) + per-head-features `IcaModel` support + CPU-portable

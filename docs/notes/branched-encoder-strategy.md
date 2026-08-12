@@ -206,8 +206,21 @@ Full investigation, corrected numbers, and deployment rules:
   new head gets the CPU-vs-GPU rank-consistency acceptance check
   (`metal-execution-findings.md` deployment rules).
 
-Stages 2 (head-capacity control), 3 (depth sweep), 4 (joint CCA+rel) — not yet
-run.
+**Stage 2 — head-capacity control: expected outcome (2026-08-12).** Same-session
+pair on the frozen `relevance_train` cache, prior 0.05, CPU: shallow control
+own/vs-ICA/diaspora 0.833/0.788/0.397 vs deep head (intermediate Dense →
+Dense-Dropout-Dense) 0.820/0.779/0.412. Depth on frozen features buys nothing
+(slightly negative); far below the pre-registered 0.800 weakening threshold.
+Representation-bottleneck premise affirmed; stages 3–4 licensed. **Calibration
+by-product:** the fresh shallow control (0.788) vs the production head (0.773,
+CPU) puts single-run training noise at ~±0.015 vs-ICA on this eval —
+stage 3's selection rule should treat single-run deltas under ~0.015 as ties
+(2 seeds per grid point, or coarse reads only). Scratch artifacts:
+`relevance/scratch_diag/rel_{shallow_ctrl,deep}_cpu.weights.h5` (the deep
+artifact does not reload through `apply_relevance_model` — nonstandard head
+structure, loud failure by design).
+
+Stages 3 (depth sweep) and 4 (joint CCA+rel) — not yet run; both cluster-side.
 
 ## Pointers
 
