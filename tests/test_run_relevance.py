@@ -9,6 +9,7 @@ Verifies that:
 from __future__ import annotations
 
 import dataclasses
+import inspect
 import tempfile
 from pathlib import Path
 
@@ -19,6 +20,7 @@ from src import config
 from src.cca_config import DEFAULT_CCA_CONFIG
 from src.model_setup.heads import ClassificationHead
 from src.model_setup.assembly import build_feature_inference_model
+from src.run_relevance import main as run_relevance_main
 
 
 class TestRelevanceHeadRename:
@@ -158,3 +160,23 @@ class TestRelevanceDatasetHeadNameContract:
         ds = self._dataset(head_name="cca")  # the old default -> "cca_targets"
         with pytest.raises(ValueError, match="rel_targets"):
             model.fit(ds, steps_per_epoch=1, epochs=1, verbose=0)
+
+
+class TestSeedKnob:
+    """--seed (Capability 2): main() accepts a training-time seed override,
+    threaded into the run_config sidecar. main() itself isn't exercised
+    end-to-end here (requires the real embed cache + backbone, covered by
+    the runbook / cluster runs, not this test suite) -- these tests pin the
+    signature default and the RunConfig-level plumbing main() relies on."""
+
+    def test_main_accepts_seed_kwarg_defaulting_200(self):
+        sig = inspect.signature(run_relevance_main)
+        assert "seed" in sig.parameters
+        assert sig.parameters["seed"].default == 200
+
+    def test_run_config_seed_overrides_via_dataclasses_replace(self):
+        """Mirrors run_relevance.main()'s own head-rename dataclasses.replace
+        call, which is where main() folds the --seed CLI value in."""
+        cfg = dataclasses.replace(DEFAULT_CCA_CONFIG, seed=7)
+        assert cfg.seed == 7
+        assert DEFAULT_CCA_CONFIG.seed == 200  # original unchanged

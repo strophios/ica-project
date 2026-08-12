@@ -991,6 +991,96 @@ class TestEscalationKnobsRoundTrip:
         assert DEFAULT_CCA_CONFIG.layer_multipliers is None
 
 
+class TestHardFreezeKnob:
+    """`hard_freeze` (Capability 1, docs/notes/branched-encoder-strategy.md):
+    trainable=False sub-layers below the unfrozen top-N block, replacing the
+    drift-prone zero-multiplier freeze. Mirrors TestEscalationKnobs above."""
+
+    def test_default_is_false(self):
+        cfg = _valid_run_config()
+        assert cfg.hard_freeze is False
+
+    def test_can_set_true(self):
+        cfg = _valid_run_config(hard_freeze=True)
+        assert cfg.hard_freeze is True
+
+    def test_non_bool_rejected(self):
+        with pytest.raises(ValueError, match="hard_freeze"):
+            _valid_run_config(hard_freeze="yes")
+
+    def test_default_cca_config_has_hard_freeze_false(self):
+        # Back-compat: all historical artifacts were multiplier-frozen, not
+        # trainable=False -- False is the historically-accurate default.
+        assert DEFAULT_CCA_CONFIG.hard_freeze is False
+
+
+class TestSeedKnob:
+    """`seed` (training-time keras.utils.set_random_seed knob). Independent
+    of and must not affect the seed=200 polars .sample() split seed in
+    src/data_setup/data.py."""
+
+    def test_default_is_200(self):
+        cfg = _valid_run_config()
+        assert cfg.seed == 200
+
+    def test_can_set_custom_seed(self):
+        cfg = _valid_run_config(seed=7)
+        assert cfg.seed == 7
+
+    def test_zero_seed_accepted(self):
+        cfg = _valid_run_config(seed=0)
+        assert cfg.seed == 0
+
+    def test_non_int_rejected(self):
+        with pytest.raises(ValueError, match="seed"):
+            _valid_run_config(seed=1.5)
+
+    def test_bool_rejected(self):
+        # bool is a subclass of int in Python; must be explicitly excluded.
+        with pytest.raises(ValueError, match="seed"):
+            _valid_run_config(seed=True)
+
+    def test_negative_seed_rejected(self):
+        with pytest.raises(ValueError, match="seed"):
+            _valid_run_config(seed=-1)
+
+    def test_default_cca_config_has_seed_200(self):
+        assert DEFAULT_CCA_CONFIG.seed == 200
+
+
+class TestHardFreezeAndSeedRoundTrip:
+    """JSON round-trip + back-compat for hard_freeze/seed, mirroring
+    TestEscalationKnobsRoundTrip above."""
+
+    def test_round_trip_with_hard_freeze_and_seed(self, tmp_path):
+        cfg = _valid_run_config(hard_freeze=True, seed=7)
+        path = tmp_path / "config.json"
+        cfg.to_json(path)
+        reloaded = RunConfig.from_json(path)
+        assert reloaded == cfg
+        assert reloaded.hard_freeze is True
+        assert reloaded.seed == 7
+
+    def test_back_compat_old_sidecar_missing_hard_freeze_and_seed(self, tmp_path):
+        """Old sidecars missing hard_freeze/seed should load with the
+        historically-accurate defaults (hard_freeze=False, seed=200) --
+        mirrors test_back_compat_old_sidecar_missing_fields above."""
+        cfg = _valid_run_config()
+        path = tmp_path / "config.json"
+        cfg.to_json(path)
+
+        payload = json.loads(path.read_text())
+        del payload["hard_freeze"]
+        del payload["seed"]
+        path.write_text(json.dumps(payload))
+
+        reloaded = RunConfig.from_json(path)
+        assert reloaded.hard_freeze is False
+        assert reloaded.seed == 200
+        assert reloaded.seq_length == cfg.seq_length
+        assert reloaded.heads == cfg.heads
+
+
 class TestRunConfigDiagnosticsIntegration:
     def test_default_factory_fires_when_constructed_without_diagnostics(self):
         from src.cca_config import DEFAULT_CCA_CONFIG, DiagnosticsConfig

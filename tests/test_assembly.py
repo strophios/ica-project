@@ -46,6 +46,7 @@ from src.model_setup.assembly import (
 )
 from src.loss_functions.loss import FLPULoss
 from src.cca_config import DiagnosticsConfig
+from src.validation.escalation import escalation_build_kwargs, frozen_sublayer_names
 
 
 SEQ_LEN = 4
@@ -77,6 +78,35 @@ def _make_fake_backbone(seq_len=SEQ_LEN, hidden_dim=HIDDEN_DIM, vocab=VOCAB,
     return keras.Model(
         inputs={"token_ids": token_ids, "padding_mask": padding_mask},
         outputs=masked,
+        name=name,
+    )
+
+
+def _make_layered_fake_backbone(seq_len=SEQ_LEN, hidden_dim=HIDDEN_DIM, vocab=VOCAB,
+                                n_layers=3, name="fake_layered_backbone"):
+    """
+    A fake backbone whose sub-layer NAMES mirror the real keras_hub
+    RobertaBackbone's ("embeddings", "embeddings_layer_norm",
+    "transformer_layer_0" .. "transformer_layer_{n_layers-1}", verified
+    empirically against the loaded DAPT backbone -- see
+    top_n_group_fn's NAMING NOTE / docs/notes/branched-encoder-strategy.md).
+    Needed (over `_make_fake_backbone`) specifically to exercise hard-freeze
+    layer-name lookup (`backbone.get_layer(name).trainable = False`), which
+    depends on real sub-layer names, not just the token_ids/padding_mask ->
+    (batch, seq, hidden) contract the plain fake backbone satisfies.
+    """
+    token_ids = keras.Input(shape=(seq_len,), dtype="int32", name="token_ids")
+    padding_mask = keras.Input(shape=(seq_len,), dtype="int32", name="padding_mask")
+    x = keras.layers.Embedding(vocab, hidden_dim, name="embeddings")(token_ids)
+    x = keras.layers.LayerNormalization(name="embeddings_layer_norm")(x)
+    mask_float = keras.ops.cast(padding_mask, "float32")
+    mask_expanded = keras.ops.expand_dims(mask_float, axis=-1)
+    x = x * mask_expanded
+    for i in range(n_layers):
+        x = keras.layers.Dense(hidden_dim, name=f"transformer_layer_{i}")(x)
+    return keras.Model(
+        inputs={"token_ids": token_ids, "padding_mask": padding_mask},
+        outputs=x,
         name=name,
     )
 
@@ -828,3 +858,140 @@ class TestEndpointDiagnosticsWiring:
         # Confirm the model was built and diagnostics were wired
         assert model._diagnostic_trackers is not None
         assert "cca" in model._head_refs_by_name
+
+
+# -----------------------------------------------------------------------------
+# Hard freezing (Capability 1, docs/notes/branched-encoder-strategy.md)
+# -----------------------------------------------------------------------------
+
+
+class TestHardFreeze:
+    """`build_endpoint_model(hard_freeze_names=...)`: `trainable=False` on
+    named backbone sub-layers, replacing the drift-prone zero-gradient-
+    multiplier "freeze" -- AdamW's decoupled weight decay still updates
+    multiplier=0 variables every step regardless of gradient scale
+    (docs/notes/encoder-unfreeze-strategy.md, 2026-07-29 finding)."""
+
+    N_LAYERS = 3
+
+    def _layered_backbone(self):
+        return _make_layered_fake_backbone(n_layers=self.N_LAYERS)
+
+    def _fresh_head(self):
+        return ClassificationHead(
+            hidden_dim=HIDDEN_DIM, loss_fn=FLPULoss(prior=0.1), name="cca",
+        )
+
+    def test_hard_frozen_sublayers_excluded_from_trainable_variables(self):
+        backbone = self._layered_backbone()
+        frozen_names = frozen_sublayer_names(unfreeze_top_n=1, n_layers=self.N_LAYERS)
+        model = build_endpoint_model(
+            backbone=backbone,
+            heads={"cca": self._fresh_head()},
+            seq_length=SEQ_LEN,
+            freeze_encoder=False,
+            hard_freeze_names=frozen_names,
+        )
+        paths = [v.path for v in model.trainable_variables]
+        assert not any(p.startswith("embeddings") for p in paths)
+        assert not any(p.startswith("transformer_layer_0/") for p in paths)
+        assert not any(p.startswith("transformer_layer_1/") for p in paths)
+
+    def test_top_n_and_head_vars_remain_trainable(self):
+        backbone = self._layered_backbone()
+        frozen_names = frozen_sublayer_names(unfreeze_top_n=1, n_layers=self.N_LAYERS)
+        model = build_endpoint_model(
+            backbone=backbone,
+            heads={"cca": self._fresh_head()},
+            seq_length=SEQ_LEN,
+            freeze_encoder=False,
+            hard_freeze_names=frozen_names,
+        )
+        paths = [v.path for v in model.trainable_variables]
+        assert any(p.startswith(f"transformer_layer_{self.N_LAYERS - 1}/") for p in paths)
+        assert any(p.startswith("cca/") for p in paths)
+
+    def test_hard_freeze_names_none_leaves_old_behavior_byte_identical(self):
+        """hard_freeze_names=None (the default): every backbone variable
+        stays trainable under freeze_encoder=False, exactly as before this
+        capability existed."""
+        backbone = self._layered_backbone()
+        model = build_endpoint_model(
+            backbone=backbone,
+            heads={"cca": self._fresh_head()},
+            seq_length=SEQ_LEN,
+            freeze_encoder=False,
+        )
+        paths = [v.path for v in model.trainable_variables]
+        assert any(p.startswith("embeddings") for p in paths)
+        assert any(p.startswith("transformer_layer_0/") for p in paths)
+        assert any(p.startswith("transformer_layer_1/") for p in paths)
+
+    def test_hard_freeze_names_empty_tuple_is_also_a_no_op(self):
+        """Falsy (empty tuple) hard_freeze_names must behave like None -- the
+        `if hard_freeze_names:` guard, not an unconditional loop."""
+        backbone = self._layered_backbone()
+        model = build_endpoint_model(
+            backbone=backbone,
+            heads={"cca": self._fresh_head()},
+            seq_length=SEQ_LEN,
+            freeze_encoder=False,
+            hard_freeze_names=(),
+        )
+        paths = [v.path for v in model.trainable_variables]
+        assert any(p.startswith("embeddings") for p in paths)
+
+    def test_hard_frozen_group_absent_from_grad_norm_trackers(self):
+        """Diagnostics: with hard freezing, backbone.trainable_variables never
+        contains an 'encoder_frozen'-grouped variable, so build_trackers
+        (which derives groups by walking trainable_variables) never
+        constructs an 'encoder_frozen' PerGroupGradNormTracker -- the same
+        precedent as the frozen_encoder=True case
+        (test_frozen_encoder_no_backbone_grad_tracker above)."""
+        backbone = self._layered_backbone()
+        kwargs = escalation_build_kwargs(
+            unfreeze_top_n=1, n_layers=self.N_LAYERS, hard_freeze=True
+        )
+        model = build_endpoint_model(
+            backbone=backbone,
+            heads={"cca": self._fresh_head()},
+            seq_length=SEQ_LEN,
+            diagnostics=DiagnosticsConfig(),
+            **kwargs,
+        )
+        grad_names = [
+            t.name for t in model._diagnostic_trackers["per_step"]["gradient"]
+        ]
+        assert not any("encoder_frozen" in n for n in grad_names)
+        assert any("encoder_top" in n for n in grad_names)
+
+    def test_hard_frozen_weights_bit_identical_after_training_step(self):
+        """End-to-end correctness: after a fit() step, hard-frozen sub-layer
+        weights are EXACTLY unchanged -- not just orders-of-magnitude smaller
+        movement than the tuned layer, which is what multiplier-freezing
+        (the thing this capability replaces) produces under AdamW weight
+        decay."""
+        backbone = self._layered_backbone()
+        kwargs = escalation_build_kwargs(
+            unfreeze_top_n=1, n_layers=self.N_LAYERS, hard_freeze=True
+        )
+        model = build_endpoint_model(
+            backbone=backbone, heads={"cca": self._fresh_head()}, seq_length=SEQ_LEN,
+            **kwargs,
+        )
+        # Large weight decay so any drift would be easy to observe if hard
+        # freezing weren't actually excluding these variables from the update.
+        model.compile(optimizer=keras.optimizers.AdamW(1e-2, weight_decay=0.5))
+
+        frozen_layer = backbone.get_layer("transformer_layer_0")
+        before = [w.numpy().copy() for w in frozen_layer.weights]
+
+        inputs = _make_dummy_inputs(with_targets=True)
+        model.fit(inputs, epochs=1, batch_size=BATCH, verbose=0)
+
+        after = [w.numpy() for w in frozen_layer.weights]
+        for b, a in zip(before, after):
+            np.testing.assert_array_equal(
+                b, a,
+                err_msg="hard-frozen layer weights changed during training",
+            )

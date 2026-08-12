@@ -171,10 +171,46 @@ def _validate_per_layer_keys(layer_multipliers: dict, n_top: int, n_layers: int)
         )
 
 
+# Real Keras sub-layer names for the non-layer backbone components (see
+# _ENCODER_NON_LAYER_PREFIXES above for the corresponding group-fn prefix
+# match) -- distinct from that prefix tuple because `frozen_sublayer_names`
+# needs exact `backbone.get_layer(name)` lookup names, not a prefix.
+_NON_LAYER_BACKBONE_SUBLAYER_NAMES = ("embeddings", "embeddings_layer_norm")
+
+
+def frozen_sublayer_names(unfreeze_top_n: int, n_layers: int = 12) -> tuple[str, ...]:
+    """Pure: real backbone sub-layer NAMES to hard-freeze (Capability 1,
+    docs/notes/branched-encoder-strategy.md "Hard freezing is now a
+    requirement"), given `unfreeze_top_n` unfrozen top transformer blocks.
+
+    Companion to `top_n_group_fn`'s grouping (the embeddings pair plus every
+    transformer block below the top N are "encoder_frozen") but returns
+    layer NAMES for `backbone.get_layer(name).trainable = False`, not a
+    per-Variable group function. Exists because `LayerLRModel`'s zero
+    gradient multiplier alone does not freeze a variable: AdamW's decoupled
+    weight decay still shrinks multiplier=0 "frozen" variables every step
+    regardless of gradient scale (docs/notes/encoder-unfreeze-strategy.md,
+    2026-07-29 finding — measured ~2.3e-3 max-abs drift over 5 epochs).
+
+    Args:
+        unfreeze_top_n: number of top transformer blocks left trainable
+            (must be in [0, n_layers]).
+        n_layers: total backbone transformer blocks (default 12 for
+            RoBERTa-base).
+    """
+    if not (0 <= unfreeze_top_n <= n_layers):
+        raise ValueError(f"unfreeze_top_n must be in [0, {n_layers}]; got {unfreeze_top_n}")
+    n_frozen_layers = n_layers - unfreeze_top_n
+    return _NON_LAYER_BACKBONE_SUBLAYER_NAMES + tuple(
+        f"transformer_layer_{i}" for i in range(n_frozen_layers)
+    )
+
+
 def escalation_build_kwargs(
     unfreeze_top_n: int,
     layer_multipliers: dict | None = None,
     n_layers: int = 12,
+    hard_freeze: bool = False,
 ) -> dict:
     """Pure: derive the `build_endpoint_model` kwargs for the encoder-unfreeze
     escalation branch.
@@ -186,11 +222,21 @@ def escalation_build_kwargs(
     - `unfreeze_top_n > 0` (unfreezing path): `freeze_encoder=False`, a
       `group_fn` from `top_n_group_fn(unfreeze_top_n, n_layers=n_layers)`, and
       `layer_multipliers` — the caller-supplied dict if given, else
-      `DEFAULT_ESCALATION_MULTIPLIERS`.
+      `DEFAULT_ESCALATION_MULTIPLIERS`. When `hard_freeze=True`, also
+      includes `hard_freeze_names` (from `frozen_sublayer_names`) so
+      `build_endpoint_model` sets `trainable=False` on the sub-branch layers
+      instead of relying on the zero gradient multiplier alone.
     - `unfreeze_top_n == 0` (frozen-probe path, the default): just
-      `{"freeze_encoder": True}` — no `group_fn`/`layer_multipliers` keys,
-      matching `build_endpoint_model`'s own defaults for those params (a
-      byte-identical no-op relative to not touching them at all).
+      `{"freeze_encoder": True}` — no `group_fn`/`layer_multipliers`/
+      `hard_freeze_names` keys, matching `build_endpoint_model`'s own
+      defaults for those params (a byte-identical no-op relative to not
+      touching them at all). `hard_freeze` is ignored on this path — the
+      frozen-probe encoder is already fully frozen via `freeze_encoder=True`,
+      so hard-freezing it too would be a no-op; treating it as a no-op here
+      (rather than raising) means the CLI's hard-freeze-on-by-default
+      posture for new runs doesn't force `--no-hard-freeze` on a plain
+      frozen-probe smoke run (mirrors the existing "frozen path ignores
+      layer_multipliers" precedent below).
 
     Returns a dict meant to be merged into the full `build_endpoint_model` call
     (backbone/heads/seq_length/diagnostics are the caller's responsibility).
@@ -203,20 +249,24 @@ def escalation_build_kwargs(
         # encoder_top/encoder_frozen scheme.
         if layer_multipliers and any(k.startswith("encoder_layer_") for k in layer_multipliers):
             _validate_per_layer_keys(layer_multipliers, unfreeze_top_n, n_layers)
-            return {
+            result = {
                 "freeze_encoder": False,
                 "group_fn": per_layer_group_fn(unfreeze_top_n, n_layers=n_layers),
                 "layer_multipliers": dict(layer_multipliers),
             }
-        return {
-            "freeze_encoder": False,
-            "group_fn": top_n_group_fn(unfreeze_top_n, n_layers=n_layers),
-            "layer_multipliers": (
-                dict(layer_multipliers)
-                if layer_multipliers
-                else dict(DEFAULT_ESCALATION_MULTIPLIERS)
-            ),
-        }
+        else:
+            result = {
+                "freeze_encoder": False,
+                "group_fn": top_n_group_fn(unfreeze_top_n, n_layers=n_layers),
+                "layer_multipliers": (
+                    dict(layer_multipliers)
+                    if layer_multipliers
+                    else dict(DEFAULT_ESCALATION_MULTIPLIERS)
+                ),
+            }
+        if hard_freeze:
+            result["hard_freeze_names"] = frozen_sublayer_names(unfreeze_top_n, n_layers=n_layers)
+        return result
     return {"freeze_encoder": True}
 
 

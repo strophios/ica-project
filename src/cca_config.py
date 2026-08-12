@@ -615,6 +615,23 @@ class RunConfig:
     freeze_encoder: bool = True
     unfreeze_top_n: int = 0
     layer_multipliers: dict | None = None
+    # Hard-freeze knob (docs/notes/branched-encoder-strategy.md "Hard
+    # freezing is now a requirement"): when True (and unfreeze_top_n > 0),
+    # the trainer sets `trainable=False` on the backbone sub-layers below
+    # the unfrozen top-N block, replacing the drift-prone zero-multiplier
+    # "freeze" (AdamW's decoupled weight decay still updates multiplier=0
+    # variables every step -- encoder-unfreeze-strategy.md, 2026-07-29
+    # finding). Back-compat default False: every sidecar written before this
+    # knob existed was multiplier-frozen, not trainable=False -- False is
+    # the historically-accurate reconstruction, not a "safe" default choice.
+    hard_freeze: bool = False
+    # Training-time random seed for keras.utils.set_random_seed. Independent
+    # of the seed=200 polars .sample() split seed in src/data_setup/data.py,
+    # which this field does NOT affect and must not change (see that
+    # module). Default 200 matches the hardcode every trainer used before
+    # this knob existed, so pre-existing sidecars back-compat-default
+    # correctly.
+    seed: int = 200
 
     def __post_init__(self):
         # --- Self-consistency: own fields ---------------------------------
@@ -723,6 +740,19 @@ class RunConfig:
             raise ValueError(
                 f"RunConfig.layer_multipliers must be a dict or None; "
                 f"got {type(self.layer_multipliers).__name__}."
+            )
+        if not isinstance(self.hard_freeze, bool):
+            raise ValueError(
+                f"RunConfig.hard_freeze must be a bool; "
+                f"got {type(self.hard_freeze).__name__}."
+            )
+        if (
+            not isinstance(self.seed, int)
+            or isinstance(self.seed, bool)
+            or self.seed < 0
+        ):
+            raise ValueError(
+                f"RunConfig.seed must be a non-negative int; got {self.seed!r}."
             )
 
     # ----------------------------------------------------------------------

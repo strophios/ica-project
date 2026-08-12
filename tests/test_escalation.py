@@ -17,6 +17,7 @@ from src.validation.escalation import (
     graded_multipliers,
     escalation_decision,
     escalation_build_kwargs,
+    frozen_sublayer_names,
     DEFAULT_ESCALATION_MULTIPLIERS,
 )
 
@@ -346,3 +347,81 @@ class TestEscalationBuildKwargsGraded:
         del m["encoder_layer_9"]
         with pytest.raises(ValueError, match="missing"):
             escalation_build_kwargs(3, m)
+
+
+class TestFrozenSublayerNames:
+    """frozen_sublayer_names(unfreeze_top_n, n_layers) -- real backbone
+    sub-layer NAMES for `backbone.get_layer(name).trainable = False` hard
+    freezing (Capability 1, docs/notes/branched-encoder-strategy.md).
+    Companion to top_n_group_fn's grouping, but names not a group_fn.
+    """
+
+    def test_top_1_of_12_freezes_embeddings_and_layers_0_through_10(self):
+        names = frozen_sublayer_names(unfreeze_top_n=1, n_layers=12)
+        assert names == (
+            "embeddings", "embeddings_layer_norm",
+            *(f"transformer_layer_{i}" for i in range(11)),
+        )
+        # Layer 11 (the unfrozen top layer) must NOT be in the frozen set.
+        assert "transformer_layer_11" not in names
+
+    def test_top_0_freezes_every_transformer_layer(self):
+        names = frozen_sublayer_names(unfreeze_top_n=0, n_layers=12)
+        assert names == (
+            "embeddings", "embeddings_layer_norm",
+            *(f"transformer_layer_{i}" for i in range(12)),
+        )
+
+    def test_top_all_layers_freezes_only_embeddings(self):
+        names = frozen_sublayer_names(unfreeze_top_n=12, n_layers=12)
+        assert names == ("embeddings", "embeddings_layer_norm")
+
+    def test_respects_custom_n_layers(self):
+        names = frozen_sublayer_names(unfreeze_top_n=1, n_layers=3)
+        assert names == ("embeddings", "embeddings_layer_norm",
+                          "transformer_layer_0", "transformer_layer_1")
+
+    def test_out_of_range_rejected(self):
+        with pytest.raises(ValueError, match="unfreeze_top_n"):
+            frozen_sublayer_names(unfreeze_top_n=13, n_layers=12)
+        with pytest.raises(ValueError, match="unfreeze_top_n"):
+            frozen_sublayer_names(unfreeze_top_n=-1, n_layers=12)
+
+
+class TestEscalationBuildKwargsHardFreeze:
+    """escalation_build_kwargs's `hard_freeze` param (Capability 1)."""
+
+    def test_default_hard_freeze_off_no_new_key(self):
+        """hard_freeze=False (the default) is byte-identical to the pre-
+        Capability-1 return value -- no `hard_freeze_names` key at all."""
+        kwargs = escalation_build_kwargs(unfreeze_top_n=1)
+        assert "hard_freeze_names" not in kwargs
+
+    def test_hard_freeze_true_adds_hard_freeze_names(self):
+        kwargs = escalation_build_kwargs(unfreeze_top_n=1, hard_freeze=True)
+        assert kwargs["hard_freeze_names"] == frozen_sublayer_names(1, n_layers=12)
+
+    def test_hard_freeze_true_still_sets_freeze_encoder_false_and_group_fn(self):
+        kwargs = escalation_build_kwargs(unfreeze_top_n=2, hard_freeze=True)
+        assert kwargs["freeze_encoder"] is False
+        assert kwargs["layer_multipliers"] == DEFAULT_ESCALATION_MULTIPLIERS
+        assert kwargs["group_fn"](FakeVariable("transformer_layer_11/kernel")) == "encoder_top"
+
+    def test_hard_freeze_respects_custom_n_layers(self):
+        kwargs = escalation_build_kwargs(unfreeze_top_n=1, n_layers=24, hard_freeze=True)
+        assert kwargs["hard_freeze_names"] == frozen_sublayer_names(1, n_layers=24)
+
+    def test_hard_freeze_with_graded_per_layer_multipliers(self):
+        m = graded_multipliers(3)
+        kwargs = escalation_build_kwargs(3, m, hard_freeze=True)
+        assert kwargs["hard_freeze_names"] == frozen_sublayer_names(3, n_layers=12)
+        assert kwargs["group_fn"](FakeVariable("transformer_layer_10/x")) == "encoder_layer_10"
+
+    def test_frozen_path_ignores_hard_freeze(self):
+        """unfreeze_top_n=0: the frozen-probe path is already fully frozen via
+        freeze_encoder=True; hard_freeze is a no-op there (mirrors the existing
+        "frozen path ignores layer_multipliers" precedent) rather than an
+        error -- so the CLI's hard-freeze-on-by-default posture for new runs
+        doesn't force --no-hard-freeze on a plain frozen-probe smoke run."""
+        kwargs = escalation_build_kwargs(unfreeze_top_n=0, hard_freeze=True)
+        assert kwargs == {"freeze_encoder": True}

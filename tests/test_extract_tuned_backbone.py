@@ -168,3 +168,17 @@ def test_verify_expected_groups_ok_with_no_frozen_groups_left():
     # unfreeze_top_n covers every group present -- nothing to compare against.
     summary = {"transformer_layer_11": 0.05}
     _verify_expected_groups(summary, unfreeze_top_n=1)  # should not raise
+
+
+def test_verify_expected_groups_passes_trivially_with_exact_zero_frozen_drift():
+    """A hard-frozen artifact (Capability 1, docs/notes/branched-encoder-
+    strategy.md) has EXACTLY 0.0 max-frozen drift, not just orders-of-
+    magnitude smaller than tuned movement. `max_frozen > 0.0` short-circuits
+    the comparison (and the `min_tuned / max_frozen` division in the error
+    message), so this must pass without raising or dividing by zero -- the
+    ideal case the multiplier-freeze ratio check was only ever a proxy for."""
+    summary = {
+        "embeddings": 0.0, "embeddings_layer_norm": 0.0,
+        "transformer_layer_10": 0.0, "transformer_layer_11": 0.119,
+    }
+    _verify_expected_groups(summary, unfreeze_top_n=1)  # should not raise

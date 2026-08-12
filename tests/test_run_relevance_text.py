@@ -335,3 +335,45 @@ class TestApplyCliOverrides:
             apply_cli_overrides(DEFAULT_REL_TEXT_CONFIG, prior=1.5)
         with pytest.raises(ValueError):
             apply_cli_overrides(DEFAULT_REL_TEXT_CONFIG, prior=0.0)
+
+
+# ---------------------------------------------------------------------------
+# hard_freeze / seed knobs (Capability 1 / Capability 2)
+# ---------------------------------------------------------------------------
+class TestHardFreezeAndSeedDefaults:
+    """DEFAULT_REL_TEXT_CONFIG carries the RunConfig-level back-compat
+    defaults through _default_rel_text_config's dataclasses.replace (which
+    only touches heads/epochs) -- mirrors test_module_default_matches_default_epochs_7."""
+
+    def test_default_hard_freeze_is_false(self):
+        assert DEFAULT_REL_TEXT_CONFIG.hard_freeze is False
+
+    def test_default_seed_is_200(self):
+        assert DEFAULT_REL_TEXT_CONFIG.seed == 200
+
+    def test_hard_freeze_and_seed_variant_via_replace(self):
+        """The documented escalation-and-CLI path: dataclasses.replace turns
+        on hard freezing and overrides the seed (mirrors
+        test_unfreeze_variant_via_replace above)."""
+        cfg = dataclasses.replace(
+            DEFAULT_REL_TEXT_CONFIG,
+            unfreeze_top_n=1, freeze_encoder=False, hard_freeze=True, seed=7,
+        )
+        assert cfg.hard_freeze is True
+        assert cfg.seed == 7
+        # Unrelated fields unaffected.
+        assert cfg.heads[0].name == "rel"
+
+    def test_escalation_build_kwargs_hard_freeze_integration(self):
+        """The exact composition run_relevance_text.main() performs: feeding
+        run_config.hard_freeze into escalation_build_kwargs produces
+        hard_freeze_names for a real unfreeze_top_n."""
+        from src.validation.escalation import escalation_build_kwargs, frozen_sublayer_names
+
+        cfg = dataclasses.replace(
+            DEFAULT_REL_TEXT_CONFIG, unfreeze_top_n=1, freeze_encoder=False, hard_freeze=True,
+        )
+        kwargs = escalation_build_kwargs(
+            cfg.unfreeze_top_n, cfg.layer_multipliers, hard_freeze=cfg.hard_freeze,
+        )
+        assert kwargs["hard_freeze_names"] == frozen_sublayer_names(1, n_layers=12)

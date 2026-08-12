@@ -220,7 +220,25 @@ stage 3's selection rule should treat single-run deltas under ~0.015 as ties
 artifact does not reload through `apply_relevance_model` — nonstandard head
 structure, loud failure by design).
 
-Stages 3 (depth sweep) and 4 (joint CCA+rel) — not yet run; both cluster-side.
+**Stage 3 — prepared 2026-08-12, awaiting cluster submission.** Build:
+`hard_freeze` knob (`RunConfig` field, back-compat `False`; CLI
+`--hard-freeze` default ON in `run_relevance_text.py`; `trainable=False` on
+embeddings + sub-branch transformer layers via
+`escalation.frozen_sublayer_names` → `build_endpoint_model`) and `--seed`
+(both trainers; `RunConfig.seed`, back-compat 200; split seed untouched).
+Per-point scorer `scripts/eval_rel_sweep_point.py` (CPU-forced, compact JSON
+— validated against the job8823087 artifact: CPU 0.8346/0.8531 vs cluster
+0.833/0.854, confirming cluster-trained artifacts are execution-portable).
+Submission: `sbatch scripts/rel_depth_sweep.sbatch` (array 0–11 = N ∈ {1,2,3}
+× {flat, graded 2.6} × seeds {200,201}; each job trains + self-scores; rsync
+only `*.eval.json` home). Selection per the pre-registered metric, treating
+single-run deltas < ~0.015 vs-ICA as ties (stage-2 noise floor); the winner
+gets: backbone extraction (`extract_tuned_backbone`, hard-frozen ⇒ 0.0 drift
+expected), re-embed, probe retrain (CPU), CPU-vs-GPU acceptance check,
+calibration on the apply path.
+
+Stage 4 (joint CCA+rel) — not yet run; cluster-side, at the stage-3 winning
+depth.
 
 ## Pointers
 

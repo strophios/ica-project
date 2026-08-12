@@ -75,6 +75,7 @@ def build_endpoint_model(
     layer_multipliers=None,
     group_fn=None,
     diagnostics=None,
+    hard_freeze_names=None,
 ):
     """
     Wire backbone + heads into a multi-input endpoint-mode training
@@ -128,6 +129,15 @@ def build_endpoint_model(
         group_fn: optional `Callable[[Variable], str]` for
             `LayerLRModel`. Default: `_default_group_fn` (first path
             component).
+        hard_freeze_names: optional iterable of backbone sub-layer names
+            (e.g. from `src.validation.escalation.frozen_sublayer_names`)
+            to set `trainable = False` on, via `backbone.get_layer(name)`.
+            Real freezing (excluded from `trainable_variables`), not just
+            zero-multiplier gradient scaling — see
+            `docs/notes/branched-encoder-strategy.md` "Hard freezing is now
+            a requirement": AdamW's decoupled weight decay still drifts
+            multiplier=0 "frozen" variables every step. Default `None` =
+            no-op (byte-identical to not passing it).
 
     Returns:
         A `LayerLRModel` ready to compile (without a `loss` argument
@@ -162,6 +172,16 @@ def build_endpoint_model(
 
     if freeze_encoder:
         backbone.trainable = False
+
+    # Hard freezing (Capability 1): trainable=False on named sub-layers, in
+    # place of relying solely on LayerLRModel's zero gradient multiplier --
+    # see the `hard_freeze_names` docstring above. Must run before the
+    # diagnostics constituent-variable gather below (like freeze_encoder, and
+    # for the same reason) so hard-frozen sub-layers are excluded from
+    # grad-norm group enumeration, not just from the optimizer update.
+    if hard_freeze_names:
+        for layer_name in hard_freeze_names:
+            backbone.get_layer(layer_name).trainable = False
 
     # Create inputs
     token_ids = keras.Input(shape=(seq_length,), dtype="int32", name="token_ids")

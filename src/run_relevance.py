@@ -68,7 +68,8 @@ DEFAULT_SUFFIX = "relevance_train"
 
 
 def main(prior, suffix=DEFAULT_SUFFIX, threshold=0.5, epochs=7, max_steps=None,
-         holdout_ids=None, weights_path=None, nnpnu_eta=0.0, neg_weight=0.15):
+         holdout_ids=None, weights_path=None, nnpnu_eta=0.0, neg_weight=0.15,
+         seed=200):
     weights_path = Path(weights_path) if weights_path else DEFAULT_WEIGHTS
     check_no_production_overwrite(
         cache_suffix=suffix,
@@ -89,7 +90,15 @@ def main(prior, suffix=DEFAULT_SUFFIX, threshold=0.5, epochs=7, max_steps=None,
             name="rel",  # Rename from "cca" to "rel" for multi-head assembly
             loss=dataclasses.replace(head0.loss, nnpnu_eta=nnpnu_eta)
         ),),
+        seed=seed,
     )
+    # Overrides the seed set at import time by run_cca_doca (module-level
+    # keras.utils.set_random_seed(200), triggered transitively via the
+    # `from src.run_cca_doca import ...` above) with the run's actual seed --
+    # a no-op when seed=200 (the default), a real override otherwise. Does
+    # NOT touch the seed=200 polars .sample() split seed in
+    # src/data_setup/data.py, which is unaffected by this call.
+    keras.utils.set_random_seed(run_config.seed)
     head_cfg = run_config.heads[0]
 
     meta, cls = load_cache(config.CCA_EMBED_CACHE_DIR / suffix)
@@ -250,10 +259,14 @@ if __name__ == "__main__":
                     help="nnPNU PU<->PN mixing weight (0 = pure nnPU)")
     ap.add_argument("--neg-weight", type=float, default=0.15,
                     help="reliable-negative Ratio-Batch sampling weight")
+    ap.add_argument("--seed", type=int, default=200,
+                    help="training-time random seed (keras.utils.set_random_seed); "
+                         "does NOT affect the seed=200 data-split in src/data_setup/data.py")
     args = ap.parse_args()
     main(
         prior=args.prior, suffix=args.suffix, threshold=args.threshold,
         epochs=args.epochs, max_steps=args.max_steps,
         holdout_ids=_load_holdout_ids(args.holdout_ids),
         weights_path=args.out, nnpnu_eta=args.eta, neg_weight=args.neg_weight,
+        seed=args.seed,
     )

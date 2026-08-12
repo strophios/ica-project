@@ -217,10 +217,10 @@ def main(run_config=None, max_steps=None, batch_size=256, tensorboard_dir=None,
             `main()` directly pass the final path themselves.
     """
     keras.config.set_dtype_policy(config.DTYPE_POLICY)
-    keras.utils.set_random_seed(200)
 
     if run_config is None:
         run_config = DEFAULT_REL_TEXT_CONFIG
+    keras.utils.set_random_seed(run_config.seed)
 
     head_cfg = run_config.heads[0]
     BATCH_SIZE = batch_size
@@ -351,7 +351,10 @@ def main(run_config=None, max_steps=None, batch_size=256, tensorboard_dir=None,
         "diagnostics": run_config.diagnostics,
     }
     build_kwargs.update(
-        escalation_build_kwargs(run_config.unfreeze_top_n, run_config.layer_multipliers)
+        escalation_build_kwargs(
+            run_config.unfreeze_top_n, run_config.layer_multipliers,
+            hard_freeze=run_config.hard_freeze,
+        )
     )
 
     # Pattern A: endpoint + inference models share head/backbone instances.
@@ -469,6 +472,17 @@ if __name__ == "__main__":
     ap.add_argument("--epochs", type=int, default=7)
     ap.add_argument("--max-steps", type=int, default=None)
     ap.add_argument("--batch-size", type=int, default=256)
+    ap.add_argument("--seed", type=int, default=200,
+                     help="training-time random seed (keras.utils.set_random_seed); "
+                          "does NOT affect the seed=200 data-split in "
+                          "src/data_setup/data.py")
+    ap.add_argument("--hard-freeze", action=argparse.BooleanOptionalAction, default=True,
+                     help="hard-freeze (trainable=False) backbone sub-layers below the "
+                          "unfrozen top-N block, instead of relying on the zero gradient "
+                          "multiplier alone -- AdamW weight decay still drifts multiplier=0 "
+                          "'frozen' variables (docs/notes/branched-encoder-strategy.md). "
+                          "Ignored when --unfreeze-top-n is 0 (already fully frozen). "
+                          "Default ON for new runs; --no-hard-freeze to opt out.")
     ap.add_argument("--tensorboard-dir", type=str, default=None,
                      help="explicit TensorBoard log dir (wins over --tensorboard)")
     ap.add_argument("--tensorboard", action="store_true",
@@ -491,6 +505,8 @@ if __name__ == "__main__":
             if args.graded_decay is not None
             else DEFAULT_REL_TEXT_CONFIG.layer_multipliers
         ),
+        hard_freeze=args.hard_freeze,
+        seed=args.seed,
     )
     cfg = apply_cli_overrides(cfg, eta=args.eta, peak_lr=args.peak_lr, prior=args.prior)
     tb_timestamp = datetime.datetime.now(datetime.timezone.utc).strftime("%Y%m%dT%H%M%SZ")
