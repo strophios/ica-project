@@ -14,7 +14,7 @@
 # Stage-3 rel depth sweep (branched-encoder ladder,
 # docs/notes/branched-encoder-strategy.md): text-mode rel training with top-N
 # unfreeze, HARD freezing below the branch, over the 12-point grid
-#   N in {1,2,3}  x  {flat, graded-decay 2.6}  x  seeds {200, 201}
+#   N in {1,2,3}  x  {flat, graded-decay 0.385 = 1/2.6}  x  seeds {200, 201}
 # (2 seeds per point: single-run noise on the gold eval is ~+/-0.015 vs-ICA —
 # treat smaller deltas as ties; stage-2 record in the strategy note).
 #
@@ -45,7 +45,9 @@ SEED=$(( IDX % 2 == 0 ? 200 : 201 ))
 if (( (IDX / 2) % 2 == 0 )); then
     DECAY_ARGS=(); DECAY_TAG="flat"
 else
-    DECAY_ARGS=(--graded-decay 2.6); DECAY_TAG="graded"
+    # graded_multipliers' `decay` is a per-layer FACTOR in (0,1] (layer k below
+    # the top gets base*decay^k), NOT the ULMFiT divisor convention — 1/2.6.
+    DECAY_ARGS=(--graded-decay 0.385); DECAY_TAG="graded"
 fi
 
 SWEEP_DIR=/projects/ahd/relevance/sweep
