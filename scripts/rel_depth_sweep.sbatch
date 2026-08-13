@@ -52,7 +52,15 @@ fi
 
 SWEEP_DIR=/projects/ahd/relevance/sweep
 mkdir -p "$SWEEP_DIR"
-TAG="rel_text_N${N}_${DECAY_TAG}_s${SEED}"
+# Hard-freeze A/B toggle (2026-08-13, the -0.04 vs-July investigation):
+#   sbatch --array=0,1 --export=ALL,SWEEP_NO_HARD_FREEZE=1 scripts/rel_depth_sweep.sbatch
+# runs the same points with --no-hard-freeze under a "_nhf" tag.
+if [[ -n "${SWEEP_NO_HARD_FREEZE:-}" ]]; then
+    FREEZE_ARGS=(--no-hard-freeze); FREEZE_TAG="_nhf"
+else
+    FREEZE_ARGS=(--hard-freeze); FREEZE_TAG=""
+fi
+TAG="rel_text_N${N}_${DECAY_TAG}_s${SEED}${FREEZE_TAG}"
 WEIGHTS="$SWEEP_DIR/${TAG}.weights.h5"
 EVAL_JSON="$SWEEP_DIR/${TAG}.eval.json"
 
@@ -61,12 +69,12 @@ if [[ -f "$EVAL_JSON" ]]; then
     exit 0
 fi
 
-echo "$TAG: training (N=$N ${DECAY_TAG} seed=$SEED, hard-freeze on)"
+echo "$TAG: training (N=$N ${DECAY_TAG} seed=$SEED freeze=${FREEZE_ARGS[0]})"
 uv run python -m src.run_relevance_text \
     --unfreeze-top-n "$N" \
     ${DECAY_ARGS[@]+"${DECAY_ARGS[@]}"} \
     --seed "$SEED" \
-    --hard-freeze \
+    "${FREEZE_ARGS[@]}" \
     --prior 0.02 \
     --eta 0.0 \
     --epochs 7 \
