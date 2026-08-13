@@ -2,7 +2,11 @@
 #SBATCH --job-name=rel-depth-sweep
 #SBATCH --partition=gpu
 #SBATCH --gres=gpu:1
-#SBATCH --time=04:00:00
+#SBATCH --time=08:00:00
+# 8h, not 4: no --gres type constraint means the scheduler may hand us a V100
+# (3-5x slower than the H100s recent ~30-min runs used) — a slow node + a full
+# 7-epoch run + CPU-forced scoring needs the margin. Known trade: longer
+# limits queue slightly worse.
 #SBATCH --mem=64G
 #SBATCH --array=0-11
 #SBATCH --output=/projects/ahd/cca_logs/slurm-%A_%a.out
