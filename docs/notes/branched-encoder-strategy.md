@@ -237,8 +237,38 @@ gets: backbone extraction (`extract_tuned_backbone`, hard-frozen ⇒ 0.0 drift
 expected), re-embed, probe retrain (CPU), CPU-vs-GPU acceptance check,
 calibration on the apply path.
 
-Stage 4 (joint CCA+rel) — not yet run; cluster-side, at the stage-3 winning
-depth.
+**Stage 3 — depth sweep COMPLETE (2026-08-13/14). Verdict: N=1; the July
+artifact stays the deployable layer-12.** Full grid (12 points + a 2-job
+hard-freeze A/B; eval JSONs in `relevance/sweep/`, logs
+`cca_logs/cluster/slurm-91*.out`), all scored CPU-forced on gold:
+
+- **Depth**: N=2 ≈ N=1 flat (0.820–0.823 vs-ICA); N=3 unstable across seeds
+  (0.657/0.759 flat; 0.742/0.818 graded) — deeper never wins. **N=1 is the
+  depth** for any branch and for stage 4.
+- **Best modern cell**: N=1 graded (decay 1/2.6): 0.830/0.836 vs-ICA,
+  diaspora@0.30 0.544/0.588 — graded beats flat by ~0.015 at N=1 (≈ noise
+  floor; weak preference for graded in future tuning runs).
+- **Hard-freeze A/B** (N=1 flat): −0.01 for hard-freeze training (nhf
+  0.823/0.827 vs hf 0.814/0.817) — at the noise floor, and moot for
+  deployment: stage 1 proved graft-onto-pristine-trunk is lossless, so the
+  deploy rule is **train with multiplier freezing, graft at deploy** —
+  trunk exactness comes from the graft, not from training-time freezing.
+- **The July-gap open question**: every modern cell sits 0.02–0.04 below the
+  July N=1 run (0.853). Excluded by measurement: config (sidecar diff —
+  identical except `hard_freeze`), hard freezing (A/B ≈ 0.01), GPU type
+  (V100/A100/H200 all present in both good and bad cells), epochs/early
+  stopping (all runs 6–8 epochs, healthy val trajectories). Remaining
+  candidates: single-draw variance (July is +2σ at the stage-2 noise floor,
+  and it was the *only* healthy run of its debug arc, not a selected-best),
+  cluster env drift since 07-29 (CUDA/cudnn modules; uv.lock unchanged), or
+  a rebuilt text table on the cluster (unchecked — steps_per_epoch identical
+  at 234, so n_pos matches). NOT decision-relevant: the July layer-12 is in
+  hand, verified (graft 0.855, probe retrains 0.852–0.855), and better than
+  every sweep artifact — reproducing its training is not required to deploy
+  it. Park unless a future retrain needs it.
+
+**Stage 4 (joint CCA+rel) — next**: cluster-side, at N=1, rel reference =
+the July artifact (0.853), λ 3-point grid, three-sided success rule.
 
 ## Pointers
 

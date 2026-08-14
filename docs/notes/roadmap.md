@@ -201,14 +201,14 @@ work.)
    depth on frozen features buys nothing (deep 0.779 vs shallow-control 0.788
    vs-ICA); representation bottleneck affirmed; single-run noise measured at
    ~±0.015 vs-ICA (stage-3 rule: treat smaller single-run deltas as ties).
-   **Stage 3 PREPPED 2026-08-12, awaiting operator cluster submission**:
-   `sbatch scripts/rel_depth_sweep.sbatch` (12-job array: N ∈ {1,2,3} ×
-   {flat, graded 2.6} × seeds {200,201}; hard freezing via the new
-   `--hard-freeze`/`RunConfig.hard_freeze` knob; each job self-scores
-   CPU-forced via `scripts/eval_rel_sweep_point.py` → rsync only the eval
-   JSONs home; winner recipe in the strategy note's execution record).
-   Then (4) **joint CCA+rel at the chosen depth** (λ 3-point grid;
-   three-sided success rule incl. US surviving as a passenger). Joint wins ⇒ single-encoder swap; otherwise
+   **Stage 3 (depth sweep) DONE 2026-08-13/14 — verdict: N=1** (N=2 buys
+   nothing, N=3 unstable; graded ≥ flat by ~noise; hard-freeze training
+   ~−0.01 and moot — deploy rule is multiplier-freeze-train + graft-at-
+   deploy; the July artifact stays the deployable layer-12; the ~0.02–0.04
+   July-gap is parked with excluded factors recorded — strategy note
+   execution record). **Next: (4) joint CCA+rel at N=1** (λ 3-point grid;
+   three-sided success rule incl. US surviving as a passenger; rel
+   reference = the July artifact's 0.853). Joint wins ⇒ single-encoder swap; otherwise
    branched is the production architecture. Then productionize the winner:
    fusion refit (re-measures the composed mixed-stack number, currently
    metal-pending) + per-head-features `IcaModel` support + CPU-portable
