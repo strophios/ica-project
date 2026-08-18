@@ -132,6 +132,23 @@ prefer branched on ties (simpler apply, no US risk).
 - ~34% of joint-table rows are lead-empty — the known lead-free eras
   (1960–63, 65–69, 1980), same property the stage-3 table trained through.
 
+## Branched baseline (computed 2026-08-18, CPU-forced;
+`cca_doca/experiments/branched_baseline_proxy.json`)
+
+Production CCA (DAPT CLS, its production calibration) × the CPU-trained p02
+rel probe (tuned CLS, fresh calibration sidecar fit on
+`relevance_train_tuned` natural balance — ECE 0.328→0.007): **composed proxy
+ROC vs `ica_event` = 0.8064**, diaspora@0.10/@0.30 = 0.265/0.456; guardrails
+CCA own 0.9285 / rel own 0.8341; rel-solo vs-ICA 0.8524. **This is the bar
+the joint winner's composed proxy must clear.** Two notes: (1) on this proxy
+the calibrated product *subtracts* from tuned-rel-solo (0.806 < 0.852) —
+production CCA is a weak solo ICA ranker; complementarity is exactly the
+axis stage 4 tests. (2) The proxy ≠ the production composed score (no US
+gate, no product-vs-LR fusion selection, no composed Platt — those are
+ROC-irrelevant or deferred to the winner's full fusion refit), so the
+recorded mixed-stack 0.820 is not comparable; 0.8064 on the identical proxy
+is.
+
 ## Build order
 
 1. `loss_weight` knob (isolated; heads.py + cca_config.py + tests).
