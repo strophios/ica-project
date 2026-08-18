@@ -208,12 +208,19 @@ work.)
    at ~±0.01/draw; hard-freeze training ~−0.01 and moot — deploy rule is
    multiplier-freeze-train + graft-at-deploy; the July artifact stays the
    deployable layer-12; the July-gap (~+3σ) is parked with excluded factors
-   recorded — strategy note execution record). **Next: (4) joint CCA+rel,
-   design revised 2026-08-18**: N ∈ {1,2} × λ 3-point × 2 seeds, flat;
-   selection on the **composed proxy** (calibrated CCA·rel product ROC vs
-   ica_event on gold), not head-solo vs-ICA; three-sided success rule incl.
-   US surviving as a passenger; build includes the `fit_fusion.py`
-   parameterization (item 1). Detail: strategy note execution record. Joint wins ⇒ single-encoder swap; otherwise
+   recorded — strategy note execution record). **(4) joint CCA+rel — BUILT
+   2026-08-18, awaiting operator cluster submission**
+   (`docs/design-plans/2026-08-18-stage4-joint-finetune.md`; all components
+   landed: λ `loss_weight` knob, joint table 264,887 rows,
+   `run_joint_text.py`, CPU-forced composed-proxy scorer, 12-job
+   `joint_sweep.sbatch`; **branched baseline composed proxy 0.8064 is the
+   bar** — note the calibrated product currently *subtracts* from
+   tuned-rel-solo 0.852, so complementarity is the tested axis). Submission:
+   rebuild the joint table on-cluster (`uv run python -m
+   src.build_joint_text_table`, minutes) then `sbatch
+   scripts/joint_sweep.sbatch`; rsync `*.eval.json` home. Selection on the
+   composed proxy, three-sided success rule incl. US surviving as a
+   passenger. Joint wins ⇒ single-encoder swap; otherwise
    branched is the production architecture. Then productionize the winner:
    fusion refit (re-measures the composed mixed-stack number, currently
    metal-pending) + per-head-features `IcaModel` support + CPU-portable
