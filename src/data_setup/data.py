@@ -421,6 +421,86 @@ def create_us_pnu_data(table, seed=200, holdout_ids=None):
     }
 
 
+def create_joint_text_data(table, seed=200, holdout_ids=None):
+    """Split-then-stream for the joint CCA+rel text-mode trainer (`run_joint_text.py`).
+
+    # pattern: Functional Core (pure, no I/O)
+
+    Differs from `create_cca_doca_data` / `create_relevance_data` (PER-GROUP
+    split -- each PU group is 90/5/5-split independently): here the WHOLE
+    table is split ONCE, deterministically (90/5/5, the same `.sample(seed=...)`
+    idiom), and only THEN does each split get grouped into three Ratio-Batch
+    streams. This ordering matters because a row can be positive for one head
+    and background for the other (`in_cca_pop`/`in_rel_pop` may both be true);
+    splitting per-group first would let such a row's two "roles" land in
+    DIFFERENT splits (e.g. its cca-positive role in train, its rel-unlabeled
+    role in val) -- a leakage-adjacent inconsistency a whole-table-first split
+    avoids by construction: every id belongs to exactly one split, full stop.
+
+    Table must carry `id`, `cca_label` (0/1), `rel_label` (0/1), `us` (bool).
+    Group membership is driven purely by `cca_label`/`rel_label`/`us` -- NOT
+    by `rel_target` (the synthetic -1/0/1 FLPU convention column derived by
+    `run_joint_text.derive_rel_target`), which callers are expected to attach
+    before or after calling this (column-preserving filters pass it through
+    either way; this function doesn't need to know it exists).
+
+    Groups, per split:
+      - `cca_pos` = `cca_label == 1` (kept regardless of `us`, matching
+        `create_cca_doca_data`'s CCA-positive treatment: DoCA events are US
+        by construction, so we never drop a confirmed positive for a low US
+        score).
+      - `rel_pos` = `rel_label == 1` (already US-restricted at table-build
+        time by `build_joint_text_table.apply_rel_label`, which ANDs
+        candidate-membership with the fused `us` gate -- no extra `us` filter
+        needed here).
+      - `unl` = `cca_label == 0 AND rel_label == 0 AND us` -- the US-restricted
+        background shared by both heads, mirroring the `us`-restriction each
+        head applies to ITS OWN unlabeled pool individually in
+        `create_cca_doca_data`/`create_relevance_data`. Reliable-negative rows
+        (`reliable_neg`) are not excluded here (unlike `create_relevance_data`,
+        which carves them into a distinct `neg` group): the joint trainer folds
+        them into `unl` and relies on `rel_target`'s -1 label (masked out of
+        the rel loss at eta=0) to keep them inert for rel while they still
+        contribute as ordinary background to cca.
+
+      `cca_pos` and `rel_pos` MAY OVERLAP (a row positive for both heads
+      appears in both group frames) -- deliberate, the same oversampling
+      family as Ratio-Batch itself (design doc: "Streams overlap where a row
+      is positive for both heads -- deliberate"). `unl` is disjoint from both
+      (cca_label==0 is mutually exclusive with cca_label==1, likewise rel).
+
+    `holdout_ids` drops gold-set ids from the WHOLE table before splitting
+    (same leakage guard as the other `create_*_data` functions). `None`/empty
+    is a strict no-op. Each group is shuffled within its split (seed) after
+    grouping, mirroring the other `create_*_data` functions (prevents
+    class-blocking under `from_tensor_slices` + a `SHUFFLE_BUFFER` smaller
+    than the split).
+    """
+    assert table["id"].n_unique() == table.height, (
+        f"`id` not unique: {table.height} rows, {table['id'].n_unique()} ids"
+    )
+    if holdout_ids:
+        table = table.filter(pl.col("id").is_in(list(holdout_ids)).not_())
+
+    train = table.sample(fraction=0.9, seed=seed)
+    rest = table.filter(pl.col("id").is_in(train["id"].implode()).not_())
+    test = rest.sample(fraction=0.5, seed=seed)
+    val = rest.filter(pl.col("id").is_in(test["id"].implode()).not_())
+
+    def _shuf(d):
+        return d.sample(fraction=1.0, shuffle=True, seed=seed)
+
+    def _groups(split_df):
+        cca_pos = split_df.filter(pl.col("cca_label") == 1)
+        rel_pos = split_df.filter(pl.col("rel_label") == 1)
+        unl = split_df.filter(
+            (pl.col("cca_label") == 0) & (pl.col("rel_label") == 0) & pl.col("us")
+        )
+        return {"cca_pos": _shuf(cca_pos), "rel_pos": _shuf(rel_pos), "unl": _shuf(unl)}
+
+    return {"train": _groups(train), "val": _groups(val), "test": _groups(test)}
+
+
 def dataset_create(
     shuffle_buffer,
     batch_size,
