@@ -201,14 +201,19 @@ work.)
    depth on frozen features buys nothing (deep 0.779 vs shallow-control 0.788
    vs-ICA); representation bottleneck affirmed; single-run noise measured at
    ~±0.015 vs-ICA (stage-3 rule: treat smaller single-run deltas as ties).
-   **Stage 3 (depth sweep) DONE 2026-08-13/14 — verdict: N=1** (N=2 buys
-   nothing, N=3 unstable; graded ≥ flat by ~noise; hard-freeze training
-   ~−0.01 and moot — deploy rule is multiplier-freeze-train + graft-at-
-   deploy; the July artifact stays the deployable layer-12; the ~0.02–0.04
-   July-gap is parked with excluded factors recorded — strategy note
-   execution record). **Next: (4) joint CCA+rel at N=1** (λ 3-point grid;
-   three-sided success rule incl. US surviving as a passenger; rel
-   reference = the July artifact's 0.853). Joint wins ⇒ single-encoder swap; otherwise
+   **Stage 3 (depth sweep) DONE 2026-08-13/14 — verdict: N=1 for solo
+   tuning** (N=2 buys nothing, N=3 unstable; flat is the scheme — the
+   "graded wins at N=1" read was retracted 2026-08-18, graded≡flat at N=1
+   so those four cells are same-config replicates pinning text-mode noise
+   at ~±0.01/draw; hard-freeze training ~−0.01 and moot — deploy rule is
+   multiplier-freeze-train + graft-at-deploy; the July artifact stays the
+   deployable layer-12; the July-gap (~+3σ) is parked with excluded factors
+   recorded — strategy note execution record). **Next: (4) joint CCA+rel,
+   design revised 2026-08-18**: N ∈ {1,2} × λ 3-point × 2 seeds, flat;
+   selection on the **composed proxy** (calibrated CCA·rel product ROC vs
+   ica_event on gold), not head-solo vs-ICA; three-sided success rule incl.
+   US surviving as a passenger; build includes the `fit_fusion.py`
+   parameterization (item 1). Detail: strategy note execution record. Joint wins ⇒ single-encoder swap; otherwise
    branched is the production architecture. Then productionize the winner:
    fusion refit (re-measures the composed mixed-stack number, currently
    metal-pending) + per-head-features `IcaModel` support + CPU-portable

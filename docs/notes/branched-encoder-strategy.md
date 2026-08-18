@@ -245,30 +245,59 @@ hard-freeze A/B; eval JSONs in `relevance/sweep/`, logs
 - **Depth**: N=2 ≈ N=1 flat (0.820–0.823 vs-ICA); N=3 unstable across seeds
   (0.657/0.759 flat; 0.742/0.818 graded) — deeper never wins. **N=1 is the
   depth** for any branch and for stage 4.
-- **Best modern cell**: N=1 graded (decay 1/2.6): 0.830/0.836 vs-ICA,
-  diaspora@0.30 0.544/0.588 — graded beats flat by ~0.015 at N=1 (≈ noise
-  floor; weak preference for graded in future tuning runs).
+- **CORRECTION (2026-08-18): at N=1, "graded" ≡ "flat"** —
+  `graded_multipliers(1)` assigns layer 11 exactly `base·decay⁰ = 0.1`,
+  identical to flat's `encoder_top: 0.1` (only the group *name* differs).
+  The four hard-freeze N=1 cells are therefore four same-config replicates:
+  {0.8142, 0.8174, 0.8303, 0.8359} vs-ICA — **text-mode per-draw noise is
+  ~±0.01 (spread 0.022)**, and the earlier "graded is the best cell" read
+  is retracted. Graded's only real test is N≥2, where it LOST (N=2 graded
+  0.743/0.783 vs flat 0.820/0.823) — flat is the scheme going forward.
 - **Hard-freeze A/B** (N=1 flat): −0.01 for hard-freeze training (nhf
   0.823/0.827 vs hf 0.814/0.817) — at the noise floor, and moot for
   deployment: stage 1 proved graft-onto-pristine-trunk is lossless, so the
   deploy rule is **train with multiplier freezing, graft at deploy** —
   trunk exactness comes from the graft, not from training-time freezing.
-- **The July-gap open question**: every modern cell sits 0.02–0.04 below the
-  July N=1 run (0.853). Excluded by measurement: config (sidecar diff —
-  identical except `hard_freeze`), hard freezing (A/B ≈ 0.01), GPU type
-  (V100/A100/H200 all present in both good and bad cells), epochs/early
-  stopping (all runs 6–8 epochs, healthy val trajectories). Remaining
-  candidates: single-draw variance (July is +2σ at the stage-2 noise floor,
-  and it was the *only* healthy run of its debug arc, not a selected-best),
-  cluster env drift since 07-29 (CUDA/cudnn modules; uv.lock unchanged), or
-  a rebuilt text table on the cluster (unchecked — steps_per_epoch identical
-  at 234, so n_pos matches). NOT decision-relevant: the July layer-12 is in
-  hand, verified (graft 0.855, probe retrains 0.852–0.855), and better than
-  every sweep artifact — reproducing its training is not required to deploy
-  it. Park unless a future retrain needs it.
+- **The July-gap open question**: the four same-config N=1 replicates put
+  the modern mean at 0.8245 (sd ~0.0096); the July run's 0.853 is ~+3σ.
+  Excluded by measurement: config (sidecar diff — identical except
+  `hard_freeze`), hard freezing (A/B ≈ 0.01), GPU type (V100/A100/H200 all
+  present in both good and bad cells), epochs/early stopping (all runs 6–8
+  epochs, healthy val trajectories). Remaining candidates: single-draw
+  variance (July was the *only* healthy run of its debug arc, not a
+  selected-best — but +3σ is a stretch), cluster env drift since 07-29
+  (CUDA/cudnn modules; uv.lock unchanged), or a rebuilt text table on the
+  cluster (unchecked — steps_per_epoch identical at 234, so n_pos matches).
+  NOT decision-relevant: the July layer-12 is in hand, verified (graft
+  0.855, probe retrains 0.852–0.855), and better than every sweep artifact —
+  reproducing its training is not required to deploy it. Park unless a
+  future retrain needs it.
 
-**Stage 4 (joint CCA+rel) — next**: cluster-side, at N=1, rel reference =
-the July artifact (0.853), λ 3-point grid, three-sided success rule.
+**Stage 4 (joint CCA+rel) — design revised 2026-08-18 (operator review):**
+
+- **Depth is swept, not inherited**: N ∈ {1, 2} × λ ∈ {0.25, 0.5, 0.75} ×
+  seeds {200, 201} = 12 jobs, flat multipliers. The solo N=1 optimum need
+  not transfer — joint roughly doubles the positive signal (~15k DoCA +
+  ~17k rel) and diversifies gradients, exactly what the solo sweep's
+  N-depth failures were starved of. N=3 only if N=2-joint > N=1-joint by
+  more than noise (pre-registered contingency).
+- **Selection metric is composed, not head-solo** (operator's
+  complementarity point: λ explicitly trades the heads off; a rel head
+  that is slightly worse solo but less redundant with CCA composes
+  better). Per cell: Platt per head on the natural-balance val stream (no
+  gold contact) → product of calibrated CCA·rel probs (production's
+  default fusion shape; composed Platt is monotone ⇒ ROC-invariant; US
+  gate + product-vs-LR fusion selection deferred to the winner) →
+  **composed ROC vs `ica_event` + diaspora recall on gold** primary.
+  Guardrails: per-head own-terms (CCA ~0.93, rel ~baseline); US-passenger
+  check on the winner only. Rel-solo vs-ICA demoted to diagnostic. The
+  λ=1 endpoint (rel-only) is already measured by the stage-3 replicates;
+  the winner gets the full production composition — which requires the
+  `fit_fusion.py` parameterization (roadmap §A1 item 1) as part of the
+  stage-4 build.
+- Reference bar: the mixed-stack decomposed numbers (rel 0.853 solo; the
+  composed-proxy of July-rel × production-CCA, computed once as the
+  branched baseline the joint must beat to justify a single encoder).
 
 ## Pointers
 
