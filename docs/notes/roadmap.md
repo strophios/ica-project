@@ -183,10 +183,10 @@ The engineering follow-through from the §A arc outcome. In priority order; each
 research agenda from the 2026-07-10 meeting; this list is the immediate model
 work.)
 
-1. **Parameterize `src/fit_fusion.py`** — needed by every downstream path
-   (branched, joint, any retrain). It is fully hardcoded — cca/rel/us weights +
-   cache; `output_dir` silently defaults to the *production* fusion path; exact
-   call sites in `tuned-retrain-runbook.md` §"Step 6" / "Gaps".
+1. ~~**Parameterize `src/fit_fusion.py`**~~ — **DONE 2026-08-18**:
+   `--cache-suffix`/`--cca-weights`/`--rel-weights`/`--us-weights`/`--out`,
+   per-input production-overwrite guards (`resolve_fusion_inputs`), bare
+   invocation byte-identical.
 2. **Branched-encoder experiment ladder** (`branched-encoder-strategy.md` —
    the 2026-08-11 decision record; supersedes "mixed-stack productionization
    then joint" as separate items). **Stage 1 (graft test) PASSED 2026-08-12**:

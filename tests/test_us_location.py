@@ -6,6 +6,7 @@ import pytest
 from src.preproc.us_location import (
     apply_fused_us_gate,
     compute_location_signals,
+    dedupe_by_id,
     gold_first_us_gate,
     is_clearly_foreign,
     is_foreign_place,
@@ -169,6 +170,67 @@ class TestApplyFusedUSGate:
         # ml_reject: F & ~(F & F) = F & ~F = F & T = F
         # When sorted by id: ["clearly_foreign", "diaspora", "ml_reject", "us_only"]
         assert out.sort("id")["us"].to_list() == [False, True, False, True]
+
+
+class TestDedupeByID:
+    """Pure dedupe step extracted from `load_location_signals`'s I/O boundary.
+
+    The API corpus carries ~991 physically-duplicated ids (a known data-quality
+    flag). A duplicated id in the location-signals output fans out any
+    left-join against it, tripping the post-07-30 id-uniqueness assert. Fixed
+    at the boundary: `unique(subset="id", keep="first", maintain_order=True)`
+    on the frame `load_location_signals` returns.
+    """
+
+    def test_no_duplicates_returns_unchanged(self):
+        df = pl.DataFrame({
+            "id": ["a", "b", "c"],
+            "any_us": [True, False, True],
+            "any_not_us": [False, True, False],
+        })
+        out = dedupe_by_id(df)
+        assert out["id"].to_list() == ["a", "b", "c"]
+
+    def test_duplicate_id_dropped_keeping_first(self):
+        df = pl.DataFrame({
+            "id": ["a", "dup", "b", "dup"],
+            "any_us": [True, True, False, False],
+            "any_not_us": [False, False, True, True],
+        })
+        out = dedupe_by_id(df)
+        assert out["id"].to_list() == ["a", "dup", "b"]
+        # First occurrence's signal values survive.
+        row = out.filter(pl.col("id") == "dup")
+        assert row["any_us"].item() is True
+        assert row["any_not_us"].item() is False
+
+    def test_maintains_input_order(self):
+        df = pl.DataFrame({
+            "id": ["z", "a", "z", "m"],
+            "any_us": [True, True, True, True],
+            "any_not_us": [False, False, False, False],
+        })
+        out = dedupe_by_id(df)
+        assert out["id"].to_list() == ["z", "a", "m"]
+
+    def test_no_duplicates_prints_nothing(self, capsys):
+        df = pl.DataFrame({
+            "id": ["a", "b"],
+            "any_us": [True, False],
+            "any_not_us": [False, True],
+        })
+        dedupe_by_id(df)
+        assert capsys.readouterr().out == ""
+
+    def test_duplicate_logs_dropped_count(self, capsys):
+        df = pl.DataFrame({
+            "id": ["a", "dup", "dup", "dup"],
+            "any_us": [True, True, True, True],
+            "any_not_us": [False, False, False, False],
+        })
+        dedupe_by_id(df)
+        out = capsys.readouterr().out
+        assert "2" in out  # two extra copies of "dup" dropped
 
 
 class TestLoadLocationSignals:

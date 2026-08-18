@@ -165,6 +165,11 @@ class HeadConfig:
     source_column: str
     hidden_dim: int
     loss: FLPULossConfig
+    # Multi-head loss-scalarization weight (lambda), applied at ClassificationHead
+    # loss registration. See docs/design-plans/2026-08-18-stage4-joint-finetune.md
+    # "Components" item 1 for the why. Default 1.0 is the historical (pre-knob)
+    # behavior; back-compat via _filter_known_fields's default-fallback.
+    loss_weight: float = 1.0
 
     def __post_init__(self):
         if not isinstance(self.name, str) or not self.name:
@@ -196,6 +201,16 @@ class HeadConfig:
                 f"HeadConfig.loss must be a FLPULossConfig instance "
                 f"(currently the only supported loss type); got "
                 f"{type(self.loss).__name__}."
+            )
+        if (
+            not isinstance(self.loss_weight, (int, float))
+            or isinstance(self.loss_weight, bool)
+            or not math.isfinite(float(self.loss_weight))
+            or float(self.loss_weight) <= 0
+        ):
+            raise ValueError(
+                f"HeadConfig.loss_weight must be a finite positive number; "
+                f"got {self.loss_weight!r} (type {type(self.loss_weight).__name__})."
             )
 
     @classmethod

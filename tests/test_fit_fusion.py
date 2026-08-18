@@ -1,18 +1,29 @@
-# pattern: Functional Core (test only the pure decision rule)
-"""Unit tests for select_combiner: the 1-SE pre-registered decision rule.
+# pattern: Functional Core (test only the pure decision rule + input resolution)
+"""Unit tests for select_combiner and resolve_fusion_inputs.
 
-Tests the pure fusion selection logic in isolation, with synthetic fold data.
-No model loading, no I/O, no orchestration.
+select_combiner: the 1-SE pre-registered decision rule. Tests the pure fusion
+selection logic in isolation, with synthetic fold data. No model loading, no
+I/O, no orchestration.
 
 Acceptance criterion AC4.3: LR is selected iff cross-validated mean of (LR − AND)
 on PR-AUC exceeds one standard error of the paired CV difference; otherwise AND.
+
+resolve_fusion_inputs: the parameterization + overwrite-guard layer added so
+fit_fusion.py can be pointed at a tuned cache/weights without either (a)
+silently overwriting the production ica_fusion.fusion.json or (b) needing the
+real embed cache / trained heads to test the plumbing. Mirrors
+tests/test_artifact_guard.py's decision-table style.
 """
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 
-from src.fit_fusion import select_combiner
+import src.config as config
+from src.calibration.sidecar import calibration_path_for_weights, load_calibration
+from src.fit_fusion import DEFAULT_CACHE_SUFFIX, resolve_fusion_inputs, select_combiner
 
 
 class TestSelectCombiner:
@@ -172,3 +183,98 @@ class TestSelectCombiner:
         cv_lr = {"pr_auc": [0.70, 0.72]}
         with pytest.raises((ValueError, TypeError)):
             select_combiner(cv_and, cv_lr)  # type: ignore[arg-type]
+
+
+class TestResolveFusionInputsDefaults:
+    """All-default calls resolve to the production paths, byte-identical to
+    the pre-parameterization hardcoded constants."""
+
+    def test_bare_call_resolves_to_production_paths(self):
+        resolved = resolve_fusion_inputs()
+        assert resolved["cache_suffix"] == DEFAULT_CACHE_SUFFIX == "relevance_train"
+        assert resolved["cca_weights_path"] == config.CCA_DOCA_WEIGHTS
+        assert resolved["rel_weights_path"] == config.RELEVANCE_DOCA_WEIGHTS
+        assert resolved["us_weights_path"] == config.US_FILTER_FULL_WEIGHTS
+        assert resolved["output_dir"] == config.CCA_DOCA_DIR
+
+    def test_explicit_defaults_match_bare_call(self):
+        resolved = resolve_fusion_inputs(
+            cache_suffix=DEFAULT_CACHE_SUFFIX,
+            cca_weights_path=None,
+            rel_weights_path=None,
+            us_weights_path=None,
+            output_dir=None,
+        )
+        assert resolved == resolve_fusion_inputs()
+
+    def test_str_weights_paths_resolve_to_path_objects(self, tmp_path):
+        """str inputs (as argparse produces) resolve to Path, matching the
+        Path-typed production defaults."""
+        cca_str = str(tmp_path / "cca_tuned.weights.h5")
+        resolved = resolve_fusion_inputs(
+            cache_suffix="relevance_train_tuned",
+            cca_weights_path=cca_str,
+            output_dir=tmp_path,
+        )
+        assert resolved["cca_weights_path"] == Path(cca_str)
+        assert isinstance(resolved["cca_weights_path"], Path)
+
+
+class TestResolveFusionInputsNoRaiseCases:
+    """Combinations the guard must let through."""
+
+    def test_non_default_output_dir_with_all_default_inputs_is_fine(self, tmp_path):
+        """The everyday tuned-run shape: same cache/heads, distinct output."""
+        resolved = resolve_fusion_inputs(output_dir=tmp_path)
+        assert resolved["output_dir"] == tmp_path
+
+    def test_non_default_output_dir_with_all_tuned_inputs_is_fine(self, tmp_path):
+        """The full tuned-retrain shape: everything moved together."""
+        resolved = resolve_fusion_inputs(
+            cache_suffix="relevance_train_tuned",
+            cca_weights_path=tmp_path / "cca_tuned.weights.h5",
+            rel_weights_path=tmp_path / "rel_tuned.weights.h5",
+            us_weights_path=tmp_path / "us_tuned.weights.h5",
+            output_dir=tmp_path,
+        )
+        assert resolved["output_dir"] == tmp_path
+        assert resolved["cache_suffix"] == "relevance_train_tuned"
+
+
+class TestResolveFusionInputsRaiseCases:
+    """Non-default cache/weights paired with the production output_dir must
+    be refused -- one check per independently-tunable input."""
+
+    def test_tuned_cache_with_production_output_raises(self):
+        with pytest.raises(ValueError, match="production"):
+            resolve_fusion_inputs(cache_suffix="relevance_train_tuned")
+
+    def test_tuned_cca_weights_with_production_output_raises(self, tmp_path):
+        with pytest.raises(ValueError, match="production"):
+            resolve_fusion_inputs(cca_weights_path=tmp_path / "cca_tuned.weights.h5")
+
+    def test_tuned_rel_weights_with_production_output_raises(self, tmp_path):
+        with pytest.raises(ValueError, match="production"):
+            resolve_fusion_inputs(rel_weights_path=tmp_path / "rel_tuned.weights.h5")
+
+    def test_tuned_us_weights_with_production_output_raises(self, tmp_path):
+        with pytest.raises(ValueError, match="production"):
+            resolve_fusion_inputs(us_weights_path=tmp_path / "us_tuned.weights.h5")
+
+    def test_error_names_the_artifact(self, tmp_path):
+        with pytest.raises(ValueError) as exc_info:
+            resolve_fusion_inputs(cca_weights_path=tmp_path / "cca_tuned.weights.h5")
+        assert "fusion CCA weights" in str(exc_info.value)
+
+
+class TestCalibrationSidecarErrorNamesMissingFile:
+    """Requirement: parameterized weights paths must carry their own
+    .calibration.json sidecar; a missing sidecar's error must name the file
+    so an operator can tell which head/path is unconfigured."""
+
+    def test_missing_sidecar_names_the_file(self, tmp_path):
+        fake_weights = tmp_path / "cca_tuned.weights.h5"
+        sidecar_path = calibration_path_for_weights(fake_weights)
+        with pytest.raises(FileNotFoundError) as exc_info:
+            load_calibration(sidecar_path)
+        assert str(sidecar_path) in str(exc_info.value)

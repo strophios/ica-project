@@ -164,6 +164,8 @@ RELEVANCE_DOCA_WEIGHTS: Path = PROJECT_ROOT / "relevance" / "relevance.weights.h
 RELEVANCE_TEXT_TABLE: Path = PROJECT_ROOT / "relevance" / "relevance_text_table.parquet"
 RELEVANCE_SET_DIR: Path = PROJECT_ROOT / "relevance" / "rel_set"
 RELEVANCE_TEXT_WEIGHTS: Path = PROJECT_ROOT / "relevance" / "relevance_text.weights.h5"
+# Joint CCA+rel fine-tune text table (docs/design-plans/2026-08-18-stage4-joint-finetune.md).
+JOINT_TEXT_TABLE: Path = PROJECT_ROOT / "relevance" / "joint_text_table.parquet"
 
 
 # ---------------------------------------------------------------------------

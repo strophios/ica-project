@@ -1,4 +1,4 @@
-# pattern: Imperative Shell (orchestration) + embedded Functional Core (select_combiner)
+# pattern: Imperative Shell (orchestration) + embedded Functional Core (select_combiner, resolve_fusion_inputs)
 """Empirical fusion selection + composed calibration (Phase 4, Task 5).
 
 Orchestrates the fusion combiner choice:
@@ -13,12 +13,22 @@ Orchestrates the fusion combiner choice:
 8. Compute composed calibration on conditional-on-US population
 9. Save fusion.json + metrics JSON with gold-first gate note
 
-Functional Core: select_combiner (pure 1-SE margin rule decision logic).
+Functional Core: select_combiner (pure 1-SE margin rule decision logic);
+resolve_fusion_inputs (pure parameter resolution + overwrite guard).
 Imperative Shell: main() orchestration with checkpoint validation.
+
+Run from project root:
+    uv run python -m src.fit_fusion
+    uv run python -m src.fit_fusion --cache-suffix relevance_train_tuned \
+        --cca-weights ../cca_doca/cca_doca_tuned.weights.h5 \
+        --rel-weights ../relevance/relevance_tuned.weights.h5 \
+        --us-weights ../us_filter/us_classifier_full_tuned.weights.h5 \
+        --out ../cca_doca/tuned_fusion
 """
 
 from __future__ import annotations
 
+import argparse
 import json
 import logging
 from pathlib import Path
@@ -30,6 +40,7 @@ from sklearn.model_selection import StratifiedKFold
 from sklearn.metrics import average_precision_score
 
 import src.config as config
+from src.artifact_guard import check_no_production_overwrite
 from src.calibration.calibrator import platt_fit, platt_transform
 from src.calibration.report import calibration_report
 from src.calibration.sidecar import (
@@ -49,6 +60,11 @@ from src.validation.doca_recall import doca_recall, pick_us_threshold
 from src.validation.ica_eval import apply_us_scope_to_ica
 from src.validation.relevance_slice_eval import apply_relevance_model
 from src.validation.slice_eval import apply_us_model
+
+
+# main()'s own --cache-suffix default; also the "production cache" identity
+# that resolve_fusion_inputs compares an explicit --cache-suffix against.
+DEFAULT_CACHE_SUFFIX = "relevance_train"
 
 
 # Configure logging
@@ -118,6 +134,78 @@ def select_combiner(
         return "product"
 
 
+def resolve_fusion_inputs(
+    *,
+    cache_suffix: str = DEFAULT_CACHE_SUFFIX,
+    cca_weights_path: Path | str | None = None,
+    rel_weights_path: Path | str | None = None,
+    us_weights_path: Path | str | None = None,
+    output_dir: Path | str | None = None,
+) -> dict:
+    """Resolve fit_fusion's parameterized inputs and guard against a silent
+    production overwrite.
+
+    Each weights path independently defaults to its production artifact
+    (`config.CCA_DOCA_WEIGHTS` / `RELEVANCE_DOCA_WEIGHTS` / `US_FILTER_FULL_WEIGHTS`);
+    `output_dir` defaults to `config.CCA_DOCA_DIR` (the production
+    `ica_fusion.fusion.json` location). fit_fusion.py has four independently
+    tunable input sources (one cache + three head-weights paths) feeding a
+    single shared output artifact, so this applies the same overwrite check
+    the six trainers/calibrators use (`src.artifact_guard.check_no_production_overwrite`)
+    once per input: pointing any ONE of them away from its default while
+    leaving `output_dir` at the production default is refused, before any
+    cache/weights I/O happens.
+
+    Returns:
+        Dict of resolved Paths/str: cache_suffix, cca_weights_path,
+        rel_weights_path, us_weights_path, output_dir.
+
+    Raises:
+        ValueError: a non-default cache_suffix/cca_weights_path/rel_weights_path/
+            us_weights_path is paired with a production (default) output_dir.
+    """
+    cca_weights_path = (
+        Path(cca_weights_path) if cca_weights_path is not None else config.CCA_DOCA_WEIGHTS
+    )
+    rel_weights_path = (
+        Path(rel_weights_path) if rel_weights_path is not None else config.RELEVANCE_DOCA_WEIGHTS
+    )
+    us_weights_path = (
+        Path(us_weights_path) if us_weights_path is not None else config.US_FILTER_FULL_WEIGHTS
+    )
+    output_dir = Path(output_dir) if output_dir is not None else config.CCA_DOCA_DIR
+
+    # check_no_production_overwrite's (cache_suffix, weights_path) shape is
+    # reused per input: the "weights_path" compared is always this run's
+    # resolved fusion output artifact, and "cache_suffix" is instantiated
+    # with each of the four tunable inputs in turn (the real cache suffix,
+    # then each head-weights path as a string) against its own production
+    # default.
+    resolved_output_weights = output_dir / "ica_fusion.weights.h5"
+    production_output_weights = config.CCA_DOCA_DIR / "ica_fusion.weights.h5"
+    for artifact_label, input_value, production_value in [
+        ("fusion cache", cache_suffix, DEFAULT_CACHE_SUFFIX),
+        ("fusion CCA weights", str(cca_weights_path), str(config.CCA_DOCA_WEIGHTS)),
+        ("fusion relevance weights", str(rel_weights_path), str(config.RELEVANCE_DOCA_WEIGHTS)),
+        ("fusion US weights", str(us_weights_path), str(config.US_FILTER_FULL_WEIGHTS)),
+    ]:
+        check_no_production_overwrite(
+            cache_suffix=input_value,
+            production_cache_suffix=production_value,
+            weights_path=resolved_output_weights,
+            production_weights_path=production_output_weights,
+            artifact_label=artifact_label,
+        )
+
+    return {
+        "cache_suffix": cache_suffix,
+        "cca_weights_path": cca_weights_path,
+        "rel_weights_path": rel_weights_path,
+        "us_weights_path": us_weights_path,
+        "output_dir": output_dir,
+    }
+
+
 # ============================================================================
 # Imperative Shell: orchestration
 # ============================================================================
@@ -130,6 +218,10 @@ def main(
     n_splits: int = 5,
     random_state: int = 42,
     output_dir: Path | str | None = None,
+    cache_suffix: str = DEFAULT_CACHE_SUFFIX,
+    cca_weights_path: Path | str | None = None,
+    rel_weights_path: Path | str | None = None,
+    us_weights_path: Path | str | None = None,
 ) -> dict:
     """Orchestrate fusion selection + composed calibration (conditional-on-US population).
 
@@ -145,7 +237,15 @@ def main(
         us_thresholds: Thresholds to evaluate for recall recipe (e.g., linspace(0.02, 0.7, ...))
         n_splits: Folds for StratifiedKFold CV (default 5)
         random_state: Seed for determinism
-        output_dir: Directory for fusion.json + metrics.json (default uses cca_doca dir)
+        output_dir: Directory for fusion.json + metrics.json (default uses cca_doca dir).
+            Passing a non-default cache_suffix/cca_weights_path/rel_weights_path/
+            us_weights_path while leaving output_dir at its production default raises
+            (see resolve_fusion_inputs) -- pass a distinct output_dir for a tuned run.
+        cache_suffix: embed cache subdir CCA/rel features + eval-set ids are joined
+            against (default: "relevance_train", the production cache)
+        cca_weights_path: CCA head weights to score (default: config.CCA_DOCA_WEIGHTS)
+        rel_weights_path: relevance head weights to score (default: config.RELEVANCE_DOCA_WEIGHTS)
+        us_weights_path: US head weights to score (default: config.US_FILTER_FULL_WEIGHTS)
 
     Returns:
         Dict with keys: combiner, tau_us, tau_us_qualified, tau_us_achieved_recall,
@@ -172,10 +272,18 @@ def main(
     elif not eval_csv_path.exists():
         raise FileNotFoundError(f"eval CSV not found: {eval_csv_path}")
 
-    if output_dir is None:
-        output_dir = config.CCA_DOCA_DIR
-    else:
-        output_dir = Path(output_dir)
+    resolved = resolve_fusion_inputs(
+        cache_suffix=cache_suffix,
+        cca_weights_path=cca_weights_path,
+        rel_weights_path=rel_weights_path,
+        us_weights_path=us_weights_path,
+        output_dir=output_dir,
+    )
+    cache_suffix = resolved["cache_suffix"]
+    cca_weights_path = resolved["cca_weights_path"]
+    rel_weights_path = resolved["rel_weights_path"]
+    us_weights_path = resolved["us_weights_path"]
+    output_dir = resolved["output_dir"]
     output_dir.mkdir(parents=True, exist_ok=True)
 
     if us_thresholds is None:
@@ -203,8 +311,8 @@ def main(
     # ========================================================================
     # Step 1: Load features (embed cache) and build feature matrix
     # ========================================================================
-    logger.info("Loading embed cache meta and CLS features")
-    meta_full, cls = load_cache(config.CCA_EMBED_CACHE_DIR / "relevance_train")
+    logger.info(f"Loading embed cache meta and CLS features (suffix={cache_suffix})")
+    meta_full, cls = load_cache(config.CCA_EMBED_CACHE_DIR / cache_suffix)
 
     # Map eval ids to emb_row via meta
     meta_by_id = meta_full.with_columns(
@@ -254,27 +362,27 @@ def main(
     # ========================================================================
     # Step 2: Score calibrated heads
     # ========================================================================
-    logger.info("Scoring CCA head")
-    cca_logits = apply_cca_model(features, weights_path=config.CCA_DOCA_WEIGHTS)
+    logger.info(f"Scoring CCA head ({cca_weights_path})")
+    cca_logits = apply_cca_model(features, weights_path=cca_weights_path)
     cca_cal = load_calibration(
-        calibration_path_for_weights(config.CCA_DOCA_WEIGHTS)
+        calibration_path_for_weights(cca_weights_path)
     )
     p_cca = cca_cal.transform(cca_logits)
     assert np.isfinite(p_cca).all(), "Non-finite CCA probabilities"
     logger.info(f"CCA: mean={p_cca.mean():.3f}, std={p_cca.std():.3f}")
 
-    logger.info("Scoring relevance head")
-    rel_logits = apply_relevance_model(features, weights_path=config.RELEVANCE_DOCA_WEIGHTS)
+    logger.info(f"Scoring relevance head ({rel_weights_path})")
+    rel_logits = apply_relevance_model(features, weights_path=rel_weights_path)
     rel_cal = load_calibration(
-        calibration_path_for_weights(config.RELEVANCE_DOCA_WEIGHTS)
+        calibration_path_for_weights(rel_weights_path)
     )
     p_rel = rel_cal.transform(rel_logits)
     assert np.isfinite(p_rel).all(), "Non-finite relevance probabilities"
     logger.info(f"Relevance: mean={p_rel.mean():.3f}, std={p_rel.std():.3f}")
 
-    logger.info("Scoring US head (calibrated)")
+    logger.info(f"Scoring US head (calibrated) ({us_weights_path})")
     p_us = apply_us_model(
-        texts_list, weights_path=config.US_FILTER_FULL_WEIGHTS, skip_mismatch=True
+        texts_list, weights_path=us_weights_path, skip_mismatch=True
     )
     assert np.isfinite(p_us).all(), "Non-finite US probabilities"
     logger.info(f"US: mean={p_us.mean():.3f}, std={p_us.std():.3f}")
@@ -546,13 +654,13 @@ def main(
     # ========================================================================
     # Record references to the per-head calibrators this fusion composition uses.
     # These are typically the sidecar stems (without .calibration.json).
-    cca_cal_stem = str(calibration_path_for_weights(config.CCA_DOCA_WEIGHTS)).replace(
+    cca_cal_stem = str(calibration_path_for_weights(cca_weights_path)).replace(
         ".calibration.json", ""
     )
-    rel_cal_stem = str(calibration_path_for_weights(config.RELEVANCE_DOCA_WEIGHTS)).replace(
+    rel_cal_stem = str(calibration_path_for_weights(rel_weights_path)).replace(
         ".calibration.json", ""
     )
-    us_cal_stem = str(calibration_path_for_weights(config.US_FILTER_FULL_WEIGHTS)).replace(
+    us_cal_stem = str(calibration_path_for_weights(us_weights_path)).replace(
         ".calibration.json", ""
     )
 
@@ -643,6 +751,31 @@ def main(
 
 
 if __name__ == "__main__":
-    metrics = main()
+    ap = argparse.ArgumentParser(
+        description="Fit the ICA fusion combiner + composed calibration."
+    )
+    ap.add_argument(
+        "--cache-suffix", default=DEFAULT_CACHE_SUFFIX,
+        help="embed cache subdir CCA/rel features are joined against "
+             "(default: relevance_train)",
+    )
+    ap.add_argument("--cca-weights", default=None, help="default: config.CCA_DOCA_WEIGHTS")
+    ap.add_argument("--rel-weights", default=None, help="default: config.RELEVANCE_DOCA_WEIGHTS")
+    ap.add_argument("--us-weights", default=None, help="default: config.US_FILTER_FULL_WEIGHTS")
+    ap.add_argument(
+        "--out", default=None,
+        help="output directory for ica_fusion.fusion.json/ica_fusion_metrics.json "
+             "(default: cca_doca/ -- MUST pass a distinct directory when any of "
+             "--cache-suffix/--cca-weights/--rel-weights/--us-weights is non-default, "
+             "or the run refuses to start)",
+    )
+    args = ap.parse_args()
+    metrics = main(
+        cache_suffix=args.cache_suffix,
+        cca_weights_path=args.cca_weights,
+        rel_weights_path=args.rel_weights,
+        us_weights_path=args.us_weights,
+        output_dir=args.out,
+    )
     print("\n✓ Fusion selection complete")
     print(json.dumps(metrics, indent=2))

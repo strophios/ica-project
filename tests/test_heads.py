@@ -84,6 +84,50 @@ class TestConstruction:
         with pytest.raises(TypeError):
             ClassificationHead(hidden_dim=HIDDEN_DIM)
 
+    def test_default_loss_weight_is_one(self):
+        head = ClassificationHead(hidden_dim=HIDDEN_DIM, name="test_head")
+        assert head.loss_weight == 1.0
+
+    def test_custom_loss_weight_is_stored(self):
+        head = ClassificationHead(
+            hidden_dim=HIDDEN_DIM, name="test_head", loss_weight=0.3
+        )
+        assert head.loss_weight == 0.3
+
+
+class TestLossWeightValidation:
+    """`loss_weight` (the stage-4 joint-finetune lambda knob;
+    docs/design-plans/2026-08-18-stage4-joint-finetune.md "Components" item
+    1). Validation mirrors HeadConfig.loss_weight in src/cca_config.py."""
+
+    def test_zero_rejected(self):
+        with pytest.raises(ValueError, match="loss_weight"):
+            ClassificationHead(hidden_dim=HIDDEN_DIM, name="h", loss_weight=0.0)
+
+    def test_negative_rejected(self):
+        with pytest.raises(ValueError, match="loss_weight"):
+            ClassificationHead(hidden_dim=HIDDEN_DIM, name="h", loss_weight=-0.5)
+
+    def test_bool_rejected(self):
+        with pytest.raises(ValueError, match="loss_weight"):
+            ClassificationHead(hidden_dim=HIDDEN_DIM, name="h", loss_weight=True)
+
+    def test_inf_rejected(self):
+        with pytest.raises(ValueError, match="loss_weight"):
+            ClassificationHead(
+                hidden_dim=HIDDEN_DIM, name="h", loss_weight=float("inf")
+            )
+
+    def test_nan_rejected(self):
+        with pytest.raises(ValueError, match="loss_weight"):
+            ClassificationHead(
+                hidden_dim=HIDDEN_DIM, name="h", loss_weight=float("nan")
+            )
+
+    def test_non_numeric_rejected(self):
+        with pytest.raises(ValueError, match="loss_weight"):
+            ClassificationHead(hidden_dim=HIDDEN_DIM, name="h", loss_weight="0.5")
+
 
 # -----------------------------------------------------------------------------
 # Forward pass shape
@@ -414,6 +458,91 @@ class TestExposeLossComponentsFlagOn:
         out = head(_dummy_features(), targets=None)  # inference
         assert out.shape[-1] == 1
         assert head.last_components is None  # never set without targets
+
+
+class TestLossWeightScaling:
+    """`loss_weight` is applied at loss registration:
+    `add_loss(loss_weight * loss)`. `last_components` stays UNSCALED
+    (diagnoses FLPU internals, not the multi-head mixing). Default path
+    (loss_weight=1.0) must be byte-identical to the pre-knob behavior."""
+
+    def test_default_loss_weight_matches_unscaled_loss(self):
+        """loss_weight=1.0 (the default) registers exactly the raw
+        loss_fn(targets, logits) value — the pre-knob behavior, unchanged."""
+        head = ClassificationHead(
+            hidden_dim=HIDDEN_DIM, loss_fn=FLPULoss(prior=0.1), name="h"
+        )
+        features = _dummy_features()
+        targets = _dummy_targets()
+        logits = head(features)  # inference call: builds weights, no loss added
+        raw_loss = float(head.loss_fn(targets, logits))
+
+        _ = head(features, targets=targets)
+        assert float(head.losses[0]) == pytest.approx(raw_loss)
+
+    def test_registered_loss_is_scaled_by_loss_weight(self):
+        """Two heads with identical weights and inputs but different
+        loss_weight must register losses in the same ratio as their
+        loss_weight — the core scaling contract, endpoint mode, plain
+        (non-expose_loss_components) branch."""
+        features = _dummy_features()
+        targets = _dummy_targets()
+
+        head_full = ClassificationHead(
+            hidden_dim=HIDDEN_DIM,
+            loss_fn=FLPULoss(prior=0.1),
+            name="h",
+            loss_weight=1.0,
+        )
+        _ = head_full(features, targets=targets)
+        full_loss = float(head_full.losses[0])
+
+        head_half = ClassificationHead(
+            hidden_dim=HIDDEN_DIM,
+            loss_fn=FLPULoss(prior=0.1),
+            name="h",
+            loss_weight=0.5,
+        )
+        head_half(features)  # build sublayers, then force identical weights
+        head_half.set_weights(head_full.get_weights())
+        _ = head_half(features, targets=targets)
+        half_loss = float(head_half.losses[0])
+
+        assert half_loss == pytest.approx(0.5 * full_loss)
+
+    def test_last_components_unscaled_under_loss_weight(self):
+        """expose_loss_components branch: last_components reports the
+        UNSCALED FLPU internals regardless of loss_weight; only the
+        registered add_loss value is scaled."""
+        features = _dummy_features()
+        targets = _dummy_targets()
+
+        head_full = ClassificationHead(
+            hidden_dim=HIDDEN_DIM,
+            loss_fn=FLPULoss(prior=0.1),
+            name="h",
+            expose_loss_components=True,
+            loss_weight=1.0,
+        )
+        _ = head_full(features, targets=targets)
+        full_components = {k: float(v) for k, v in head_full.last_components.items()}
+        full_loss = float(head_full.losses[0])
+
+        head_half = ClassificationHead(
+            hidden_dim=HIDDEN_DIM,
+            loss_fn=FLPULoss(prior=0.1),
+            name="h",
+            expose_loss_components=True,
+            loss_weight=0.5,
+        )
+        head_half(features)
+        head_half.set_weights(head_full.get_weights())
+        _ = head_half(features, targets=targets)
+        half_components = {k: float(v) for k, v in head_half.last_components.items()}
+        half_loss = float(head_half.losses[0])
+
+        assert half_components == pytest.approx(full_components)
+        assert half_loss == pytest.approx(0.5 * full_loss)
 
 
 class TestDistributionMetricsIntegration:

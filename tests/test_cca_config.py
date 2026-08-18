@@ -33,13 +33,16 @@ from src.cca_config import (
 # ---------------------------------------------------------------------------
 
 
-def _valid_head(name="cca", source_column="cca_label", hidden_dim=768, prior=0.02):
+def _valid_head(
+    name="cca", source_column="cca_label", hidden_dim=768, prior=0.02, loss_weight=1.0
+):
     """Build a valid HeadConfig for use in tests that need one."""
     return HeadConfig(
         name=name,
         source_column=source_column,
         hidden_dim=hidden_dim,
         loss=FLPULossConfig(prior=prior),
+        loss_weight=loss_weight,
     )
 
 
@@ -186,6 +189,44 @@ class TestHeadConfigValidation:
                 hidden_dim=768,
                 loss=FLPULossConfig(prior=0.02),
             )
+
+
+class TestHeadConfigLossWeightValidation:
+    """`HeadConfig.loss_weight` (the stage-4 joint-finetune lambda knob;
+    docs/design-plans/2026-08-18-stage4-joint-finetune.md "Components" item
+    1). Default 1.0 = the historical (pre-knob) behavior."""
+
+    def test_default_loss_weight_is_one(self):
+        assert _valid_head().loss_weight == 1.0
+
+    def test_custom_loss_weight_accepted(self):
+        assert _valid_head(loss_weight=0.25).loss_weight == 0.25
+
+    def test_loss_weight_zero_rejected(self):
+        with pytest.raises(ValueError, match="loss_weight"):
+            _valid_head(loss_weight=0.0)
+
+    def test_loss_weight_negative_rejected(self):
+        with pytest.raises(ValueError, match="loss_weight"):
+            _valid_head(loss_weight=-0.5)
+
+    def test_loss_weight_bool_rejected(self):
+        # bool is a subclass of int in Python; must be explicitly excluded
+        # (mirrors RunConfig.seed's bool guard).
+        with pytest.raises(ValueError, match="loss_weight"):
+            _valid_head(loss_weight=True)
+
+    def test_loss_weight_inf_rejected(self):
+        with pytest.raises(ValueError, match="loss_weight"):
+            _valid_head(loss_weight=float("inf"))
+
+    def test_loss_weight_nan_rejected(self):
+        with pytest.raises(ValueError, match="loss_weight"):
+            _valid_head(loss_weight=float("nan"))
+
+    def test_loss_weight_non_numeric_rejected(self):
+        with pytest.raises(ValueError, match="loss_weight"):
+            _valid_head(loss_weight="0.5")  # type: ignore[arg-type]
 
 
 class TestRatioBatchConfigValidation:
@@ -1079,6 +1120,42 @@ class TestHardFreezeAndSeedRoundTrip:
         assert reloaded.seed == 200
         assert reloaded.seq_length == cfg.seq_length
         assert reloaded.heads == cfg.heads
+
+
+class TestHeadConfigLossWeightRoundTrip:
+    """JSON round-trip + back-compat for HeadConfig.loss_weight, mirroring
+    TestHardFreezeAndSeedRoundTrip above (nested-field variant: loss_weight
+    lives on HeadConfig, reconstructed via HeadConfig._from_dict's generic
+    _filter_known_fields default-fallback — no hand-written back-compat
+    needed since the field carries a dataclass default)."""
+
+    def test_round_trip_with_custom_loss_weight(self, tmp_path):
+        cfg = _valid_run_config(heads=(_valid_head(loss_weight=0.3),))
+        path = tmp_path / "config.json"
+        cfg.to_json(path)
+        reloaded = RunConfig.from_json(path)
+        assert reloaded == cfg
+        assert reloaded.heads[0].loss_weight == 0.3
+
+    def test_back_compat_old_sidecar_missing_loss_weight(self, tmp_path):
+        """A sidecar written before this knob existed lacks
+        heads[*].loss_weight entirely; reloading must default to 1.0 (the
+        historically-accurate value — every pre-knob run behaved as
+        loss_weight=1.0)."""
+        cfg = _valid_run_config()
+        path = tmp_path / "config.json"
+        cfg.to_json(path)
+
+        payload = json.loads(path.read_text())
+        del payload["heads"][0]["loss_weight"]
+        path.write_text(json.dumps(payload))
+
+        reloaded = RunConfig.from_json(path)
+        assert reloaded.heads[0].loss_weight == 1.0
+        assert reloaded.seq_length == cfg.seq_length
+
+    def test_default_cca_config_has_loss_weight_one(self):
+        assert DEFAULT_CCA_CONFIG.heads[0].loss_weight == 1.0
 
 
 class TestRunConfigDiagnosticsIntegration:

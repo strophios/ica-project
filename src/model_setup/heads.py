@@ -34,6 +34,7 @@ Planned (not yet implemented):
 """
 
 import inspect
+import math
 
 import keras
 
@@ -101,6 +102,11 @@ class ClassificationHead(keras.layers.Layer):
         output and is used for serialization. Must be non-None to
         prevent accidental Keras auto-generated name collisions across
         multiple heads.
+    loss_weight : float, default 1.0
+        Scalarization weight (lambda) applied at loss registration —
+        `add_loss(loss_weight * loss)`. See
+        `docs/design-plans/2026-08-18-stage4-joint-finetune.md`
+        "Components" item 1 for the why.
 
     Notes
     -----
@@ -120,6 +126,7 @@ class ClassificationHead(keras.layers.Layer):
         *,
         name,
         expose_loss_components=False,
+        loss_weight=1.0,
     ):
         if name is None:
             raise ValueError(
@@ -128,10 +135,22 @@ class ClassificationHead(keras.layers.Layer):
                 "(e.g., 'classification_head_1') which collide silently "
                 "across heads in a multi-head model."
             )
+        if (
+            not isinstance(loss_weight, (int, float))
+            or isinstance(loss_weight, bool)
+            or not math.isfinite(float(loss_weight))
+            or float(loss_weight) <= 0
+        ):
+            raise ValueError(
+                f"ClassificationHead {name!r}: loss_weight must be a finite "
+                f"positive number; got {loss_weight!r} "
+                f"(type {type(loss_weight).__name__})."
+            )
         super().__init__(name=name)
         self.hidden_dim = hidden_dim
         self.dropout_rate = dropout
         self.loss_fn = loss_fn
+        self.loss_weight = loss_weight
 
         self.expose_loss_components = expose_loss_components
         self.last_components = None
@@ -193,7 +212,8 @@ class ClassificationHead(keras.layers.Layer):
         targets : tensor or None, shape (batch,) or (batch, 1)
             Target labels for this head's task. Only used in endpoint
             mode. When `targets is not None` and `self.loss_fn is not
-            None`, the head calls `self.add_loss(loss_fn(targets, logits))`.
+            None`, the head calls
+            `self.add_loss(self.loss_weight * loss_fn(targets, logits))`.
 
         Returns
         -------
@@ -222,10 +242,12 @@ class ClassificationHead(keras.layers.Layer):
                     loss, components = self.loss_fn.call(
                         targets, logits, return_intermediates=True
                     )
+                    # last_components stays UNSCALED — it diagnoses FLPU
+                    # internals, not the multi-head mixing (loss_weight).
                     self.last_components = components
-                    self.add_loss(loss)
+                    self.add_loss(self.loss_weight * loss)
                 else:
-                    self.add_loss(self.loss_fn(targets, logits))
+                    self.add_loss(self.loss_weight * self.loss_fn(targets, logits))
             for metric in self.metric_objs:
                 metric.update_state(targets, logits)
         return logits

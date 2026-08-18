@@ -249,19 +249,41 @@ def gold_first_us_gate(
     return final_gate, gold_coverage
 
 
+# pattern: Functional Core
+def dedupe_by_id(df: pl.DataFrame) -> pl.DataFrame:
+    """Pure: drop duplicate `id` rows, keeping the first occurrence (input order).
+
+    The API corpus carries ~991 ids that are physically duplicated across
+    files (a known data-quality flag; see CLAUDE.md). A duplicated id in
+    `load_location_signals`'s output fans out any left-join against it and
+    trips the post-07-30 id-uniqueness assert in downstream table builds.
+    Logs the dropped-row count when non-zero (silent when there's nothing to
+    drop).
+    """
+    before = df.height
+    out = df.unique(subset="id", keep="first", maintain_order=True)
+    dropped = before - out.height
+    if dropped:
+        print(f"load_location_signals: dropped {dropped} duplicate id row(s) "
+              f"(kept first occurrence)")  # LOG
+    return out
+
+
 # pattern: Imperative Shell (I/O: reads from API_CORPUS_DIR)
 def load_location_signals(ids: list[str]) -> pl.DataFrame:
     """Shell: read the API corpus rows for `ids` and compute (id, any_us, any_not_us)
     via the location heuristic.
 
     Reads matching rows from each year's parquet file in the API corpus directory,
-    then calls compute_location_signals to extract location signals.
+    then calls compute_location_signals to extract location signals. The result
+    is deduped by id (see `dedupe_by_id`) -- the source corpus carries a handful
+    of physically-duplicated ids that would otherwise fan out downstream joins.
 
     Args:
         ids: list of article ids to read.
 
     Returns:
-        DataFrame with columns (id, any_us, any_not_us).
+        DataFrame with columns (id, any_us, any_not_us), unique on id.
     """
     want = set(ids)
     parts = []
@@ -271,6 +293,7 @@ def load_location_signals(ids: list[str]) -> pl.DataFrame:
         ).filter(pl.col("id").is_in(list(want)))
         if d.height:
             parts.append(d)
-    return compute_location_signals(pl.concat(parts)) if parts else pl.DataFrame(
+    result = compute_location_signals(pl.concat(parts)) if parts else pl.DataFrame(
         schema={"id": pl.String, "any_us": pl.Boolean, "any_not_us": pl.Boolean}
     )
+    return dedupe_by_id(result)
