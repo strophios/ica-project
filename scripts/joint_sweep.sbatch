@@ -8,6 +8,7 @@
 # runs used) -- a slow node + a full 7-epoch TWO-HEAD run + CPU-forced
 # scoring needs the margin.
 #SBATCH --mem=64G
+#SBATCH --cpus-per-task=8   # CPU-forced scoring needs real cores; partition default (~1-2) crawls
 #SBATCH --array=0-11
 #SBATCH --output=/projects/ahd/cca_logs/slurm-%A_%a.out
 
