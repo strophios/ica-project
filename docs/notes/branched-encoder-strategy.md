@@ -299,6 +299,48 @@ hard-freeze A/B; eval JSONs in `relevance/sweep/`, logs
   composed-proxy of July-rel × production-CCA, computed once as the
   branched baseline the joint must beat to justify a single encoder).
 
+**Stage 4 — joint CCA+rel sweep COMPLETE (2026-08-19). VERDICT: joint does
+not win; THE BRANCHED ARCHITECTURE IS THE PRODUCTION DESIGN.** 11/12 cells
+scored (N2_λ.50_s201's eval JSON missing — its region sits ~0.15 below the
+bar, verdict-irrelevant); results `relevance/joint_sweep/*.eval.json`,
+baseline `cca_doca/experiments/branched_baseline_proxy.json`.
+
+- **The rule's outcome**: best region N1/λ=0.25, seed-pair composed proxy
+  {0.7996, 0.8173}, mean 0.808 ≈ the branched bar 0.8064 — a tie at best —
+  and both draws fail both guardrails (CCA own 0.90 < 0.91; rel own
+  0.75–0.79 vs ~0.83 baseline). Every other cell is 0.05–0.18 below the
+  bar. Pre-registered tie rule ⇒ branched.
+- **Keeper finding 1 — complementarity is real but expensive.** λ=0.25
+  composition ADDS over its own rel-solo (+0.04 to +0.10; e.g. 0.700→0.800)
+  where branched composition SUBTRACTS (0.852→0.806): joint training does
+  reshape the heads toward complementary — the operator's hypothesis
+  confirmed — but at ruinous per-head cost (rel-solo 0.70–0.78 vs the
+  branched 0.853). The complementarity lever exists; this λ-scalarized
+  implementation can't cash it.
+- **Keeper finding 2 — negative transfer through a shared layer is
+  zero-sum at these data scales.** Rel-first tuning wrecked CCA
+  (0.93→0.74); joint tuning wrecks rel (0.85→0.5–0.78 solo) while CCA
+  mostly holds. Whoever's gradients dominate the shared layer wins it.
+  N=2 does not rescue joint (mostly worse than N=1).
+- **Recorded limitations**: early stopping monitored the λ-mixed val_loss,
+  so cross-λ comparisons entangle λ's representation effect with its
+  stopping effect (operator-flagged 2026-08-19; magnitudes ~0.01-scale
+  per the plateau shapes, far below the 0.05+ gaps); the 12th cell is
+  unscored; text-mode draw noise ±0.01 applies throughout.
+- **Riders for any future tuning run** (not needed for the branched
+  deploy, whose rel artifact — the July layer-12 — already exists):
+  `restore_best_weights=True`; λ-independent rank-based val monitor;
+  the one-shot schedule A/B (current vs stretched-decay 12-epoch),
+  selected on val-stream metrics, never gold.
+
+**Productionization (the ladder's output, now unblocked):** branched
+`IcaModel` — shared pristine DAPT trunk + the July tuned layer-12 as rel's
+branch (graft-at-deploy, stage-1-proven lossless), original layer-12 for
+CCA/US; per-head CLS caches from one ~1.08× embed pass; CPU-portable
+replacement rel artifact (the p02 probe + its calibration sidecar already
+exist in scratch_diag); fusion refit via the parameterized `fit_fusion.py`;
+gold re-eval; swap decision. Roadmap §A1.
+
 ## Pointers
 
 `encoder-unfreeze-strategy.md` (predecessor decision + rel-first findings and
