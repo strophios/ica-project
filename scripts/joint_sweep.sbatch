@@ -64,6 +64,23 @@ TAG="joint_N${N}_lam${LAM_TAG}_s${SEED}"
 WEIGHTS="$SWEEP_DIR/${TAG}.weights.h5"
 EVAL_JSON="$SWEEP_DIR/${TAG}.eval.json"
 
+# Score-only resume (2026-08-19): a task that trained but timed out during the
+# CPU-forced scoring (weights + config sidecar saved, no eval JSON) must not
+# retrain on resubmit. Known hazard on FULL cold-cache grids: the trainer's
+# shared tf.data snapshot (relevance/joint_set/*.tf) is written by whichever
+# task gets there first — 12 simultaneous cold starts can race a reader
+# against a mid-write (job 9340533_0 died exactly so). For a cold cache,
+# warm it first: `sbatch --array=0 ...`, wait, then submit the rest.
+CONFIG_JSON="${WEIGHTS%.weights.h5}.config.json"
+if [[ ! -f "$EVAL_JSON" && -f "$WEIGHTS" && -f "$CONFIG_JSON" ]]; then
+    echo "$TAG: weights exist, eval missing -> score-only resume"
+    uv run python -m scripts.eval_joint_sweep_point \
+        --weights "$WEIGHTS" \
+        --out "$EVAL_JSON"
+    echo "$TAG: done (score-only) $(date)"
+    exit 0
+fi
+
 if [[ -f "$EVAL_JSON" ]]; then
     echo "$TAG: eval JSON already present, skipping (delete it to re-run)"
     exit 0
