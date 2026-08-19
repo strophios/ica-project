@@ -41,7 +41,9 @@ def main() -> None:
     from src.embed_corpus import _build_embed_model
 
     print("DTYPE_POLICY:", config.DTYPE_POLICY)
-    model, us_cfg, backbone_path = _build_embed_model(config.US_FILTER_CLASSIFIER_WEIGHTS)
+    model, us_cfg, backbone_path, _branch_provenance = _build_embed_model(
+        config.US_FILTER_CLASSIFIER_WEIGHTS
+    )
     print("backbone_path:", backbone_path)
     head = next(layer for layer in model.layers if layer.name == us_cfg.head.name)
     runtime = head.get_weights()

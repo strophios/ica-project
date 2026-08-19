@@ -131,6 +131,11 @@ class FusionConfig:
         includes_us: whether the US head is included in the combiner (affects feature count)
         composed_platt: final 2-param Platt [A, B] fit on composed score (None if not fit)
         head_calibrators: per-head calibrator references (e.g., {"cca": "...", "rel": "...", "us": "..."})
+        head_feature_sources: per-head CLS-source tag (e.g., {"us": "base", "cca": "base",
+            "rel": "rel_branch"}) for the branched-encoder apply path
+            (docs/design-plans/2026-08-18-stage4-joint-finetune.md). None (default) = no
+            record — back-compat for fusion sidecars predating branched-encoder support;
+            IcaModel skips the sources-match check in that case.
     """
 
     gate_threshold: float
@@ -140,6 +145,7 @@ class FusionConfig:
     includes_us: bool
     composed_platt: list[float] | None = None
     head_calibrators: dict[str, str] | None = None
+    head_feature_sources: dict[str, str] | None = None
 
     def __post_init__(self) -> None:
         """Validate configuration on construction."""
@@ -195,4 +201,12 @@ class FusionConfig:
             if not isinstance(self.head_calibrators, dict):
                 raise ValueError(
                     f"head_calibrators must be a dict or None, got type {type(self.head_calibrators)}"
+                )
+
+        # Validate head_feature_sources: if present, must be a dict
+        if self.head_feature_sources is not None:
+            if not isinstance(self.head_feature_sources, dict):
+                raise ValueError(
+                    f"head_feature_sources must be a dict or None, got type "
+                    f"{type(self.head_feature_sources)}"
                 )

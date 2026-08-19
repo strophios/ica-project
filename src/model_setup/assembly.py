@@ -341,16 +341,69 @@ def build_feature_endpoint_model(
     )
 
 
-def build_feature_inference_model(heads, hidden_dim):
+def build_feature_inference_model(heads, hidden_dim, feature_sources=None):
     """Features-mode counterpart of `build_inference_model` (no targets).
 
-    Input `features` `(batch, hidden_dim)`; outputs a dict of per-head logits.
-    Pattern A applies: share `heads` instances with `build_feature_endpoint_model`
-    in-process and `predict()` on this model after fitting the endpoint model.
+    Default (`feature_sources=None`): single shared `features` `(batch, hidden_dim)`
+    Input, every head reads it — byte-identical to the pre-branched-encoder
+    behavior. Pattern A applies: share `heads` instances with
+    `build_feature_endpoint_model` in-process and `predict()` on this model
+    after fitting the endpoint model.
+
+    Multi-source (branched-encoder support, `docs/notes/branched-encoder-strategy.md`):
+    pass `feature_sources: dict[str, str]` mapping head name -> source tag (e.g.
+    `{"us": "base", "cca": "base", "rel": "rel_branch"}`). One `keras.Input` is
+    created per DISTINCT tag, named `f"features_{tag}"`; each head is wired to
+    its tag's Input, so heads sharing a tag share one Input and heads on
+    different tags read independent arrays (e.g. a per-head tuned-encoder CLS
+    cache). Every head name must appear in `feature_sources`, and every key of
+    `feature_sources` must name a head in `heads` — both directions validated.
+
+    Args:
+        heads: `dict[str, ClassificationHead]`.
+        hidden_dim: width of the cached feature vector(s).
+        feature_sources: optional `dict[str, str]`, head name -> source tag.
+            `None` (default) = legacy single shared input.
+
+    Returns:
+        `keras.Model`, inputs either `{"features": ...}` (legacy) or
+        `{"features_<tag>": ...}` per distinct tag (multi-source), outputs a
+        dict of per-head logits.
+
+    Raises:
+        ValueError: a head name is missing from `feature_sources`, or
+            `feature_sources` names a head that doesn't exist.
     """
-    features = keras.Input(shape=(hidden_dim,), dtype="float32", name="features")
-    outputs = {name: head(features) for name, head in heads.items()}
-    return keras.Model(inputs={"features": features}, outputs=outputs)
+    if feature_sources is None:
+        features = keras.Input(shape=(hidden_dim,), dtype="float32", name="features")
+        outputs = {name: head(features) for name, head in heads.items()}
+        return keras.Model(inputs={"features": features}, outputs=outputs)
+
+    head_names = set(heads.keys())
+    source_keys = set(feature_sources.keys())
+    missing = head_names - source_keys
+    if missing:
+        raise ValueError(
+            f"build_feature_inference_model: feature_sources is missing entries "
+            f"for heads: {sorted(missing)}"
+        )
+    unknown = source_keys - head_names
+    if unknown:
+        raise ValueError(
+            f"build_feature_inference_model: feature_sources names heads that "
+            f"don't exist in `heads`: {sorted(unknown)}"
+        )
+
+    distinct_tags = sorted(set(feature_sources.values()))
+    tag_inputs = {
+        tag: keras.Input(shape=(hidden_dim,), dtype="float32", name=f"features_{tag}")
+        for tag in distinct_tags
+    }
+    outputs = {
+        name: head(tag_inputs[feature_sources[name]]) for name, head in heads.items()
+    }
+    all_inputs = {f"features_{tag}": tag_inputs[tag] for tag in distinct_tags}
+    return keras.Model(inputs=all_inputs, outputs=outputs)
 
 
 def build_inference_model(backbone, heads, seq_length):

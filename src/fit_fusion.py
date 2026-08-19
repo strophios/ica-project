@@ -141,6 +141,7 @@ def resolve_fusion_inputs(
     rel_weights_path: Path | str | None = None,
     us_weights_path: Path | str | None = None,
     output_dir: Path | str | None = None,
+    rel_feature_variant: str | None = None,
 ) -> dict:
     """Resolve fit_fusion's parameterized inputs and guard against a silent
     production overwrite.
@@ -148,21 +149,28 @@ def resolve_fusion_inputs(
     Each weights path independently defaults to its production artifact
     (`config.CCA_DOCA_WEIGHTS` / `RELEVANCE_DOCA_WEIGHTS` / `US_FILTER_FULL_WEIGHTS`);
     `output_dir` defaults to `config.CCA_DOCA_DIR` (the production
-    `ica_fusion.fusion.json` location). fit_fusion.py has four independently
-    tunable input sources (one cache + three head-weights paths) feeding a
-    single shared output artifact, so this applies the same overwrite check
-    the six trainers/calibrators use (`src.artifact_guard.check_no_production_overwrite`)
-    once per input: pointing any ONE of them away from its default while
-    leaving `output_dir` at the production default is refused, before any
-    cache/weights I/O happens.
+    `ica_fusion.fusion.json` location). fit_fusion.py has five independently
+    tunable input sources (one cache + three head-weights paths + the rel
+    feature-variant tag) feeding a single shared output artifact, so this
+    applies the same overwrite check the six trainers/calibrators use
+    (`src.artifact_guard.check_no_production_overwrite`) once per input:
+    pointing any ONE of them away from its default while leaving `output_dir`
+    at the production default is refused, before any cache/weights I/O happens.
+
+    Args:
+        rel_feature_variant: optional rel-branch CLS variant tag (branched-
+            encoder fusion refit, `docs/design-plans/2026-08-18-stage4-joint-finetune.md`).
+            `None` (default, matching production) = the rel head reads the
+            SAME base CLS array as CCA/US, unchanged prior behavior.
 
     Returns:
         Dict of resolved Paths/str: cache_suffix, cca_weights_path,
-        rel_weights_path, us_weights_path, output_dir.
+        rel_weights_path, us_weights_path, output_dir, rel_feature_variant.
 
     Raises:
         ValueError: a non-default cache_suffix/cca_weights_path/rel_weights_path/
-            us_weights_path is paired with a production (default) output_dir.
+            us_weights_path/rel_feature_variant is paired with a production
+            (default) output_dir.
     """
     cca_weights_path = (
         Path(cca_weights_path) if cca_weights_path is not None else config.CCA_DOCA_WEIGHTS
@@ -178,9 +186,9 @@ def resolve_fusion_inputs(
     # check_no_production_overwrite's (cache_suffix, weights_path) shape is
     # reused per input: the "weights_path" compared is always this run's
     # resolved fusion output artifact, and "cache_suffix" is instantiated
-    # with each of the four tunable inputs in turn (the real cache suffix,
-    # then each head-weights path as a string) against its own production
-    # default.
+    # with each of the five tunable inputs in turn (the real cache suffix,
+    # each head-weights path as a string, and the rel-feature-variant tag)
+    # against its own production default.
     resolved_output_weights = output_dir / "ica_fusion.weights.h5"
     production_output_weights = config.CCA_DOCA_DIR / "ica_fusion.weights.h5"
     for artifact_label, input_value, production_value in [
@@ -188,6 +196,7 @@ def resolve_fusion_inputs(
         ("fusion CCA weights", str(cca_weights_path), str(config.CCA_DOCA_WEIGHTS)),
         ("fusion relevance weights", str(rel_weights_path), str(config.RELEVANCE_DOCA_WEIGHTS)),
         ("fusion US weights", str(us_weights_path), str(config.US_FILTER_FULL_WEIGHTS)),
+        ("fusion rel-feature-variant", rel_feature_variant, None),
     ]:
         check_no_production_overwrite(
             cache_suffix=input_value,
@@ -203,7 +212,23 @@ def resolve_fusion_inputs(
         "rel_weights_path": rel_weights_path,
         "us_weights_path": us_weights_path,
         "output_dir": output_dir,
+        "rel_feature_variant": rel_feature_variant,
     }
+
+
+def resolve_head_feature_sources(rel_feature_variant: str | None) -> dict[str, str] | None:
+    """The fusion sidecar's `head_feature_sources` record for a given
+    --rel-feature-variant tag (branched-encoder apply,
+    `docs/design-plans/2026-08-18-stage4-joint-finetune.md`).
+
+    `None` (no variant requested — production/default) -> `None`: no record,
+    back-compat with fusion sidecars predating branched-encoder support.
+    A tag -> `{"us": "base", "cca": "base", "rel": <tag>}`, matching the
+    deployed branched config (US/CCA on the base cache, rel on its branch).
+    """
+    if rel_feature_variant is None:
+        return None
+    return {"us": "base", "cca": "base", "rel": rel_feature_variant}
 
 
 # ============================================================================
@@ -222,6 +247,7 @@ def main(
     cca_weights_path: Path | str | None = None,
     rel_weights_path: Path | str | None = None,
     us_weights_path: Path | str | None = None,
+    rel_feature_variant: str | None = None,
 ) -> dict:
     """Orchestrate fusion selection + composed calibration (conditional-on-US population).
 
@@ -239,13 +265,20 @@ def main(
         random_state: Seed for determinism
         output_dir: Directory for fusion.json + metrics.json (default uses cca_doca dir).
             Passing a non-default cache_suffix/cca_weights_path/rel_weights_path/
-            us_weights_path while leaving output_dir at its production default raises
-            (see resolve_fusion_inputs) -- pass a distinct output_dir for a tuned run.
+            us_weights_path/rel_feature_variant while leaving output_dir at its
+            production default raises (see resolve_fusion_inputs) -- pass a
+            distinct output_dir for a tuned run.
         cache_suffix: embed cache subdir CCA/rel features + eval-set ids are joined
             against (default: "relevance_train", the production cache)
         cca_weights_path: CCA head weights to score (default: config.CCA_DOCA_WEIGHTS)
         rel_weights_path: relevance head weights to score (default: config.RELEVANCE_DOCA_WEIGHTS)
         us_weights_path: US head weights to score (default: config.US_FILTER_FULL_WEIGHTS)
+        rel_feature_variant: optional rel-branch CLS variant tag (branched-encoder
+            fusion refit). When set, the rel head's features are read from the
+            variant array off the SAME cache join (`cache_suffix`) instead of the
+            base CLS array CCA/US use -- no second cache dir. The saved fusion
+            sidecar records `head_feature_sources={"us":"base","cca":"base","rel":<tag>}`.
+            Default `None` = legacy behavior (rel shares the base array).
 
     Returns:
         Dict with keys: combiner, tau_us, tau_us_qualified, tau_us_achieved_recall,
@@ -278,7 +311,9 @@ def main(
         rel_weights_path=rel_weights_path,
         us_weights_path=us_weights_path,
         output_dir=output_dir,
+        rel_feature_variant=rel_feature_variant,
     )
+    rel_feature_variant = resolved["rel_feature_variant"]
     cache_suffix = resolved["cache_suffix"]
     cca_weights_path = resolved["cca_weights_path"]
     rel_weights_path = resolved["rel_weights_path"]
@@ -339,6 +374,26 @@ def main(
     features = cls[emb_rows]  # shape (n_eval, hidden_dim)
     logger.info(f"Feature matrix: {features.shape}")
 
+    # Rel-feature-variant (branched-encoder fusion refit): one extra gather
+    # off the SAME cache join (emb_rows), no second cache dir.
+    rel_features = features
+    if rel_feature_variant is not None:
+        logger.info(
+            f"Loading rel-feature-variant CLS array (tag={rel_feature_variant!r})"
+        )
+        meta_variant, cls_variant = load_cache(
+            config.CCA_EMBED_CACHE_DIR / cache_suffix, variant=rel_feature_variant
+        )
+        if meta_variant.height != meta_full.height:
+            raise ValueError(
+                f"rel-feature-variant cache (tag={rel_feature_variant!r}) has "
+                f"{meta_variant.height} rows, expected {meta_full.height} (the "
+                f"base cache's row count) -- variant and base shards must be "
+                f"row-aligned"
+            )
+        rel_features = cls_variant[emb_rows]
+        logger.info(f"Rel feature matrix (variant): {rel_features.shape}")
+
     # Build texts for US model (headline + "</s>" + lead_paragraph)
     missing_cols = []
     if "headline" not in eval_df_join.columns:
@@ -372,7 +427,7 @@ def main(
     logger.info(f"CCA: mean={p_cca.mean():.3f}, std={p_cca.std():.3f}")
 
     logger.info(f"Scoring relevance head ({rel_weights_path})")
-    rel_logits = apply_relevance_model(features, weights_path=rel_weights_path)
+    rel_logits = apply_relevance_model(rel_features, weights_path=rel_weights_path)
     rel_cal = load_calibration(
         calibration_path_for_weights(rel_weights_path)
     )
@@ -674,6 +729,7 @@ def main(
     # Step 11: Save fusion.json
     # ========================================================================
     # Type cast needed because select_combiner returns str
+    head_feature_sources = resolve_head_feature_sources(rel_feature_variant)
     fusion_cfg = FusionConfig(
         gate_threshold=tau_us,
         combine=cast(Literal["product", "logreg"], chosen_combiner),
@@ -682,6 +738,7 @@ def main(
         includes_us=False,
         composed_platt=composed_platt_ab,
         head_calibrators=head_calibrators,
+        head_feature_sources=head_feature_sources,
     )
     fusion_path = fusion_path_for_weights(output_dir / "ica_fusion.weights.h5")
     save_fusion(fusion_cfg, fusion_path)
@@ -694,6 +751,7 @@ def main(
     assert fusion_cfg_loaded.combine == chosen_combiner
     assert fusion_cfg_loaded.composed_platt == composed_platt_ab
     assert fusion_cfg_loaded.head_calibrators == head_calibrators
+    assert fusion_cfg_loaded.head_feature_sources == head_feature_sources
     logger.info("✓ fusion.json round-trip verified (including new fields)")
 
     # ========================================================================
@@ -723,6 +781,8 @@ def main(
         "n_positive_us_true": n_pos_us_true,
         "n_negative_us_true": n_neg_us_true,
         "gate_note": gate_note,
+        "rel_feature_variant": rel_feature_variant,
+        "head_feature_sources": head_feature_sources,
     }
 
     metrics_path = output_dir / "ica_fusion_metrics.json"
@@ -750,7 +810,9 @@ def main(
     return metrics
 
 
-if __name__ == "__main__":
+def build_arg_parser() -> argparse.ArgumentParser:
+    """Construct the CLI parser (importable so tests can check flag defaults,
+    mirroring `apply_ica.build_arg_parser`)."""
     ap = argparse.ArgumentParser(
         description="Fit the ICA fusion combiner + composed calibration."
     )
@@ -766,16 +828,31 @@ if __name__ == "__main__":
         "--out", default=None,
         help="output directory for ica_fusion.fusion.json/ica_fusion_metrics.json "
              "(default: cca_doca/ -- MUST pass a distinct directory when any of "
-             "--cache-suffix/--cca-weights/--rel-weights/--us-weights is non-default, "
-             "or the run refuses to start)",
+             "--cache-suffix/--cca-weights/--rel-weights/--us-weights/"
+             "--rel-feature-variant is non-default, or the run refuses to start)",
     )
-    args = ap.parse_args()
+    ap.add_argument(
+        "--rel-feature-variant", default=None,
+        help="rel-branch CLS variant tag (branched-encoder fusion refit, "
+             "docs/design-plans/2026-08-18-stage4-joint-finetune.md). The rel "
+             "head's features are read from this variant array off the SAME "
+             "--cache-suffix cache; CCA/US stay on the base array. Default: "
+             "None = legacy (rel shares the base array). Saves "
+             "head_feature_sources={'us':'base','cca':'base','rel':<tag>} into "
+             "the fusion sidecar.",
+    )
+    return ap
+
+
+if __name__ == "__main__":
+    args = build_arg_parser().parse_args()
     metrics = main(
         cache_suffix=args.cache_suffix,
         cca_weights_path=args.cca_weights,
         rel_weights_path=args.rel_weights,
         us_weights_path=args.us_weights,
         output_dir=args.out,
+        rel_feature_variant=args.rel_feature_variant,
     )
     print("\n✓ Fusion selection complete")
     print(json.dumps(metrics, indent=2))

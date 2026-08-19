@@ -1,7 +1,9 @@
-# pattern: Imperative Shell (default_out_path / layer_diff_summary /
-#   expected_tuned_groups / _group_sort_key are the pure Functional Core;
-#   everything else -- model reconstruction, weight load/save, verification
-#   against the original DAPT backbone -- is I/O)
+# pattern: Imperative Shell (default_out_path / expected_tuned_groups /
+#   _group_sort_key are the pure Functional Core; everything else -- model
+#   reconstruction, weight load/save, verification against the original DAPT
+#   backbone -- is I/O). `layer_diff_summary` moved to
+#   `src.model_setup.backbone` (2026-08-19, avoids a circular import with
+#   `build_grafted_backbone`) and is re-exported here for back-compat.
 """
 Extract a fine-tuned RoBERTa backbone out of a text-mode rel training artifact.
 
@@ -59,6 +61,7 @@ import numpy as np
 import src.cca_config as cca_config
 import src.config as config
 from src.model_setup.assembly import build_inference_model
+from src.model_setup.backbone import layer_diff_summary as layer_diff_summary  # noqa: F401
 from src.model_setup.backbone import load_dapt_backbone
 from src.model_setup.heads import ClassificationHead
 
@@ -100,34 +103,6 @@ def default_out_path(weights_path: Path) -> Path:
     if not jobtag:
         raise ValueError(f"empty jobtag segment parsed from {name!r}")
     return weights_path.parent / f"tuned_backbone.{jobtag}.weights.h5"
-
-
-def layer_diff_summary(
-    paths: list[str], weights_a: list[np.ndarray], weights_b: list[np.ndarray]
-) -> dict[str, float]:
-    """Pure: max |delta| per top-level backbone group between two weight lists.
-
-    `paths` / `weights_a` / `weights_b` must be parallel (same order, same
-    variable identity) -- e.g. `[w.path for w in backbone.weights]` and the
-    matching `.numpy()` arrays for two backbones built from the same
-    `keras_hub.models.Backbone.from_preset(...)` call, so structure/order is
-    guaranteed identical between the two. Groups by the first `/`-delimited
-    path segment (`"embeddings"`, `"embeddings_layer_norm"`,
-    `"transformer_layer_0"` .. `"transformer_layer_11"` for `roberta_base_en`).
-    """
-    if not (len(paths) == len(weights_a) == len(weights_b)):
-        raise ValueError(
-            f"paths/weights_a/weights_b must be equal length; got "
-            f"{len(paths)}/{len(weights_a)}/{len(weights_b)}"
-        )
-    if not paths:
-        raise ValueError("paths must be non-empty")
-    out: dict[str, float] = {}
-    for path, a, b in zip(paths, weights_a, weights_b):
-        group = path.split("/")[0]
-        delta = float(np.max(np.abs(np.asarray(a) - np.asarray(b))))
-        out[group] = max(out.get(group, 0.0), delta)
-    return out
 
 
 def expected_tuned_groups(unfreeze_top_n: int, n_layers: int = 12) -> set[str]:

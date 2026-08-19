@@ -55,7 +55,7 @@ def _filter_years(
     return filtered, cls_features[emb_rows]
 
 
-def assert_scoring_integrity(model, features: np.ndarray, atol: float = 0.05) -> None:
+def assert_scoring_integrity(model, features, atol: float = 0.05) -> None:
     """Guard: the compiled predict path must match direct head computation.
 
     2026-08-04 finding: tensorflow-metal (local MPS) mis-executes the
@@ -72,11 +72,38 @@ def assert_scoring_integrity(model, features: np.ndarray, atol: float = 0.05) ->
     the MPS bug signature is >= ~0.5 logits. atol=0.05 sits an order of
     magnitude above the former and below the latter (the first cluster apply
     tripped a 1e-3 atol on exactly that benign noise).
+
+    Per-source (branched-encoder apply, `model.head_feature_sources` set):
+    `features` is `dict[source_tag, (n, 768) array]` instead of a bare
+    matrix; each head is checked against a sample of ITS OWN source tag's
+    array, not a shared sample — the same tolerance rationale applies
+    per-head.
+
+    Args:
+        model: an `IcaModel`.
+        features: legacy — `(n, 768)` ndarray. Sources mode
+            (`model.head_feature_sources` set) — `dict[source_tag, (n, 768)
+            array]`.
+        atol: see tolerance calibration above.
     """
-    sample = features[: min(len(features), 256)]
-    pred = model.model.predict({"features": sample}, verbose=0)
-    for name, head in (("us", model.us_head), ("cca", model.cca_head), ("rel", model.rel_head)):
-        direct = np.asarray(head(sample)).reshape(-1)
+    heads = (("us", model.us_head), ("cca", model.cca_head), ("rel", model.rel_head))
+
+    if model.head_feature_sources is None:
+        sample = features[: min(len(features), 256)]
+        pred = model.model.predict({"features": sample}, verbose=0)
+        head_samples = {name: sample for name, _ in heads}
+    else:
+        n = min(min(len(arr) for arr in features.values()), 256)
+        sample = {tag: arr[:n] for tag, arr in features.items()}
+        model_inputs = {f"features_{tag}": arr for tag, arr in sample.items()}
+        pred = model.model.predict(model_inputs, verbose=0)
+        head_samples = {
+            name: sample[model.head_feature_sources[name]] for name, _ in heads
+        }
+
+    for name, head in heads:
+        head_sample = head_samples[name]
+        direct = np.asarray(head(head_sample)).reshape(-1)
         got = np.asarray(pred[name]).reshape(-1)
         maxabs = float(np.max(np.abs(got - direct)))
         if maxabs > atol:
@@ -89,11 +116,39 @@ def assert_scoring_integrity(model, features: np.ndarray, atol: float = 0.05) ->
     logger.info("scoring integrity check passed (predict == direct for us/cca/rel)")
 
 
+def _load_rel_variant_cls(cache_dir, variant: str, expected_rows: int) -> np.ndarray:
+    """Load the rel-branch CLS variant array from the SAME cache dir as the
+    base cache (branched-encoder apply,
+    `docs/design-plans/2026-08-18-stage4-joint-finetune.md` "Cache layout":
+    `shard_{idx:03d}_cls.{variant}.npy`).
+
+    Missing shards -> a clear error naming the cache dir and tag (never a
+    silent fallback to the base array). A row-count mismatch against the
+    base cache's meta -> a clear error too (variant and base shards must be
+    row-aligned by construction, sharing the same `emb_row` indexing).
+    """
+    try:
+        variant_meta, cls_variant = load_cache(cache_dir, variant=variant)
+    except FileNotFoundError as e:
+        raise FileNotFoundError(
+            f"rel-variant CLS array for tag {variant!r} not found in cache "
+            f"{cache_dir}: {e}"
+        ) from e
+    if variant_meta.height != expected_rows:
+        raise ValueError(
+            f"rel-variant cache (tag={variant!r}) in {cache_dir} has "
+            f"{variant_meta.height} rows, expected {expected_rows} (the base "
+            f"cache's row count) — variant and base shards must be row-aligned"
+        )
+    return cls_variant
+
+
 def apply_ica_api(
     cache_suffix: str = "full",
     limit: int | None = None,
     out_name: str | None = None,
     years: tuple[int, int] | None = None,
+    rel_variant: str | None = None,
 ) -> None:
     """Apply IcaModel over API corpus (1960-1995 or whatever years cache covers).
 
@@ -106,6 +161,12 @@ def apply_ica_api(
         out_name: candidates filename (default "api_1960_1995.parquet" —
             unchanged legacy name; the forward run passes "api_1996_2025.parquet")
         years: optional inclusive (lo, hi) restriction on the cache rows
+        rel_variant: optional rel-branch CLS variant tag (branched-encoder
+            apply). When set, IcaModel is built with
+            `head_feature_sources={"us": "base", "cca": "base", "rel": rel_variant}`
+            and fed a `{"base": ..., rel_variant: ...}` features dict, both
+            arrays read from the same cache dir and filtered identically.
+            Default `None` = legacy shared-features scoring.
     """
     if out_name is None:
         out_name = "api_1960_1995.parquet"
@@ -117,7 +178,15 @@ def apply_ica_api(
     meta, cls_features = load_cache(cache_dir)
     logger.info(f"Loaded {meta.height} rows, {cls_features.shape[1]}d features")
 
+    cls_variant = None
+    if rel_variant is not None:
+        cls_variant = _load_rel_variant_cls(cache_dir, rel_variant, meta.height)
+
     if years is not None:
+        # Filter both arrays against the SAME pre-filter meta so both land on
+        # identical row order (see `_filter_years`'s emb_row-based reindex).
+        if cls_variant is not None:
+            _, cls_variant = _filter_years(meta, cls_variant, years)
         meta, cls_features = _filter_years(meta, cls_features, years)
         logger.info(f"Filtered to {years[0]}-{years[1]}: {meta.height} rows")
 
@@ -125,15 +194,22 @@ def apply_ica_api(
     if limit is not None:
         meta = meta.head(limit)
         cls_features = cls_features[:limit]
+        if cls_variant is not None:
+            cls_variant = cls_variant[:limit]
         logger.info(f"Limited to {limit} rows")
 
     # Load and apply IcaModel
     logger.info("Loading IcaModel")
-    model = IcaModel()
-    assert_scoring_integrity(model, cls_features)
+    if rel_variant is not None:
+        model = IcaModel(head_feature_sources={"us": "base", "cca": "base", "rel": rel_variant})
+        features_for_model = {"base": cls_features, rel_variant: cls_variant}
+    else:
+        model = IcaModel()
+        features_for_model = cls_features
+    assert_scoring_integrity(model, features_for_model)
 
     logger.info("Running predictions on API corpus")
-    result = model.predict_ica_from_features(cls_features)
+    result = model.predict_ica_from_features(features_for_model)
 
     # Attach scores to metadata
     output = meta.with_columns(
@@ -195,6 +271,7 @@ def apply_ica_ldc(
     limit: int | None = None,
     out_name: str | None = None,
     years: tuple[int, int] = (1996, 2007),
+    rel_variant: str | None = None,
 ) -> None:
     """Apply IcaModel over LDC corpus (1996-2007) with gold-first US gating.
 
@@ -208,6 +285,9 @@ def apply_ica_ldc(
         out_name: candidates filename (default "ldc_1996_2007.parquet")
         years: inclusive (lo, hi) restriction (default the 1996-2007 expansion
             window — the pre-parameterization hardcoded behavior)
+        rel_variant: optional rel-branch CLS variant tag (see `apply_ica_api`).
+            Threaded through BOTH predict_ica_from_features calls (ML gate,
+            then gate_override). Default `None` = legacy shared-features scoring.
     """
     if out_name is None:
         out_name = "ldc_1996_2007.parquet"
@@ -219,7 +299,15 @@ def apply_ica_ldc(
     meta, cls_features = load_cache(cache_dir)
     logger.info(f"Loaded {meta.height} rows, {cls_features.shape[1]}d features")
 
-    # Filter to the target year range if a year column exists
+    cls_variant = None
+    if rel_variant is not None:
+        cls_variant = _load_rel_variant_cls(cache_dir, rel_variant, meta.height)
+
+    # Filter to the target year range if a year column exists. Both arrays
+    # filtered against the SAME pre-filter meta so both land on identical
+    # row order (see `_filter_years`'s emb_row-based reindex).
+    if cls_variant is not None:
+        _, cls_variant = _filter_years(meta, cls_variant, years)
     meta, cls_features = _filter_years(meta, cls_features, years)
     logger.info(f"Filtered to {years[0]}-{years[1]}: {meta.height} rows")
 
@@ -227,16 +315,23 @@ def apply_ica_ldc(
     if limit is not None:
         meta = meta.head(limit)
         cls_features = cls_features[:limit]
+        if cls_variant is not None:
+            cls_variant = cls_variant[:limit]
         logger.info(f"Limited to {limit} rows")
 
     # Load IcaModel
     logger.info("Loading IcaModel")
-    model = IcaModel()
-    assert_scoring_integrity(model, cls_features)
+    if rel_variant is not None:
+        model = IcaModel(head_feature_sources={"us": "base", "cca": "base", "rel": rel_variant})
+        features_for_model = {"base": cls_features, rel_variant: cls_variant}
+    else:
+        model = IcaModel()
+        features_for_model = cls_features
+    assert_scoring_integrity(model, features_for_model)
 
     # Run predictions (with ML US gate initially)
     logger.info("Running predictions on LDC corpus")
-    result = model.predict_ica_from_features(cls_features)
+    result = model.predict_ica_from_features(features_for_model)
 
     # Load gold dateline us_label (join by id)
     logger.info(f"Loading gold US labels from {config.US_FILTER_LABELED_PARQUET}")
@@ -265,7 +360,9 @@ def apply_ica_ldc(
 
     # Re-score with gate_override
     logger.info("Applying gold-first US gate to ICA scores")
-    result_gated = model.predict_ica_from_features(cls_features, gate_override=final_gate_array)
+    result_gated = model.predict_ica_from_features(
+        features_for_model, gate_override=final_gate_array
+    )
 
     # Determine gate source (gold vs ml for each row)
     gate_source = [
@@ -321,6 +418,7 @@ def main(
     limit: int | None = None,
     out_name: str | None = None,
     years: tuple[int, int] | None = None,
+    rel_variant: str | None = None,
 ) -> None:
     """Apply IcaModel over API or LDC corpus.
 
@@ -330,6 +428,8 @@ def main(
         limit: optional row limit for smoke testing
         out_name: candidates filename (default: the per-corpus legacy name)
         years: optional inclusive (lo, hi) year restriction (LDC default 1996-2007)
+        rel_variant: optional rel-branch CLS variant tag (see `apply_ica_api`).
+            Default `None` = legacy shared-features scoring.
     """
     logging.basicConfig(level=logging.INFO)
 
@@ -338,11 +438,11 @@ def main(
 
     if corpus == "api":
         apply_ica_api(cache_suffix=cache_suffix, limit=limit,
-                      out_name=out_name, years=years)
+                      out_name=out_name, years=years, rel_variant=rel_variant)
     elif corpus == "ldc":
         ldc_kwargs = {} if years is None else {"years": years}
         apply_ica_ldc(cache_suffix=cache_suffix, limit=limit,
-                      out_name=out_name, **ldc_kwargs)
+                      out_name=out_name, rel_variant=rel_variant, **ldc_kwargs)
     else:
         raise ValueError(f"Unknown corpus: {corpus}")
 
@@ -385,6 +485,16 @@ def build_arg_parser() -> argparse.ArgumentParser:
         help="Inclusive year range 'LO-HI' to score (default: whole cache for "
              "api, 1996-2007 for ldc)",
     )
+    parser.add_argument(
+        "--rel-variant",
+        type=str,
+        default=None,
+        help="rel-branch CLS variant tag to read from the SAME cache dir "
+             "(shard_*_cls.<tag>.npy; branched-encoder apply, "
+             "docs/design-plans/2026-08-18-stage4-joint-finetune.md). Default: "
+             "None = legacy shared-features scoring. When set, IcaModel is "
+             "built with head_feature_sources={'us':'base','cca':'base','rel':<tag>}.",
+    )
     return parser
 
 
@@ -400,4 +510,5 @@ if __name__ == "__main__":
         limit=args.limit,
         out_name=args.out_name,
         years=years,
+        rel_variant=args.rel_variant,
     )

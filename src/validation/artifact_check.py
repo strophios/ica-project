@@ -46,7 +46,8 @@ def reload_and_score_ica(
     cca_weights: Path | str,
     rel_weights: Path | str,
     fusion_path: Path | str,
-    features: np.ndarray,
+    features,
+    head_feature_sources: dict[str, str] | None = None,
 ) -> dict:
     """Load ICA artifact triple (3 heads + calibrators + fusion) and score features cross-process.
 
@@ -62,7 +63,13 @@ def reload_and_score_ica(
         cca_weights: Path to CCA head weights (.weights.h5)
         rel_weights: Path to relevance head weights (.weights.h5)
         fusion_path: Path to fusion config (.fusion.json)
-        features: shape (n, 768) float32 array of CLS embeddings
+        features: legacy — shape (n, 768) float32 array of CLS embeddings.
+            Sources mode (`head_feature_sources` set) — dict[source_tag,
+            (n, 768) array] (see `IcaModel.predict_ica_from_features`).
+        head_feature_sources: optional dict[str, str], head name -> CLS
+            source tag, threaded through to `IcaModel`'s constructor
+            (branched-encoder apply, `docs/design-plans/2026-08-18-stage4-joint-finetune.md`).
+            `None` (default) = legacy shared-feature mode, unchanged behavior.
 
     Returns:
         dict with keys:
@@ -90,6 +97,7 @@ def reload_and_score_ica(
         cca_weights_path=cca_weights,
         rel_weights_path=rel_weights,
         fusion_path=fusion_path,
+        head_feature_sources=head_feature_sources,
     )
 
     # Use the fresh model's predict_ica_from_features to score

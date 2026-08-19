@@ -36,13 +36,15 @@ import polars as pl
 import keras
 import tensorflow as tf
 
+import src.cca_config as cca_config
 import src.config as config
 from src.data_setup.data import data_from_parquet
 from src.preproc.preprocessor import ClassifierPreprocessor
-from src.model_setup.backbone import load_dapt_backbone, resolve_backbone_path
+from src.model_setup.backbone import build_grafted_backbone, load_dapt_backbone, resolve_backbone_path
 from src.model_setup.heads import ClassificationHead
 from src.model_setup.assembly import build_inference_model
 from src.us_config import UsRunConfig, config_path_for_weights
+from src.extract_tuned_backbone import expected_tuned_groups
 
 
 # ---------------------------------------------------------------------------
@@ -117,6 +119,96 @@ def dedupe_by_id(df: pl.DataFrame) -> pl.DataFrame:
     )
 
 
+def _stat_path(p: Path) -> dict:
+    """Pure-ish (filesystem read-only): path/exists/size/mtime stat record,
+    the shared provenance leaf used for every weights-file reference (base
+    backbone, override, US weights, branch donors)."""
+    p = Path(p)
+    return {"path": str(p), "exists": p.exists(),
+            "size": p.stat().st_size if p.exists() else None,
+            "mtime": int(p.stat().st_mtime) if p.exists() else None}
+
+
+def parse_branch_spec(raw: str) -> tuple[str, str, int]:
+    """Pure: parse one `--branch` CLI value into `(variant, donor_path, top_n)`.
+
+    Syntax: `<variant>=<donor_path>[:<top_n>]`; `top_n` defaults to 1 (the
+    deployed rel-branch donor, `relevance/tuned_backbone.job8823087.weights.h5`,
+    was trained with top-1 unfreeze and is a backbone-only file with no
+    `RunConfig` sidecar to read it from -- see `_resolve_branch_groups`).
+    If `donor_path` itself contains a `:` (unusual on POSIX), the LAST `:`
+    is taken as the top_n separator.
+    """
+    if "=" not in raw:
+        raise ValueError(
+            f"invalid --branch spec {raw!r}: expected '<variant>=<donor_path>[:<top_n>]'"
+        )
+    variant, rest = raw.split("=", 1)
+    variant = variant.strip()
+    if not variant:
+        raise ValueError(f"invalid --branch spec {raw!r}: empty variant name")
+    if ":" in rest:
+        donor_path, top_n_str = rest.rsplit(":", 1)
+        try:
+            top_n = int(top_n_str)
+        except ValueError as e:
+            raise ValueError(
+                f"invalid --branch spec {raw!r}: top_n {top_n_str!r} is not an int"
+            ) from e
+    else:
+        donor_path, top_n = rest, 1
+    if not donor_path:
+        raise ValueError(f"invalid --branch spec {raw!r}: empty donor path")
+    return variant, donor_path, top_n
+
+
+def parse_branch_specs(raw_list: list[str] | None) -> dict[str, tuple[str, int]]:
+    """Pure: parse repeated `--branch` values into `{variant: (donor_path, top_n)}`.
+
+    Raises on a duplicate variant tag (ambiguous: which donor wins?) or a
+    variant colliding with a base output key (`"cls"`/`"us"`).
+    """
+    if not raw_list:
+        return {}
+    specs: dict[str, tuple[str, int]] = {}
+    for raw in raw_list:
+        variant, donor_path, top_n = parse_branch_spec(raw)
+        if variant in ("cls", "us"):
+            raise ValueError(
+                f"--branch variant {variant!r} collides with a base output key "
+                f"('cls'/'us')"
+            )
+        if variant in specs:
+            raise ValueError(f"duplicate --branch variant {variant!r}")
+        specs[variant] = (donor_path, top_n)
+    return specs
+
+
+def _resolve_branch_groups(donor_path: Path, top_n: int | None) -> tuple[set[str], int]:
+    """Resolve which backbone layer groups a branch donor tunes.
+
+    `top_n` explicit (not `None`): `expected_tuned_groups(top_n)` directly.
+    `top_n` is `None`: fall back to the donor's own `.config.json` sidecar
+    (a `cca_config.RunConfig`'s `unfreeze_top_n`) when one exists alongside
+    it. Raises `ValueError` if neither is available -- a bare backbone-only
+    donor (e.g. `extract_tuned_backbone.py`'s output, which is NOT a full
+    training artifact and carries no sidecar) can't be resolved without an
+    explicit top_n.
+    """
+    if top_n is not None:
+        return expected_tuned_groups(top_n), top_n
+    donor_path = Path(donor_path)
+    cfg_path = cca_config.config_path_for_weights(donor_path)
+    if cfg_path.exists():
+        run_config = cca_config.RunConfig.from_json(cfg_path)
+        return expected_tuned_groups(run_config.unfreeze_top_n), run_config.unfreeze_top_n
+    raise ValueError(
+        f"no explicit top_n given and no RunConfig sidecar found at {cfg_path} "
+        f"for donor {donor_path} -- pass an explicit top_n "
+        f"(--branch <variant>=<donor_path>:<top_n>)"
+    )
+
+
 def provenance_record(
     *,
     backbone_weights: Path,
@@ -146,19 +238,14 @@ def provenance_record(
     non-default backbone was requested, independent of what `backbone_weights`
     resolved to.
     """
-    def _stat(p: Path) -> dict:
-        return {"path": str(p), "exists": p.exists(),
-                "size": p.stat().st_size if p.exists() else None,
-                "mtime": int(p.stat().st_mtime) if p.exists() else None}
-
     return {
-        "backbone_weights": _stat(Path(backbone_weights)),
+        "backbone_weights": _stat_path(Path(backbone_weights)),
         "backbone_weights_override": (
-            _stat(Path(backbone_weights_override))
+            _stat_path(Path(backbone_weights_override))
             if backbone_weights_override is not None
             else None
         ),
-        "us_weights": _stat(Path(us_weights)),
+        "us_weights": _stat_path(Path(us_weights)),
         "seq_length": seq_length,
         "text_channel": text_channel,
         "stamp": stamp,
@@ -177,8 +264,30 @@ def _shard_paths(cache_dir: Path, idx: int) -> tuple[Path, Path]:
             cache_dir / f"shard_{idx:03d}_meta.parquet")
 
 
-def write_shard(cache_dir: Path, idx: int, cls: np.ndarray, meta: pl.DataFrame) -> None:
-    """Write one row-aligned shard (CLS matrix + metadata)."""
+def _variant_shard_path(cache_dir: Path, idx: int, variant: str) -> Path:
+    """Per-variant CLS array path for one shard: DOTTED (`shard_000_cls.<variant>.npy`,
+    e.g. `shard_000_cls.rel_branch.npy`), distinct from the base
+    `shard_000_cls.npy` -- must never end in the bare `_cls.npy` suffix, which
+    would corrupt the append-mode shard-offset glob (see `_count_existing_shards`)."""
+    return cache_dir / f"shard_{idx:03d}_cls.{variant}.npy"
+
+
+def write_shard(
+    cache_dir: Path,
+    idx: int,
+    cls: np.ndarray,
+    meta: pl.DataFrame,
+    variants: dict[str, np.ndarray] | None = None,
+) -> None:
+    """Write one row-aligned shard (CLS matrix + metadata).
+
+    `variants`: optional extra per-shard CLS arrays (branched-embed stage-4,
+    `docs/design-plans/2026-08-18-stage4-joint-finetune.md`), e.g. a
+    grafted-backbone's CLS vectors for a `rel_branch` variant. Each array
+    must row-align with `cls`/`meta`, same as the base array. `None`
+    (default) writes exactly the two files this function always wrote --
+    byte-identical prior behavior.
+    """
     if cls.shape[0] != meta.height:
         raise ValueError(
             f"shard {idx}: cls rows {cls.shape[0]} != meta rows {meta.height}"
@@ -186,6 +295,17 @@ def write_shard(cache_dir: Path, idx: int, cls: np.ndarray, meta: pl.DataFrame) 
     cls_path, meta_path = _shard_paths(cache_dir, idx)
     np.save(cls_path, cls.astype(np.float32, copy=False))
     meta.write_parquet(meta_path)
+    if variants:
+        for variant, arr in variants.items():
+            if arr.shape[0] != meta.height:
+                raise ValueError(
+                    f"shard {idx}: variant {variant!r} rows {arr.shape[0]} != "
+                    f"meta rows {meta.height}"
+                )
+            np.save(
+                _variant_shard_path(cache_dir, idx, variant),
+                arr.astype(np.float32, copy=False),
+            )
 
 
 def load_cache_meta(cache_dir: Path) -> pl.DataFrame:
@@ -203,11 +323,21 @@ def load_cache_meta(cache_dir: Path) -> pl.DataFrame:
     return pl.concat([pl.read_parquet(p) for p in metas]).with_row_index("emb_row")
 
 
-def load_cache(cache_dir: Path) -> tuple[pl.DataFrame, np.ndarray]:
+def load_cache(
+    cache_dir: Path, variant: str | None = None
+) -> tuple[pl.DataFrame, np.ndarray]:
     """Load all shards in order; return (meta, cls) with a contiguous `emb_row`.
 
     `meta` carries the shard columns plus `emb_row` (0..N-1), the row index into
     the returned `cls` matrix. Raises if no shards or if a shard is misaligned.
+
+    `variant`: `None` (default) returns the base CLS array -- byte-identical
+    to prior behavior, the two-tuple contract every existing caller relies on.
+    Passing a variant name returns that variant's CLS array instead (same
+    `meta`/alignment), concatenated across shards in the same order. A shard
+    missing that variant's array raises `FileNotFoundError` naming the shard
+    (a legacy or partially-branched cache must fail loudly, not silently mix
+    variant and base rows).
     """
     cache_dir = Path(cache_dir)
     metas = sorted(cache_dir.glob("shard_*_meta.parquet"))
@@ -216,7 +346,15 @@ def load_cache(cache_dir: Path) -> tuple[pl.DataFrame, np.ndarray]:
     meta_parts, cls_parts = [], []
     for meta_path in metas:
         idx = int(meta_path.name.split("_")[1])
-        cls_path, _ = _shard_paths(cache_dir, idx)
+        if variant is None:
+            cls_path, _ = _shard_paths(cache_dir, idx)
+        else:
+            cls_path = _variant_shard_path(cache_dir, idx, variant)
+        if not cls_path.exists():
+            variant_desc = f"variant {variant!r} " if variant is not None else ""
+            raise FileNotFoundError(
+                f"shard {idx}: missing {variant_desc}cls array at {cls_path}"
+            )
         m = pl.read_parquet(meta_path)
         c = np.load(cls_path)
         if c.shape[0] != m.height:
@@ -228,11 +366,30 @@ def load_cache(cache_dir: Path) -> tuple[pl.DataFrame, np.ndarray]:
     return meta, cls
 
 
+def _count_existing_shards(cache_dir: Path) -> int:
+    """Count already-written shards for append-mode shard-offset resolution.
+
+    Counts meta parquets (one per shard, unambiguous), NOT a `_cls.npy` glob
+    -- the brief-identified fragility this replaces: a per-variant array
+    (`shard_000_cls.<variant>.npy`) doesn't actually match `shard_*_cls.npy`
+    (glob `*` doesn't span the required literal `_cls.npy` tail when a
+    `.<variant>` segment sits in between), but counting the one-per-shard
+    meta file is the unambiguous source of truth regardless. Behavior-
+    identical to the old glob for any well-formed (non-branched) cache.
+    """
+    return len(list(Path(cache_dir).glob("shard_*_meta.parquet")))
+
+
 # ---------------------------------------------------------------------------
 # Imperative shell
 # ---------------------------------------------------------------------------
-def _build_embed_model(us_weights: Path, backbone_weights: Path | str | None = None):
-    """Build a dual-output model {cls, us_logit} on the weighted DAPT backbone + US head.
+def _build_embed_model(
+    us_weights: Path,
+    backbone_weights: Path | str | None = None,
+    branch_specs: dict[str, tuple[str, int | None]] | None = None,
+):
+    """Build a model {cls, us_logit, [cls.<variant>, ...]} on the weighted DAPT
+    backbone + US head, plus one grafted branch backbone per `branch_specs` entry.
 
     Mirrors slice_eval.apply_us_model's Pattern-2 construction (load UsRunConfig
     sidecar, fresh head, build_inference_model, load_weights) but taps the CLS
@@ -246,8 +403,27 @@ def _build_embed_model(us_weights: Path, backbone_weights: Path | str | None = N
     US head's weights are always loaded from `us_weights` regardless -- only
     the encoder producing the CLS vector / us_logit input changes.
 
-    Returns `(model, us_cfg, backbone_path)` -- `backbone_path` is the
-    resolved path actually loaded, for provenance.
+    `branch_specs`: optional `{variant: (donor_weights_path, top_n)}` (stage-4
+    branched embed model, `docs/design-plans/2026-08-18-stage4-joint-finetune.md`).
+    Each variant gets its OWN grafted backbone instance (base backbone + the
+    donor's top-`top_n` transformer layers, via `build_grafted_backbone`),
+    run through the SAME tokenization inputs as the base backbone (one
+    tokenization pass, two-plus encoder passes). The US head always reads the
+    BASE cls (`ica_fusion`'s deployed config keeps `us` on `"base"`).
+
+    Ordering: branch backbones are constructed AFTER the us-weights load and
+    the base-override reapplication below -- same rule as the
+    "CRITICAL ORDER FIX" comment on the base override (a branch backbone is a
+    separate instance, not wired into `inf`, so it can't be clobbered by
+    `inf.load_weights`, but keeping every backbone-resolution step in this
+    one place, in this order, avoids relying on that instance-identity
+    argument holding forever).
+
+    Returns `(model, us_cfg, backbone_path, branch_provenance)` --
+    `backbone_path` is the resolved base-backbone path actually loaded, for
+    provenance. `branch_provenance` is `{variant: {"donor": _stat_path(...),
+    "groups": [...], "unfreeze_top_n": ..., "graft_verification": {...}}}`
+    (empty dict when `branch_specs` is `None`/empty).
     """
     us_cfg = UsRunConfig.from_json(config_path_for_weights(us_weights))
     us_head = ClassificationHead(hidden_dim=us_cfg.head.hidden_dim, name=us_cfg.head.name)
@@ -276,17 +452,39 @@ def _build_embed_model(us_weights: Path, backbone_weights: Path | str | None = N
     # the one that embeds.
     if backbone_weights is not None:
         backbone.load_weights(str(backbone_path), skip_mismatch=False)
-    # Dual-output graph on the now-weighted instances.
+
+    # Branch backbones (stage-4 branched embed model): built AFTER the
+    # us-weights load + base-override reapplication above -- see the
+    # ordering note in this function's docstring.
+    branch_backbones: dict[str, object] = {}
+    branch_provenance: dict[str, dict] = {}
+    for variant, (donor_path_raw, top_n) in (branch_specs or {}).items():
+        donor_path = Path(donor_path_raw)
+        groups, resolved_top_n = _resolve_branch_groups(donor_path, top_n)
+        branch_backbone, diffs = build_grafted_backbone(backbone_path, donor_path, groups)
+        branch_backbones[variant] = branch_backbone
+        branch_provenance[variant] = {
+            "donor": _stat_path(donor_path),
+            "groups": sorted(groups),
+            "unfreeze_top_n": resolved_top_n,
+            "graft_verification": diffs,
+        }
+
+    # Output graph on the now-weighted instances.
     tok = keras.Input(shape=(us_cfg.seq_length,), dtype="int32", name="token_ids")
     pad = keras.Input(shape=(us_cfg.seq_length,), dtype="int32", name="padding_mask")
     seq_out = backbone({"token_ids": tok, "padding_mask": pad})
     cls = seq_out[:, 0, :]
     us_logit = us_head(cls)
+    outputs = {"cls": cls, "us": us_logit}
+    for variant, branch_backbone in branch_backbones.items():
+        branch_seq_out = branch_backbone({"token_ids": tok, "padding_mask": pad})
+        outputs[f"cls.{variant}"] = branch_seq_out[:, 0, :]
     model = keras.Model(
         inputs={"token_ids": tok, "padding_mask": pad},
-        outputs={"cls": cls, "us": us_logit},
+        outputs=outputs,
     )
-    return model, us_cfg, backbone_path
+    return model, us_cfg, backbone_path, branch_provenance
 
 
 def main(
@@ -309,6 +507,7 @@ def main(
     backbone_weights=None,
     lead_fallback_column=None,
     dedupe_ids=False,
+    branch_specs=None,
 ):
     keras.config.set_dtype_policy(config.DTYPE_POLICY)
     keras.utils.set_random_seed(200)
@@ -318,7 +517,7 @@ def main(
     # Append mode (split a big embed into parts that share one cache): continue
     # shard numbering after the shards already present, so a later run extends the
     # same canonical cache rather than overwriting shard_000.
-    shard_offset = len(list(cache_dir.glob("shard_*_cls.npy"))) if append else 0
+    shard_offset = _count_existing_shards(cache_dir) if append else 0
 
     # Load corpus (id, headline, <lead_column>, [year], [label_column],
     # headline_with_lead). The API corpus carries `year`; the LDC corpus partitions
@@ -378,9 +577,11 @@ def main(
     print(f"Embedding {selected.height} articles "
           f"(included={n_included}, sample_n={sample_n}, full={full})")  # LOG
 
-    model, us_cfg, backbone_path = _build_embed_model(
-        config.US_FILTER_CLASSIFIER_WEIGHTS, backbone_weights=backbone_weights
+    model, us_cfg, backbone_path, branch_provenance = _build_embed_model(
+        config.US_FILTER_CLASSIFIER_WEIGHTS, backbone_weights=backbone_weights,
+        branch_specs=branch_specs,
     )
+    variant_names = list(branch_provenance.keys())
     preproc = ClassifierPreprocessor(
         SEQ_LENGTH=us_cfg.seq_length, text_key=us_cfg.text_key,
         label_keys={}, endpoint_model=True, target_dtype=us_cfg.target_dtype,
@@ -401,6 +602,14 @@ def main(
         preds = model.predict(ds, verbose=0)
         cls = np.asarray(preds["cls"], dtype=np.float32)
         us_logit = np.asarray(preds["us"], dtype=np.float32).reshape(-1)
+        variant_arrays = {}
+        for variant in variant_names:
+            arr = np.asarray(preds[f"cls.{variant}"], dtype=np.float32)
+            if not np.isfinite(arr).all():
+                raise ValueError(
+                    f"shard {idx}: non-finite embeddings for variant {variant!r}"
+                )
+            variant_arrays[variant] = arr
         if not np.isfinite(cls).all() or not np.isfinite(us_logit).all():
             raise ValueError(f"shard {idx}: non-finite embeddings/logits produced")
         meta_cols = ["id"] + (["year"] if include_year else [])
@@ -409,11 +618,15 @@ def main(
         meta = chunk.select(meta_cols).with_columns(
             pl.Series("us_logit", us_logit)
         )
-        write_shard(cache_dir, shard_offset + idx, cls, meta)
+        write_shard(cache_dir, shard_offset + idx, cls, meta, variants=variant_arrays or None)
         # Vigilance spot-check, per shard.
+        variant_std = " ".join(
+            f"cls_std.{v}={variant_arrays[v].std():.4f}" for v in variant_names
+        )
         print(f"  shard {shard_offset + idx}: rows={cls.shape[0]} "
               f"cls_std={float(cls.std()):.4f} us_logit[min/mean/max]="
-              f"{us_logit.min():.2f}/{us_logit.mean():.2f}/{us_logit.max():.2f}")  # LOG
+              f"{us_logit.min():.2f}/{us_logit.mean():.2f}/{us_logit.max():.2f}"
+              + (f" {variant_std}" if variant_std else ""))  # LOG
 
     prov = provenance_record(
         backbone_weights=backbone_path,
@@ -428,6 +641,7 @@ def main(
     prov["lead_fallback_column"] = lead_fallback_column
     prov["label_column"] = label_column
     prov["dedupe_ids"] = dedupe_ids
+    prov["branches"] = branch_provenance
     (cache_dir / f"provenance.{shard_offset:03d}.json").write_text(
         json.dumps(prov, indent=2)
     )
@@ -480,6 +694,12 @@ def build_arg_parser() -> argparse.ArgumentParser:
                     help="backbone .weights.h5 to load instead of the US sidecar's own "
                          "backbone_weights_path (e.g. a fine-tuned backbone from "
                          "extract_tuned_backbone.py). Default: unchanged prior behavior.")
+    ap.add_argument("--branch", action="append", default=None,
+                    help="variant=donor_backbone_weights[:top_n] (repeatable): grafts the "
+                         "donor's top-N transformer layers onto the base backbone, adding "
+                         "a cls.<variant> array to every shard (stage-4 branched embed "
+                         "model). top_n defaults to 1. E.g. --branch "
+                         "rel_branch=../relevance/tuned_backbone.job8823087.weights.h5:1")
     return ap
 
 
@@ -501,4 +721,5 @@ if __name__ == "__main__":
         backbone_weights=args.backbone_weights,
         lead_fallback_column=args.lead_fallback_column,
         dedupe_ids=args.dedupe_ids,
+        branch_specs=parse_branch_specs(args.branch),
     )

@@ -77,8 +77,8 @@ from sklearn.metrics import roc_auc_score  # noqa: E402
 import src.config as config  # noqa: E402
 from src.calibration.sidecar import calibration_path_for_weights, load_calibration  # noqa: E402
 from src.embed_corpus import load_cache  # noqa: E402
-from src.extract_tuned_backbone import expected_tuned_groups, layer_diff_summary  # noqa: E402
-from src.model_setup.backbone import load_dapt_backbone  # noqa: E402
+from src.extract_tuned_backbone import expected_tuned_groups  # noqa: E402
+from src.model_setup.backbone import build_grafted_backbone, load_dapt_backbone  # noqa: E402
 from src.preproc.preprocessor import ClassifierPreprocessor  # noqa: E402
 from src.validation.relevance_slice_eval import apply_relevance_model  # noqa: E402
 from scripts.eval_rel_text_artifact import diaspora_slice_metrics, own_terms_metrics  # noqa: E402
@@ -277,38 +277,26 @@ def extract_cls(backbone, texts: list[str], batch_size: int = 64) -> np.ndarray:
 def build_graft_backbone():
     """Load DAPT, tuned, and grafted backbones.
 
-    Graft mechanics: a fresh pristine-DAPT instance with ONLY
-    `TOP_LAYER_GROUP`'s weights overwritten from the tuned backbone (Pattern
-    A in-process mutation -- the CLS-extraction model built from `graft`
-    afterward reads the mutated instance).
+    Graft mechanics + verification now live in
+    `src.model_setup.backbone.build_grafted_backbone` (promoted 2026-08-19
+    for the stage-4 branched embed model,
+    `docs/design-plans/2026-08-18-stage4-joint-finetune.md`) -- this wraps
+    it for a single-group graft and keeps the original `dapt`/`tuned`
+    instances around for this script's own leg reports.
 
     Returns `(dapt, tuned, graft, diff_vs_dapt, diff_vs_tuned)` -- the two
-    diff summaries are `layer_diff_summary` per-group max|delta| tables
-    (`src.extract_tuned_backbone`), verifying the graft differs from DAPT
-    ONLY in `TOP_LAYER_GROUP` and matches the tuned backbone EXACTLY
-    (0.0 delta) there.
+    diff summaries are `layer_diff_summary` per-group max|delta| tables,
+    verifying the graft differs from DAPT ONLY in `TOP_LAYER_GROUP` and
+    matches the tuned backbone EXACTLY (0.0 delta) there (now enforced by
+    `build_grafted_backbone` itself -- a hard `ValueError` on violation,
+    where this used to just report the numbers for eyeballing).
     """
     dapt = load_dapt_backbone(DAPT_BACKBONE_WEIGHTS)
     tuned = load_dapt_backbone(TUNED_BACKBONE_WEIGHTS)
-    graft = load_dapt_backbone(DAPT_BACKBONE_WEIGHTS)
-
-    dapt_paths = [w.path for w in dapt.weights]
-    tuned_paths = [w.path for w in tuned.weights]
-    graft_paths = [w.path for w in graft.weights]
-    if not (dapt_paths == tuned_paths == graft_paths):
-        raise ValueError("backbone weight ordering diverged across the three instances")
-
-    graft.get_layer(TOP_LAYER_GROUP).set_weights(
-        tuned.get_layer(TOP_LAYER_GROUP).get_weights()
+    graft, diffs = build_grafted_backbone(
+        DAPT_BACKBONE_WEIGHTS, TUNED_BACKBONE_WEIGHTS, {TOP_LAYER_GROUP}
     )
-
-    dapt_arrays = [np.asarray(w.numpy()) for w in dapt.weights]
-    tuned_arrays = [np.asarray(w.numpy()) for w in tuned.weights]
-    graft_arrays = [np.asarray(w.numpy()) for w in graft.weights]
-
-    diff_vs_dapt = layer_diff_summary(graft_paths, graft_arrays, dapt_arrays)
-    diff_vs_tuned = layer_diff_summary(graft_paths, graft_arrays, tuned_arrays)
-    return dapt, tuned, graft, diff_vs_dapt, diff_vs_tuned
+    return dapt, tuned, graft, diffs["vs_base"], diffs["vs_donor"]
 
 
 def score_rel_head(cls: np.ndarray, weights_path: Path) -> np.ndarray:

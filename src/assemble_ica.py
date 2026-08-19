@@ -57,25 +57,52 @@ class IcaModel:
 
     def __init__(
         self,
-        us_weights_path=config.US_FILTER_FULL_WEIGHTS,
-        cca_weights_path=config.CCA_DOCA_WEIGHTS,
-        rel_weights_path=config.PROJECT_ROOT / "relevance" / "relevance.weights.h5",
+        us_weights_path=None,
+        cca_weights_path=None,
+        rel_weights_path=None,
         fusion_path=None,
+        head_feature_sources=None,
     ):
         """Load configs, construct heads, transfer weights, assemble model.
 
         Args:
-            us_weights_path: path to US head weights (features-mode, head-only)
-            cca_weights_path: path to CCA head weights (features-mode, head-only)
-            rel_weights_path: path to relevance head weights (features-mode, head-only)
+            us_weights_path: path to US head weights (features-mode, head-only).
+                None (default) resolves to `config.US_FILTER_FULL_WEIGHTS`,
+                read from `src.config` AT CALL TIME (not baked in at import
+                time) -- so `mock.patch("src.assemble_ica.config")` works.
+            cca_weights_path: path to CCA head weights (features-mode, head-only).
+                None (default) resolves to `config.CCA_DOCA_WEIGHTS`.
+            rel_weights_path: path to relevance head weights (features-mode,
+                head-only). None (default) resolves to `config.RELEVANCE_DOCA_WEIGHTS`.
             fusion_path: path to fusion config (.fusion.json); if None, defaults to
                          config.CCA_DOCA_DIR / "ica_fusion.fusion.json"
+            head_feature_sources: optional `dict[str, str]`, head name -> CLS
+                source tag (e.g. `{"us": "base", "cca": "base", "rel": "rel_branch"}`
+                for the branched-encoder apply path,
+                `docs/design-plans/2026-08-18-stage4-joint-finetune.md`). `None`
+                (default) = legacy single shared feature matrix. When set, the
+                fusion sidecar's own `head_feature_sources` (if present) is
+                cross-checked against this value.
 
         Raises:
-            ValueError: if head configs don't load, or weight transfer fails
+            ValueError: if head configs don't load, weight transfer fails, or
+                head_feature_sources doesn't match the fusion sidecar's record
             FileNotFoundError: if weights, config sidecars, or fusion config don't exist
         """
         from src.cca_config import config_path_for_weights
+
+        # Resolve None sentinels from src.config AT CALL TIME. Prior versions
+        # bound these as literal default-argument expressions (evaluated once
+        # at module-import time), which silently defeated
+        # `mock.patch("src.assemble_ica.config")` in tests -- a bare
+        # `IcaModel()` call would load the real production artifacts instead
+        # of whatever the test pointed `config` at.
+        if us_weights_path is None:
+            us_weights_path = config.US_FILTER_FULL_WEIGHTS
+        if cca_weights_path is None:
+            cca_weights_path = config.CCA_DOCA_WEIGHTS
+        if rel_weights_path is None:
+            rel_weights_path = config.RELEVANCE_DOCA_WEIGHTS
 
         # Convert to Path for consistency
         us_weights_path = str(us_weights_path)
@@ -86,6 +113,8 @@ class IcaModel:
         if fusion_path is None:
             fusion_path = config.CCA_DOCA_DIR / "ica_fusion.fusion.json"
         fusion_path = str(fusion_path)
+
+        self.head_feature_sources = head_feature_sources
 
         logger.info("Constructing IcaModel: loading configs and heads")
 
@@ -168,6 +197,7 @@ class IcaModel:
                 "rel": self.rel_head,
             },
             hidden_dim=768,  # Shared CLS feature dimension
+            feature_sources=head_feature_sources,
         )
 
         # ====================================================================
@@ -202,15 +232,102 @@ class IcaModel:
             f"composed_platt={'fitted' if self.fusion_config.composed_platt else 'not fitted'}"
         )
 
+        # Cross-check: when the constructor was given explicit sources AND the
+        # fusion sidecar records its own (non-None), they must agree -- a
+        # branched-encoder apply must score with the same sources the fusion
+        # combiner/calibration was fit on. Fusion without the field (None) =
+        # no check (back-compat with fusion sidecars predating this feature).
+        if head_feature_sources is not None and self.fusion_config.head_feature_sources is not None:
+            if head_feature_sources != self.fusion_config.head_feature_sources:
+                raise ValueError(
+                    f"head_feature_sources mismatch: IcaModel was constructed "
+                    f"with {head_feature_sources!r}, but the fusion sidecar "
+                    f"({fusion_path}) records {self.fusion_config.head_feature_sources!r}. "
+                    f"The two must agree -- the fusion combiner/calibration was "
+                    f"fit on scores produced by its recorded sources."
+                )
+
         logger.info("IcaModel construction complete")
 
+    def _prepare_model_inputs(self, features) -> tuple[dict, int]:
+        """Validate `features` and build the model's `.predict()` input dict.
+
+        Legacy mode (`self.head_feature_sources is None`): `features` must be
+        a `(n, 768)` ndarray; returns `{"features": features}`.
+
+        Sources mode (`self.head_feature_sources` set): `features` must be a
+        `dict[source_tag, (n, 768) ndarray]` covering every tag the model
+        needs; returns `{"features_<tag>": arr, ...}`.
+
+        Returns:
+            (model_inputs, n_rows)
+
+        Raises:
+            ValueError: wrong container type for the configured mode, a
+                missing source tag, a non-2-D array, a hidden-dim mismatch,
+                or mismatched row counts across sources.
+        """
+        if self.head_feature_sources is None:
+            if isinstance(features, dict):
+                raise ValueError(
+                    "predict_ica_from_features received a dict, but this "
+                    "IcaModel has no head_feature_sources configured (legacy "
+                    "shared-feature mode expects a single (n, 768) array)."
+                )
+            features = np.asarray(features, dtype=np.float32)
+            if features.ndim != 2 or features.shape[1] != 768:
+                raise ValueError(
+                    f"features must have shape (n, 768), got {features.shape}"
+                )
+            return {"features": features}, features.shape[0]
+
+        if not isinstance(features, dict):
+            raise ValueError(
+                "predict_ica_from_features requires a dict[source_tag, "
+                "(n, 768) array] because this IcaModel was constructed with "
+                f"head_feature_sources={self.head_feature_sources!r}; got "
+                f"{type(features).__name__}."
+            )
+
+        needed_tags = sorted(set(self.head_feature_sources.values()))
+        missing = [t for t in needed_tags if t not in features]
+        if missing:
+            raise ValueError(
+                f"features dict is missing required source tag(s) {missing} "
+                f"(head_feature_sources={self.head_feature_sources!r})"
+            )
+
+        model_inputs = {}
+        n_rows = None
+        for tag in needed_tags:
+            arr = np.asarray(features[tag], dtype=np.float32)
+            if arr.ndim != 2 or arr.shape[1] != 768:
+                raise ValueError(
+                    f"features[{tag!r}] must have shape (n, 768), got {arr.shape}"
+                )
+            if n_rows is None:
+                n_rows = arr.shape[0]
+            elif arr.shape[0] != n_rows:
+                raise ValueError(
+                    f"features dict has mismatched row counts across sources: "
+                    f"tag {tag!r} has {arr.shape[0]} rows, expected {n_rows} "
+                    f"(all sources must be row-aligned)"
+                )
+            model_inputs[f"features_{tag}"] = arr
+
+        return model_inputs, n_rows
+
     def predict_ica_from_features(
-        self, features: np.ndarray, gate_override: np.ndarray | None = None
+        self, features, gate_override: np.ndarray | None = None
     ) -> dict:
         """Score cached CLS features, returning per-head probs + composed ICA score.
 
         Args:
-            features: shape (n, 768) float32 array of CLS embeddings
+            features: legacy mode (head_feature_sources=None, the default):
+                shape (n, 768) float32 array of CLS embeddings. Sources mode
+                (head_feature_sources set): dict[source_tag, (n, 768) array],
+                one entry per distinct tag the model's heads need, all
+                row-aligned.
             gate_override: optional shape (n,) boolean array override for the US gate.
                 When provided, use this as the survivor mask instead of (calib_us >= tau_us).
                 When None (default), use the ML US gate.
@@ -223,14 +340,10 @@ class IcaModel:
               - "ica_score": (n,) composed ICA score in [0, 1],
                   0.0 for gated-out rows, composed score for survivors
         """
-        features = np.asarray(features, dtype=np.float32)
-        if features.ndim != 2 or features.shape[1] != 768:
-            raise ValueError(
-                f"features must have shape (n, 768), got {features.shape}"
-            )
+        model_inputs, n_rows = self._prepare_model_inputs(features)
 
         # Run inference: dict of logits keyed by head name
-        logits_dict = self.model.predict({"features": features}, verbose=0)
+        logits_dict = self.model.predict(model_inputs, verbose=0)
 
         # Extract and calibrate per-head logits
         us_logits = logits_dict["us"].ravel()
@@ -244,9 +357,9 @@ class IcaModel:
         # Gate: survivors (ML or overridden)
         if gate_override is not None:
             gate_override = np.asarray(gate_override, dtype=bool)
-            if gate_override.shape[0] != features.shape[0]:
+            if gate_override.shape[0] != n_rows:
                 raise ValueError(
-                    f"gate_override shape {gate_override.shape[0]} does not match features shape {features.shape[0]}"
+                    f"gate_override shape {gate_override.shape[0]} does not match features row count {n_rows}"
                 )
             survivors = gate_override
         else:

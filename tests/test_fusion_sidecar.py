@@ -550,3 +550,80 @@ class TestComposedPlattAndHeadCalibrators:
             assert cfg_loaded.head_calibrators is None
             assert cfg_loaded.gate_threshold == 0.5
             assert cfg_loaded.combine == "product"
+
+
+class TestHeadFeatureSources:
+    """head_feature_sources: additive optional field for branched-encoder
+    apply (docs/design-plans/2026-08-18-stage4-joint-finetune.md)."""
+
+    def test_save_preserves_head_feature_sources(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            cfg = FusionConfig(
+                gate_threshold=0.5,
+                combine="product",
+                coefs=None,
+                score_space="prob",
+                includes_us=False,
+                head_feature_sources={"us": "base", "cca": "base", "rel": "rel_branch"},
+            )
+            path = Path(tmpdir) / "fusion.json"
+            save_fusion(cfg, path)
+            payload = json.loads(path.read_text())
+            assert payload["head_feature_sources"] == {
+                "us": "base", "cca": "base", "rel": "rel_branch"
+            }
+
+    def test_load_reconstructs_head_feature_sources(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            cfg_orig = FusionConfig(
+                gate_threshold=0.5,
+                combine="product",
+                coefs=None,
+                score_space="prob",
+                includes_us=False,
+                head_feature_sources={"us": "base", "cca": "base", "rel": "rel_branch"},
+            )
+            path = Path(tmpdir) / "fusion.json"
+            save_fusion(cfg_orig, path)
+            cfg_loaded = load_fusion(path)
+            assert cfg_loaded.head_feature_sources == {
+                "us": "base", "cca": "base", "rel": "rel_branch"
+            }
+            assert cfg_loaded == cfg_orig
+
+    def test_backward_compat_missing_head_feature_sources_loads_none(self):
+        """Old .fusion.json (no head_feature_sources key) loads with None —
+        the 'fusion without the field = no check' back-compat contract."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = Path(tmpdir) / "fusion.json"
+            old_payload = {
+                "gate_threshold": 0.5,
+                "combine": "product",
+                "coefs": None,
+                "score_space": "prob",
+                "includes_us": False,
+            }
+            path.write_text(json.dumps(old_payload))
+            cfg_loaded = load_fusion(path)
+            assert cfg_loaded.head_feature_sources is None
+
+    def test_default_head_feature_sources_is_none(self):
+        cfg = FusionConfig(
+            gate_threshold=0.5,
+            combine="product",
+            coefs=None,
+            score_space="prob",
+            includes_us=False,
+        )
+        assert cfg.head_feature_sources is None
+
+    def test_invalid_head_feature_sources_type_raises(self):
+        with pytest.raises(ValueError, match="head_feature_sources"):
+            FusionConfig(
+                gate_threshold=0.5,
+                combine="product",
+                coefs=None,
+                score_space="prob",
+                includes_us=False,
+                head_feature_sources=["not", "a", "dict"],
+            )

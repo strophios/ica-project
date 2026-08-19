@@ -481,7 +481,7 @@ def _mock_api_apply(mock_config, cache_dir, meta, cls_features, mock_load_cache,
     model_instance = mock_ica_model.return_value
 
     def predict(features, gate_override=None):
-        n = features.shape[0]
+        n = features.shape[0] if isinstance(features, np.ndarray) else next(iter(features.values())).shape[0]
         rng = np.random.default_rng(7)
         return {
             "us": rng.uniform(0, 1, n).astype(np.float32),
@@ -607,6 +607,303 @@ def test_apply_ica_parser_accepts_out_name_and_years():
     assert args.years == "1996-2025"
 
 
+def test_apply_ica_parser_rel_variant_defaults_none():
+    from src.apply_ica import build_arg_parser
+
+    args = build_arg_parser().parse_args(["--corpus", "api"])
+    assert args.rel_variant is None
+
+
+def test_apply_ica_parser_accepts_rel_variant():
+    from src.apply_ica import build_arg_parser
+
+    args = build_arg_parser().parse_args([
+        "--corpus", "api", "--rel-variant", "rel_branch",
+    ])
+    assert args.rel_variant == "rel_branch"
+
+
+# =============================================================================
+# Test: _load_rel_variant_cls against the REAL load_cache/write_shard
+# (embed_corpus's `variant=` support landed during this work; this is a
+# defense-in-depth layer beyond the monkeypatched apply_ica_api/ldc tests
+# below, which intentionally don't depend on it having landed).
+# =============================================================================
+
+
+def test_load_rel_variant_cls_real_write_shard_and_load_cache(tmp_path):
+    from src.apply_ica import _load_rel_variant_cls
+    from src.embed_corpus import write_shard, load_cache
+
+    meta = pl.DataFrame({"id": ["a", "b", "c"], "year": [1960, 1961, 1962]})
+    cls = np.random.randn(3, HIDDEN_DIM).astype(np.float32)
+    variant_cls = np.random.randn(3, HIDDEN_DIM).astype(np.float32)
+    write_shard(tmp_path, 0, cls, meta, variants={"rel_branch": variant_cls})
+
+    base_meta, base_cls = load_cache(tmp_path)
+    np.testing.assert_array_equal(base_cls, cls)
+
+    got_variant = _load_rel_variant_cls(tmp_path, "rel_branch", base_meta.height)
+    np.testing.assert_array_equal(got_variant, variant_cls)
+
+
+def test_load_rel_variant_cls_real_missing_variant_names_cache_and_tag(tmp_path):
+    from src.apply_ica import _load_rel_variant_cls
+    from src.embed_corpus import write_shard, load_cache
+
+    meta = pl.DataFrame({"id": ["a", "b"], "year": [1960, 1961]})
+    cls = np.random.randn(2, HIDDEN_DIM).astype(np.float32)
+    write_shard(tmp_path, 0, cls, meta)  # no variants written
+
+    base_meta, _ = load_cache(tmp_path)
+    with pytest.raises(FileNotFoundError) as exc_info:
+        _load_rel_variant_cls(tmp_path, "rel_branch", base_meta.height)
+    msg = str(exc_info.value)
+    assert "rel_branch" in msg
+    assert str(tmp_path) in msg
+
+
+# =============================================================================
+# Tests: --rel-variant cache-variant threading (branched-encoder apply)
+# =============================================================================
+
+
+@pytest.fixture
+def synthetic_cache_api_with_variant(synthetic_cache_api):
+    """Extends synthetic_cache_api with a second CLS array under a variant tag
+    — a real two-array shard on disk (`shard_000_cls.npy` +
+    `shard_000_cls.rel_branch.npy`), per the branched-cache-layout contract
+    (docs/design-plans/2026-08-18-stage4-joint-finetune.md 'Cache layout').
+    `load_cache` itself is still mocked in these tests (the other agent's
+    `variant=` support may not have landed) — these files exist so the mock's
+    behavior is grounded in a real on-disk shape, not an arbitrary stand-in."""
+    cache_dir, meta, cls_features = synthetic_cache_api
+    variant_tag = "rel_branch"
+    cls_variant = np.random.randn(meta.height, HIDDEN_DIM).astype(np.float32)
+    np.save(cache_dir / f"shard_000_cls.{variant_tag}.npy", cls_variant)
+    return cache_dir, meta, cls_features, cls_variant, variant_tag
+
+
+def _load_cache_side_effect_factory(meta, cls_features, cls_variant, variant_tag):
+    def _side_effect(cache_dir, variant=None):
+        if variant is None:
+            return meta, cls_features
+        if variant == variant_tag:
+            return meta, cls_variant
+        raise FileNotFoundError(
+            f"no shards found for variant {variant!r} in {cache_dir}"
+        )
+    return _side_effect
+
+
+def test_apply_ica_api_rel_variant_builds_sources_model_and_dict_features(
+    synthetic_cache_api_with_variant,
+):
+    """--rel-variant threads through: IcaModel is built with
+    head_feature_sources={'us':'base','cca':'base','rel':<tag>}, and
+    predict_ica_from_features is fed a dict keyed by those same tags,
+    row-aligned to the (unfiltered) cache."""
+    from src.apply_ica import apply_ica_api
+
+    cache_dir, meta, cls_features, cls_variant, variant_tag = synthetic_cache_api_with_variant
+
+    with mock.patch("src.apply_ica.config") as mock_config, \
+         mock.patch("src.apply_ica.load_cache") as mock_load_cache, \
+         mock.patch("src.apply_ica.IcaModel") as mock_ica_model, \
+         mock.patch("src.apply_ica.assert_scoring_integrity"):
+        model_instance = _mock_api_apply(
+            mock_config, cache_dir, meta, cls_features, mock_load_cache, mock_ica_model
+        )
+        mock_load_cache.side_effect = _load_cache_side_effect_factory(
+            meta, cls_features, cls_variant, variant_tag
+        )
+
+        apply_ica_api(cache_suffix="test_cache", rel_variant=variant_tag)
+
+        # IcaModel constructed with the sources mapping.
+        _, ctor_kwargs = mock_ica_model.call_args
+        assert ctor_kwargs["head_feature_sources"] == {
+            "us": "base", "cca": "base", "rel": variant_tag
+        }
+
+        # predict_ica_from_features fed a dict keyed "base"/<tag>, both full
+        # row count (no years/limit filter in this call).
+        (called_features,), _ = model_instance.predict_ica_from_features.call_args
+        assert isinstance(called_features, dict)
+        assert set(called_features.keys()) == {"base", variant_tag}
+        assert called_features["base"].shape == cls_features.shape
+        assert called_features[variant_tag].shape == cls_variant.shape
+        np.testing.assert_array_equal(called_features["base"], cls_features)
+        np.testing.assert_array_equal(called_features[variant_tag], cls_variant)
+
+
+def test_apply_ica_api_rel_variant_respects_years_filter_row_alignment(
+    synthetic_cache_api_with_variant,
+):
+    """years=(lo, hi) must filter BOTH the base and variant arrays to the
+    SAME rows, in the same order (they share meta/emb_row by construction)."""
+    from src.apply_ica import apply_ica_api
+
+    cache_dir, meta, cls_features, cls_variant, variant_tag = synthetic_cache_api_with_variant
+
+    with mock.patch("src.apply_ica.config") as mock_config, \
+         mock.patch("src.apply_ica.load_cache") as mock_load_cache, \
+         mock.patch("src.apply_ica.IcaModel") as mock_ica_model, \
+         mock.patch("src.apply_ica.assert_scoring_integrity"):
+        model_instance = _mock_api_apply(
+            mock_config, cache_dir, meta, cls_features, mock_load_cache, mock_ica_model
+        )
+        mock_load_cache.side_effect = _load_cache_side_effect_factory(
+            meta, cls_features, cls_variant, variant_tag
+        )
+
+        apply_ica_api(cache_suffix="test_cache", years=(1960, 1961), rel_variant=variant_tag)
+
+        expected_rows = meta.filter(pl.col("year").cast(pl.Int64).is_between(1960, 1961)).height
+        expected_emb_rows = meta.filter(
+            pl.col("year").cast(pl.Int64).is_between(1960, 1961)
+        )["emb_row"].to_numpy()
+
+        (called_features,), _ = model_instance.predict_ica_from_features.call_args
+        assert called_features["base"].shape[0] == expected_rows
+        assert called_features[variant_tag].shape[0] == expected_rows
+        np.testing.assert_array_equal(called_features["base"], cls_features[expected_emb_rows])
+        np.testing.assert_array_equal(
+            called_features[variant_tag], cls_variant[expected_emb_rows]
+        )
+
+
+def test_apply_ica_api_rel_variant_missing_file_raises_loudly(synthetic_cache_api):
+    """A missing variant array must fail loudly, naming the cache and tag —
+    never a silent fallback to the base array."""
+    from src.apply_ica import apply_ica_api
+
+    cache_dir, meta, cls_features = synthetic_cache_api
+
+    with mock.patch("src.apply_ica.config") as mock_config, \
+         mock.patch("src.apply_ica.load_cache") as mock_load_cache, \
+         mock.patch("src.apply_ica.IcaModel") as mock_ica_model, \
+         mock.patch("src.apply_ica.assert_scoring_integrity"):
+        _mock_api_apply(mock_config, cache_dir, meta, cls_features, mock_load_cache, mock_ica_model)
+
+        def side_effect(cd, variant=None):
+            if variant is None:
+                return meta, cls_features
+            raise FileNotFoundError(f"no shards found for variant {variant!r} in {cd}")
+
+        mock_load_cache.side_effect = side_effect
+
+        with pytest.raises(FileNotFoundError) as exc_info:
+            apply_ica_api(cache_suffix="test_cache", rel_variant="missing_tag")
+        msg = str(exc_info.value)
+        assert "missing_tag" in msg
+        assert str(cache_dir) in msg
+
+
+def test_apply_ica_api_no_rel_variant_is_legacy(synthetic_cache_api):
+    """rel_variant=None (default) is unchanged: IcaModel built without
+    head_feature_sources, predict fed the bare matrix."""
+    from src.apply_ica import apply_ica_api
+
+    cache_dir, meta, cls_features = synthetic_cache_api
+
+    with mock.patch("src.apply_ica.config") as mock_config, \
+         mock.patch("src.apply_ica.load_cache") as mock_load_cache, \
+         mock.patch("src.apply_ica.IcaModel") as mock_ica_model, \
+         mock.patch("src.apply_ica.assert_scoring_integrity"):
+        model_instance = _mock_api_apply(
+            mock_config, cache_dir, meta, cls_features, mock_load_cache, mock_ica_model
+        )
+        apply_ica_api(cache_suffix="test_cache")
+
+        _, ctor_kwargs = mock_ica_model.call_args
+        assert ctor_kwargs.get("head_feature_sources") is None
+
+        (called_features,), _ = model_instance.predict_ica_from_features.call_args
+        assert isinstance(called_features, np.ndarray)
+
+
+def test_apply_ica_ldc_rel_variant_dict_fed_to_both_predict_calls(
+    synthetic_cache_ldc,
+):
+    """LDC's dual predict (ML gate, then gate_override) must both receive the
+    sources dict when rel_variant is set."""
+    from src.apply_ica import apply_ica_ldc
+
+    cache_dir, meta, cls_features = synthetic_cache_ldc
+    variant_tag = "rel_branch"
+    cls_variant = np.random.randn(meta.height, HIDDEN_DIM).astype(np.float32)
+    np.save(cache_dir / f"shard_000_cls.{variant_tag}.npy", cls_variant)
+
+    with mock.patch("src.apply_ica.config") as mock_config, \
+         mock.patch("src.apply_ica.load_cache") as mock_load_cache, \
+         mock.patch("src.apply_ica.IcaModel") as mock_ica_model, \
+         mock.patch("src.apply_ica.assert_scoring_integrity"):
+        mock_config.CCA_EMBED_CACHE_DIR = cache_dir.parent
+        mock_config.ICA_CANDIDATES_DIR = Path(mock_config.CCA_EMBED_CACHE_DIR) / "ica_candidates"
+        gold_labels = pl.DataFrame({
+            "id": meta["id"].to_list()[:4],
+            "us_label": [True, False, None, None],
+        })
+        gold_labels_path = Path(mock_config.CCA_EMBED_CACHE_DIR) / "ldc_labeled.parquet"
+        gold_labels.write_parquet(gold_labels_path)
+        mock_config.US_FILTER_LABELED_PARQUET = gold_labels_path
+
+        mock_load_cache.side_effect = _load_cache_side_effect_factory(
+            meta, cls_features, cls_variant, variant_tag
+        )
+
+        model_instance = mock_ica_model.return_value
+
+        def predict(features, gate_override=None):
+            assert isinstance(features, dict)
+            n = features["base"].shape[0]
+            rng = np.random.default_rng(7)
+            return {
+                "us": rng.uniform(0, 1, n).astype(np.float32),
+                "cca": rng.uniform(0, 1, n).astype(np.float32),
+                "rel": rng.uniform(0, 1, n).astype(np.float32),
+                "ica_score": rng.uniform(0, 1, n).astype(np.float32),
+            }
+
+        model_instance.predict_ica_from_features.side_effect = predict
+        model_instance.fusion_config.gate_threshold = 0.5
+
+        apply_ica_ldc(cache_suffix="test_cache_ldc", rel_variant=variant_tag)
+
+        assert model_instance.predict_ica_from_features.call_count == 2
+        for call in model_instance.predict_ica_from_features.call_args_list:
+            (features,), _ = call
+            assert set(features.keys()) == {"base", variant_tag}
+
+        _, ctor_kwargs = mock_ica_model.call_args
+        assert ctor_kwargs["head_feature_sources"] == {
+            "us": "base", "cca": "base", "rel": variant_tag
+        }
+
+
+def test_apply_ica_main_threads_rel_variant_to_api(synthetic_cache_api_with_variant):
+    from src.apply_ica import main
+
+    cache_dir, meta, cls_features, cls_variant, variant_tag = synthetic_cache_api_with_variant
+
+    with mock.patch("src.apply_ica.config") as mock_config, \
+         mock.patch("src.apply_ica.load_cache") as mock_load_cache, \
+         mock.patch("src.apply_ica.IcaModel") as mock_ica_model, \
+         mock.patch("src.apply_ica.assert_scoring_integrity"):
+        _mock_api_apply(mock_config, cache_dir, meta, cls_features, mock_load_cache, mock_ica_model)
+        mock_load_cache.side_effect = _load_cache_side_effect_factory(
+            meta, cls_features, cls_variant, variant_tag
+        )
+
+        main(corpus="api", cache_suffix="test_cache", rel_variant=variant_tag)
+
+        _, ctor_kwargs = mock_ica_model.call_args
+        assert ctor_kwargs["head_feature_sources"] == {
+            "us": "base", "cca": "base", "rel": variant_tag
+        }
+
+
 # =============================================================================
 # Tests: scoring-integrity guard (predict-vs-direct head check)
 # =============================================================================
@@ -700,3 +997,100 @@ def test_scoring_integrity_tolerates_kernel_noise(tiny_ica_model):
 
     with mock.patch.object(model.model, "predict", side_effect=noisy):
         assert_scoring_integrity(model, feats)  # must not raise
+
+
+# =============================================================================
+# Tests: scoring-integrity guard, sources mode (branched-encoder per-head CLS)
+# =============================================================================
+
+
+def _sources_model(tiny_ica_model, sources):
+    from src.assemble_ica import IcaModel
+
+    with mock.patch("src.assemble_ica.config") as mock_config:
+        tmpdir = tiny_ica_model["tmpdir"]
+        mock_config.US_FILTER_FULL_WEIGHTS = tiny_ica_model["us"]
+        mock_config.CCA_DOCA_WEIGHTS = tiny_ica_model["cca"]
+        mock_config.RELEVANCE_DOCA_WEIGHTS = tiny_ica_model["rel"]
+        mock_config.CCA_DOCA_DIR = tmpdir
+        return IcaModel(fusion_path=tiny_ica_model["fusion_path"], head_feature_sources=sources)
+
+
+def test_scoring_integrity_sources_mode_passes_on_consistent_model(tiny_ica_model):
+    """Sources-mode guard: each head compared against ITS OWN tag's sample."""
+    from src.apply_ica import assert_scoring_integrity
+
+    sources = {"us": "base", "cca": "base", "rel": "rel_branch"}
+    model = _sources_model(tiny_ica_model, sources)
+    rng = np.random.default_rng(3)
+    feats = {
+        "base": (rng.standard_normal((64, HIDDEN_DIM)) * 0.4).astype(np.float32),
+        "rel_branch": (rng.standard_normal((64, HIDDEN_DIM)) * 0.4).astype(np.float32),
+    }
+
+    def consistent(inputs, verbose=0):
+        return {
+            name: np.asarray(head(inputs[f"features_{sources[name]}"])).reshape(-1, 1)
+            for name, head in [("us", model.us_head), ("cca", model.cca_head),
+                               ("rel", model.rel_head)]
+        }
+
+    with mock.patch.object(model.model, "predict", side_effect=consistent):
+        assert_scoring_integrity(model, feats)  # must not raise
+
+
+def test_scoring_integrity_sources_mode_raises_on_distorted_predict(tiny_ica_model):
+    """A distortion on the rel branch alone must still trip the guard."""
+    from src.apply_ica import assert_scoring_integrity
+
+    sources = {"us": "base", "cca": "base", "rel": "rel_branch"}
+    model = _sources_model(tiny_ica_model, sources)
+    rng = np.random.default_rng(3)
+    feats = {
+        "base": (rng.standard_normal((64, HIDDEN_DIM)) * 0.4).astype(np.float32),
+        "rel_branch": (rng.standard_normal((64, HIDDEN_DIM)) * 0.4).astype(np.float32),
+    }
+
+    def distorted(inputs, verbose=0):
+        out = {
+            name: np.asarray(head(inputs[f"features_{sources[name]}"])).reshape(-1, 1)
+            for name, head in [("us", model.us_head), ("cca", model.cca_head),
+                               ("rel", model.rel_head)]
+        }
+        out["rel"] = out["rel"] + 0.9
+        return out
+
+    with mock.patch.object(model.model, "predict", side_effect=distorted):
+        with pytest.raises(RuntimeError, match="scoring integrity"):
+            assert_scoring_integrity(model, feats)
+
+
+def test_scoring_integrity_sources_mode_uses_correct_per_head_sample(tiny_ica_model):
+    """Guard must compare us/cca against the 'base' sample and rel against the
+    'rel_branch' sample — NOT cross-wired. A predict stub that reads the WRONG
+    tag for rel (i.e., what a cross-wiring bug would produce) must be caught,
+    proving the guard doesn't silently compare rel's output to the wrong input.
+    """
+    from src.apply_ica import assert_scoring_integrity
+
+    sources = {"us": "base", "cca": "base", "rel": "rel_branch"}
+    model = _sources_model(tiny_ica_model, sources)
+    rng = np.random.default_rng(11)
+    # Well-separated distributions so a cross-wiring bug produces a large
+    # discrepancy, not one lost in noise.
+    feats = {
+        "base": (rng.standard_normal((64, HIDDEN_DIM)) * 0.4).astype(np.float32),
+        "rel_branch": (rng.standard_normal((64, HIDDEN_DIM)) * 0.4 + 5.0).astype(np.float32),
+    }
+
+    def cross_wired(inputs, verbose=0):
+        # BUG simulation: rel reads the "base" tag instead of "rel_branch".
+        return {
+            "us": np.asarray(model.us_head(inputs["features_base"])).reshape(-1, 1),
+            "cca": np.asarray(model.cca_head(inputs["features_base"])).reshape(-1, 1),
+            "rel": np.asarray(model.rel_head(inputs["features_base"])).reshape(-1, 1),
+        }
+
+    with mock.patch.object(model.model, "predict", side_effect=cross_wired):
+        with pytest.raises(RuntimeError, match="scoring integrity"):
+            assert_scoring_integrity(model, feats)

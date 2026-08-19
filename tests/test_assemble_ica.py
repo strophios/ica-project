@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import tempfile
 from pathlib import Path
+from unittest import mock
 
 import numpy as np
 import pytest
@@ -753,3 +754,335 @@ def test_gate_override_independent_of_calib_us(three_tiny_heads_with_weights):
         else:
             # Gated out: expect exactly zero
             assert ica_scores[i] == 0.0, f"Row {i} gated out should have ica_score=0.0"
+
+
+# =============================================================================
+# Test: constructor-default sentinel fix (mock.patch("src.assemble_ica.config")
+# must actually take effect — the pre-fix defaults were bound at import time)
+# =============================================================================
+
+
+def _write_default_fusion(tmpdir: Path) -> Path:
+    from src.fusion.sidecar import save_fusion
+    from src.fusion.combiner import FusionConfig
+
+    fusion_config = FusionConfig(
+        gate_threshold=0.5,
+        combine="product",
+        coefs=None,
+        score_space="prob",
+        includes_us=False,
+        head_calibrators={"us": "test", "cca": "test", "rel": "test"},
+    )
+    fusion_path = tmpdir / "ica_fusion.fusion.json"
+    save_fusion(fusion_config, str(fusion_path))
+    return fusion_path
+
+
+def test_bare_construction_resolves_defaults_from_config_at_call_time(
+    three_tiny_heads_with_weights,
+):
+    """IcaModel() with NO explicit weight paths must read config.* at __init__
+    time, not at module-import time -- otherwise mock.patch("src.assemble_ica.config")
+    (used throughout test_apply_ica.py) silently no-ops and those tests load
+    real production weights instead of the fixture."""
+    heads_info = three_tiny_heads_with_weights
+    tmpdir = heads_info["tmpdir"]
+    fusion_path = _write_default_fusion(tmpdir)
+
+    with mock.patch("src.assemble_ica.config") as mock_config:
+        mock_config.US_FILTER_FULL_WEIGHTS = heads_info["us"][0]
+        mock_config.CCA_DOCA_WEIGHTS = heads_info["cca"][0]
+        mock_config.RELEVANCE_DOCA_WEIGHTS = heads_info["rel"][0]
+        mock_config.CCA_DOCA_DIR = tmpdir
+
+        # Bare call: no us/cca/rel weights path arguments at all.
+        bare_model = IcaModel(fusion_path=str(fusion_path))
+
+    # Explicit-args construction from the SAME fixture artifacts (no mocking
+    # needed -- config isn't consulted when every path is given explicitly).
+    explicit_model = IcaModel(
+        us_weights_path=heads_info["us"][0],
+        cca_weights_path=heads_info["cca"][0],
+        rel_weights_path=heads_info["rel"][0],
+        fusion_path=str(fusion_path),
+    )
+
+    features = np.random.default_rng(5).standard_normal((BATCH, HIDDEN_DIM)).astype(np.float32)
+    bare_result = bare_model.predict_ica_from_features(features)
+    explicit_result = explicit_model.predict_ica_from_features(features)
+    for key in ("us", "cca", "rel", "ica_score"):
+        np.testing.assert_allclose(bare_result[key], explicit_result[key], rtol=1e-5, atol=1e-7)
+
+
+def test_bare_construction_uses_mocked_paths_not_real_production_defaults(
+    three_tiny_heads_with_weights,
+):
+    """Negative-space proof: pointing the mocked config at nonexistent weight
+    paths must make a bare IcaModel() call fail to load THOSE paths. Before
+    the sentinel fix this test would NOT raise (the bound defaults silently
+    fell back to the real production artifacts on disk, since they happen to
+    exist in this dev environment)."""
+    heads_info = three_tiny_heads_with_weights
+    tmpdir = heads_info["tmpdir"]
+    fusion_path = _write_default_fusion(tmpdir)
+
+    with mock.patch("src.assemble_ica.config") as mock_config:
+        mock_config.US_FILTER_FULL_WEIGHTS = tmpdir / "does_not_exist_us.weights.h5"
+        mock_config.CCA_DOCA_WEIGHTS = heads_info["cca"][0]
+        mock_config.RELEVANCE_DOCA_WEIGHTS = heads_info["rel"][0]
+        mock_config.CCA_DOCA_DIR = tmpdir
+
+        with pytest.raises(Exception):  # config_path_for_weights -> missing sidecar
+            IcaModel(fusion_path=str(fusion_path))
+
+
+# =============================================================================
+# Test: head_feature_sources (branched-encoder per-head CLS source)
+# =============================================================================
+
+
+def test_head_feature_sources_none_is_legacy_single_input(three_tiny_heads_with_weights):
+    """Default (head_feature_sources=None) is byte-identical to before: the
+    assembled model has a single shared 'features' input."""
+    heads_info = three_tiny_heads_with_weights
+    fusion_path = _write_default_fusion(heads_info["tmpdir"])
+    model = IcaModel(
+        us_weights_path=heads_info["us"][0],
+        cca_weights_path=heads_info["cca"][0],
+        rel_weights_path=heads_info["rel"][0],
+        fusion_path=str(fusion_path),
+    )
+    assert model.head_feature_sources is None
+    assert len(model.model.inputs) == 1
+    assert model.model.inputs[0].name == "features"
+
+
+def test_head_feature_sources_wires_per_tag_inputs(three_tiny_heads_with_weights):
+    heads_info = three_tiny_heads_with_weights
+    fusion_path = _write_default_fusion(heads_info["tmpdir"])
+    sources = {"us": "base", "cca": "base", "rel": "rel_branch"}
+    model = IcaModel(
+        us_weights_path=heads_info["us"][0],
+        cca_weights_path=heads_info["cca"][0],
+        rel_weights_path=heads_info["rel"][0],
+        fusion_path=str(fusion_path),
+        head_feature_sources=sources,
+    )
+    assert model.head_feature_sources == sources
+    input_names = sorted(i.name for i in model.model.inputs)
+    assert input_names == ["features_base", "features_rel_branch"]
+
+
+def test_predict_legacy_array_rejected_when_sources_configured(three_tiny_heads_with_weights):
+    heads_info = three_tiny_heads_with_weights
+    fusion_path = _write_default_fusion(heads_info["tmpdir"])
+    model = IcaModel(
+        us_weights_path=heads_info["us"][0],
+        cca_weights_path=heads_info["cca"][0],
+        rel_weights_path=heads_info["rel"][0],
+        fusion_path=str(fusion_path),
+        head_feature_sources={"us": "base", "cca": "base", "rel": "rel_branch"},
+    )
+    features = np.random.randn(BATCH, HIDDEN_DIM).astype(np.float32)
+    with pytest.raises(ValueError, match="head_feature_sources"):
+        model.predict_ica_from_features(features)
+
+
+def test_predict_dict_rejected_when_no_sources_configured(three_tiny_heads_with_weights):
+    heads_info = three_tiny_heads_with_weights
+    fusion_path = _write_default_fusion(heads_info["tmpdir"])
+    model = IcaModel(
+        us_weights_path=heads_info["us"][0],
+        cca_weights_path=heads_info["cca"][0],
+        rel_weights_path=heads_info["rel"][0],
+        fusion_path=str(fusion_path),
+    )
+    features = {"base": np.random.randn(BATCH, HIDDEN_DIM).astype(np.float32)}
+    with pytest.raises(ValueError, match="head_feature_sources"):
+        model.predict_ica_from_features(features)
+
+
+def test_predict_dict_missing_tag_raises(three_tiny_heads_with_weights):
+    heads_info = three_tiny_heads_with_weights
+    fusion_path = _write_default_fusion(heads_info["tmpdir"])
+    model = IcaModel(
+        us_weights_path=heads_info["us"][0],
+        cca_weights_path=heads_info["cca"][0],
+        rel_weights_path=heads_info["rel"][0],
+        fusion_path=str(fusion_path),
+        head_feature_sources={"us": "base", "cca": "base", "rel": "rel_branch"},
+    )
+    features = {"base": np.random.randn(BATCH, HIDDEN_DIM).astype(np.float32)}
+    with pytest.raises(ValueError, match="rel_branch"):
+        model.predict_ica_from_features(features)
+
+
+def test_predict_dict_row_count_mismatch_raises(three_tiny_heads_with_weights):
+    heads_info = three_tiny_heads_with_weights
+    fusion_path = _write_default_fusion(heads_info["tmpdir"])
+    model = IcaModel(
+        us_weights_path=heads_info["us"][0],
+        cca_weights_path=heads_info["cca"][0],
+        rel_weights_path=heads_info["rel"][0],
+        fusion_path=str(fusion_path),
+        head_feature_sources={"us": "base", "cca": "base", "rel": "rel_branch"},
+    )
+    features = {
+        "base": np.random.randn(BATCH, HIDDEN_DIM).astype(np.float32),
+        "rel_branch": np.random.randn(BATCH - 1, HIDDEN_DIM).astype(np.float32),
+    }
+    with pytest.raises(ValueError, match="row"):
+        model.predict_ica_from_features(features)
+
+
+def test_predict_dict_non_2d_array_raises(three_tiny_heads_with_weights):
+    heads_info = three_tiny_heads_with_weights
+    fusion_path = _write_default_fusion(heads_info["tmpdir"])
+    model = IcaModel(
+        us_weights_path=heads_info["us"][0],
+        cca_weights_path=heads_info["cca"][0],
+        rel_weights_path=heads_info["rel"][0],
+        fusion_path=str(fusion_path),
+        head_feature_sources={"us": "base", "cca": "base", "rel": "rel_branch"},
+    )
+    features = {
+        "base": np.random.randn(BATCH, HIDDEN_DIM).astype(np.float32),
+        "rel_branch": np.random.randn(HIDDEN_DIM).astype(np.float32),  # 1-D
+    }
+    with pytest.raises(ValueError):
+        model.predict_ica_from_features(features)
+
+
+def test_predict_dict_wrong_hidden_dim_raises(three_tiny_heads_with_weights):
+    heads_info = three_tiny_heads_with_weights
+    fusion_path = _write_default_fusion(heads_info["tmpdir"])
+    model = IcaModel(
+        us_weights_path=heads_info["us"][0],
+        cca_weights_path=heads_info["cca"][0],
+        rel_weights_path=heads_info["rel"][0],
+        fusion_path=str(fusion_path),
+        head_feature_sources={"us": "base", "cca": "base", "rel": "rel_branch"},
+    )
+    features = {
+        "base": np.random.randn(BATCH, HIDDEN_DIM).astype(np.float32),
+        "rel_branch": np.random.randn(BATCH, 512).astype(np.float32),
+    }
+    with pytest.raises(ValueError):
+        model.predict_ica_from_features(features)
+
+
+def test_predict_dict_mode_matches_legacy_when_sources_collapse_to_same_array(
+    three_tiny_heads_with_weights,
+):
+    """Sources-mode with every head mapped to the same tag, fed the SAME array
+    both places, reproduces legacy-mode output exactly -- the sources plumbing
+    doesn't change the math, only where the array comes from."""
+    heads_info = three_tiny_heads_with_weights
+    fusion_path = _write_default_fusion(heads_info["tmpdir"])
+
+    legacy_model = IcaModel(
+        us_weights_path=heads_info["us"][0],
+        cca_weights_path=heads_info["cca"][0],
+        rel_weights_path=heads_info["rel"][0],
+        fusion_path=str(fusion_path),
+    )
+    sources_model = IcaModel(
+        us_weights_path=heads_info["us"][0],
+        cca_weights_path=heads_info["cca"][0],
+        rel_weights_path=heads_info["rel"][0],
+        fusion_path=str(fusion_path),
+        head_feature_sources={"us": "base", "cca": "base", "rel": "base"},
+    )
+
+    features = np.random.default_rng(9).standard_normal((BATCH, HIDDEN_DIM)).astype(np.float32)
+    legacy_result = legacy_model.predict_ica_from_features(features)
+    sources_result = sources_model.predict_ica_from_features({"base": features})
+    for key in ("us", "cca", "rel", "ica_score"):
+        np.testing.assert_allclose(
+            legacy_result[key], sources_result[key], rtol=1e-5, atol=1e-7
+        )
+
+
+# =============================================================================
+# Test: constructor sources vs fusion-recorded sources cross-check
+# =============================================================================
+
+
+def test_constructor_sources_match_fusion_recorded_sources_ok(three_tiny_heads_with_weights):
+    from src.fusion.sidecar import save_fusion
+    from src.fusion.combiner import FusionConfig
+
+    heads_info = three_tiny_heads_with_weights
+    sources = {"us": "base", "cca": "base", "rel": "rel_branch"}
+    fusion_config = FusionConfig(
+        gate_threshold=0.5,
+        combine="product",
+        coefs=None,
+        score_space="prob",
+        includes_us=False,
+        head_calibrators={"us": "test", "cca": "test", "rel": "test"},
+        head_feature_sources=sources,
+    )
+    fusion_path = heads_info["tmpdir"] / "ica_fusion_matching.fusion.json"
+    save_fusion(fusion_config, str(fusion_path))
+
+    # Must construct without raising.
+    IcaModel(
+        us_weights_path=heads_info["us"][0],
+        cca_weights_path=heads_info["cca"][0],
+        rel_weights_path=heads_info["rel"][0],
+        fusion_path=str(fusion_path),
+        head_feature_sources=sources,
+    )
+
+
+def test_constructor_sources_mismatch_fusion_recorded_sources_raises(
+    three_tiny_heads_with_weights,
+):
+    from src.fusion.sidecar import save_fusion
+    from src.fusion.combiner import FusionConfig
+
+    heads_info = three_tiny_heads_with_weights
+    fusion_sources = {"us": "base", "cca": "base", "rel": "rel_branch"}
+    constructor_sources = {"us": "base", "cca": "base", "rel": "some_other_branch"}
+    fusion_config = FusionConfig(
+        gate_threshold=0.5,
+        combine="product",
+        coefs=None,
+        score_space="prob",
+        includes_us=False,
+        head_calibrators={"us": "test", "cca": "test", "rel": "test"},
+        head_feature_sources=fusion_sources,
+    )
+    fusion_path = heads_info["tmpdir"] / "ica_fusion_mismatch.fusion.json"
+    save_fusion(fusion_config, str(fusion_path))
+
+    with pytest.raises(ValueError) as exc_info:
+        IcaModel(
+            us_weights_path=heads_info["us"][0],
+            cca_weights_path=heads_info["cca"][0],
+            rel_weights_path=heads_info["rel"][0],
+            fusion_path=str(fusion_path),
+            head_feature_sources=constructor_sources,
+        )
+    msg = str(exc_info.value)
+    assert "some_other_branch" in msg
+    assert "rel_branch" in msg
+
+
+def test_fusion_without_sources_field_skips_check(three_tiny_heads_with_weights):
+    """Back-compat: a fusion sidecar predating head_feature_sources (field
+    absent -> None) performs no cross-check, even when the constructor is
+    given sources."""
+    heads_info = three_tiny_heads_with_weights
+    fusion_path = _write_default_fusion(heads_info["tmpdir"])  # no head_feature_sources
+
+    # Must construct without raising, despite the fusion recording nothing.
+    IcaModel(
+        us_weights_path=heads_info["us"][0],
+        cca_weights_path=heads_info["cca"][0],
+        rel_weights_path=heads_info["rel"][0],
+        fusion_path=str(fusion_path),
+        head_feature_sources={"us": "base", "cca": "base", "rel": "rel_branch"},
+    )

@@ -278,3 +278,63 @@ class TestCalibrationSidecarErrorNamesMissingFile:
         with pytest.raises(FileNotFoundError) as exc_info:
             load_calibration(sidecar_path)
         assert str(sidecar_path) in str(exc_info.value)
+
+
+class TestResolveFusionInputsRelFeatureVariant:
+    """rel_feature_variant: --rel-feature-variant's guard, mirroring the
+    other four independently-tunable inputs (same
+    check_no_production_overwrite pattern)."""
+
+    def test_default_is_none_and_included_in_resolved_dict(self):
+        resolved = resolve_fusion_inputs()
+        assert resolved["rel_feature_variant"] is None
+
+    def test_default_none_with_production_output_is_fine(self):
+        """The bare-call case: no variant requested, production output ->
+        no raise (matches the other four inputs' default behavior)."""
+        resolved = resolve_fusion_inputs(rel_feature_variant=None)
+        assert resolved["rel_feature_variant"] is None
+
+    def test_non_default_variant_with_production_output_raises(self):
+        with pytest.raises(ValueError, match="production"):
+            resolve_fusion_inputs(rel_feature_variant="rel_branch")
+
+    def test_non_default_variant_with_non_default_output_is_fine(self, tmp_path):
+        resolved = resolve_fusion_inputs(rel_feature_variant="rel_branch", output_dir=tmp_path)
+        assert resolved["rel_feature_variant"] == "rel_branch"
+        assert resolved["output_dir"] == tmp_path
+
+    def test_error_names_the_artifact(self):
+        with pytest.raises(ValueError) as exc_info:
+            resolve_fusion_inputs(rel_feature_variant="rel_branch")
+        assert "rel-feature-variant" in str(exc_info.value) or "rel feature variant" in str(exc_info.value)
+
+
+class TestResolveHeadFeatureSources:
+    """resolve_head_feature_sources: pure helper computing the fusion
+    sidecar's head_feature_sources record from the --rel-feature-variant tag."""
+
+    def test_none_variant_yields_none(self):
+        from src.fit_fusion import resolve_head_feature_sources
+        assert resolve_head_feature_sources(None) is None
+
+    def test_variant_yields_sources_dict(self):
+        from src.fit_fusion import resolve_head_feature_sources
+        assert resolve_head_feature_sources("rel_branch") == {
+            "us": "base", "cca": "base", "rel": "rel_branch"
+        }
+
+
+class TestFitFusionArgParser:
+    """--rel-feature-variant CLI flag (build_arg_parser, mirroring apply_ica's
+    pattern of a separately-testable parser function)."""
+
+    def test_default_is_none(self):
+        from src.fit_fusion import build_arg_parser
+        args = build_arg_parser().parse_args([])
+        assert args.rel_feature_variant is None
+
+    def test_accepts_rel_feature_variant(self):
+        from src.fit_fusion import build_arg_parser
+        args = build_arg_parser().parse_args(["--rel-feature-variant", "rel_branch"])
+        assert args.rel_feature_variant == "rel_branch"

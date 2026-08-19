@@ -410,3 +410,51 @@ def test_reload_and_score_ica_wrong_feature_dims(tiny_ica_artifact_set):
             fusion_path=artifact_set["fusion_path"],
             features=bad_features,
         )
+
+
+# =============================================================================
+# Test: reload_and_score_ica head_feature_sources threading (branched encoder)
+# =============================================================================
+
+
+def test_reload_and_score_ica_head_feature_sources_matches_in_process(tiny_ica_artifact_set):
+    """head_feature_sources passed through to IcaModel; cross-process (reload)
+    reproduces the in-process sources-mode result exactly."""
+    artifact_set = tiny_ica_artifact_set
+    sources = {"us": "base", "cca": "base", "rel": "rel_branch"}
+    rng = np.random.default_rng(4)
+    features_dict = {
+        "base": artifact_set["features"],
+        "rel_branch": rng.standard_normal(artifact_set["features"].shape).astype(np.float32),
+    }
+
+    model = IcaModel(
+        us_weights_path=artifact_set["us_weights"],
+        cca_weights_path=artifact_set["cca_weights"],
+        rel_weights_path=artifact_set["rel_weights"],
+        fusion_path=artifact_set["fusion_path"],
+        head_feature_sources=sources,
+    )
+    in_process_result = model.predict_ica_from_features(features_dict)
+
+    cross_process_result = reload_and_score_ica(
+        us_weights=artifact_set["us_weights"],
+        cca_weights=artifact_set["cca_weights"],
+        rel_weights=artifact_set["rel_weights"],
+        fusion_path=artifact_set["fusion_path"],
+        features=features_dict,
+        head_feature_sources=sources,
+    )
+
+    for key in ["us", "cca", "rel", "ica_score"]:
+        np.testing.assert_allclose(
+            in_process_result[key], cross_process_result[key], rtol=1e-5, atol=1e-7
+        )
+
+
+def test_reload_and_score_ica_head_feature_sources_default_none_is_legacy():
+    """head_feature_sources defaults to None -- unchanged legacy behavior for
+    every existing call site that doesn't pass it."""
+    import inspect
+    sig = inspect.signature(reload_and_score_ica)
+    assert sig.parameters["head_feature_sources"].default is None

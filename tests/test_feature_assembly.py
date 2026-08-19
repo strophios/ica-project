@@ -78,6 +78,87 @@ def test_feature_endpoint_rejects_dim_mismatch():
         build_feature_endpoint_model({"cca": head}, hidden_dim=HID + 4)
 
 
+# =============================================================================
+# build_feature_inference_model: multi-source variant (branched-encoder support)
+# =============================================================================
+
+
+def _named_head(name):
+    return ClassificationHead(hidden_dim=HID, loss_fn=FLPULoss(prior=0.1), name=name)
+
+
+def test_feature_inference_model_legacy_default_single_shared_input():
+    """feature_sources=None (the default) stays byte-identical: one shared
+    'features' Input, no per-source Input names."""
+    heads = {"cca": _named_head("cca"), "rel": _named_head("rel2")}
+    model = build_feature_inference_model(heads, hidden_dim=HID)
+    assert len(model.inputs) == 1
+    assert model.inputs[0].name == "features"
+
+
+def test_feature_inference_model_multi_source_creates_one_input_per_distinct_tag():
+    heads = {"cca": _named_head("cca3"), "rel": _named_head("rel3")}
+    model = build_feature_inference_model(
+        heads, hidden_dim=HID, feature_sources={"cca": "base", "rel": "rel_branch"}
+    )
+    input_names = sorted(i.name for i in model.inputs)
+    assert input_names == ["features_base", "features_rel_branch"]
+
+
+def test_feature_inference_model_multi_source_shared_tag_collapses_to_one_input():
+    """Two heads mapped to the same tag share a single Input (distinct-tag count,
+    not per-head count)."""
+    heads = {"us": _named_head("us4"), "cca": _named_head("cca4")}
+    model = build_feature_inference_model(
+        heads, hidden_dim=HID, feature_sources={"us": "base", "cca": "base"}
+    )
+    assert len(model.inputs) == 1
+    assert model.inputs[0].name == "features_base"
+
+
+def test_feature_inference_model_multi_source_each_head_reads_its_own_tag():
+    """Each head is wired to ITS tag's input, not some other head's — verified
+    by feeding distinct arrays per tag and checking outputs match direct calls.
+
+    Uses the model's eager `__call__` (not `.predict()`): comparing a compiled
+    `.predict()` graph against a bare eager `head(sample)` call trips the known
+    tensorflow-metal dropout-path discrepancy on local MPS (see
+    `apply_ica.assert_scoring_integrity`'s atol=0.05 rationale) — both eager
+    paths here avoid that entirely, so exact equality is the right check.
+    """
+    head_cca = _named_head("cca5")
+    head_rel = _named_head("rel5")
+    heads = {"cca": head_cca, "rel": head_rel}
+    model = build_feature_inference_model(
+        heads, hidden_dim=HID, feature_sources={"cca": "base", "rel": "rel_branch"}
+    )
+    rng = np.random.default_rng(0)
+    arr_base = rng.standard_normal((5, HID)).astype("float32")
+    arr_variant = rng.standard_normal((5, HID)).astype("float32") * 10.0  # well-separated
+
+    out = model({"features_base": arr_base, "features_rel_branch": arr_variant})
+    direct_cca = np.asarray(head_cca(arr_base)).reshape(-1, 1)
+    direct_rel = np.asarray(head_rel(arr_variant)).reshape(-1, 1)
+    np.testing.assert_allclose(np.asarray(out["cca"]), direct_cca, rtol=1e-5, atol=1e-6)
+    np.testing.assert_allclose(np.asarray(out["rel"]), direct_rel, rtol=1e-5, atol=1e-6)
+
+
+def test_feature_inference_model_multi_source_missing_head_raises():
+    heads = {"cca": _named_head("cca6"), "rel": _named_head("rel6")}
+    with pytest.raises(ValueError, match="rel"):
+        build_feature_inference_model(
+            heads, hidden_dim=HID, feature_sources={"cca": "base"}
+        )
+
+
+def test_feature_inference_model_multi_source_unknown_head_key_raises():
+    heads = {"cca": _named_head("cca7")}
+    with pytest.raises(ValueError, match="extra"):
+        build_feature_inference_model(
+            heads, hidden_dim=HID, feature_sources={"cca": "base", "extra": "base"}
+        )
+
+
 def test_dataset_from_embeddings_ratio_batch_shapes_and_keys():
     pos = (np.ones((20, HID), dtype="float32"), np.ones(20, dtype="float32"))
     unl = (np.zeros((200, HID), dtype="float32"), np.zeros(200, dtype="float32"))
