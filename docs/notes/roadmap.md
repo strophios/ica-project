@@ -272,6 +272,15 @@ work.)
      (`metal-execution-findings.md` deployment rule 3).
    - **CPU-force / acceptance-check the features-mode trainers** when next
      touched (`metal-execution-findings.md` deployment rules 1–2).
+   - **Early-stopping upgrade for the ladder winner's final retrain**
+     (operator question 2026-08-19): all text trainers use
+     `EarlyStopping(monitor="val_loss", patience=2)` with Keras-default
+     `restore_best_weights=False` — artifacts are best+2-epochs-of-floor-LR
+     drift, part of the measured ±0.01 draw noise; and in the joint trainer
+     val_loss is the λ-mix, which can mask one head's trajectory. At
+     productionization: `restore_best_weights=True` + consider a rank-based
+     monitor (val PR-AUC). NOT mid-sweep (breaks cell comparability);
+     symmetric across arms so verdict-neutral.
    - **`eval_heads_own_terms` step-order:** calibration is required BEFORE the eval;
      the runbook's Step 4 (eval) currently precedes Step 5 (calibrate) — swap them
      or note the dependency when next running the tuned compare.
