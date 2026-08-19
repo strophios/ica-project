@@ -149,6 +149,50 @@ ROC-irrelevant or deferred to the winner's full fusion refit), so the
 recorded mixed-stack 0.820 is not comparable; 0.8064 on the identical proxy
 is.
 
+## Branched productionization — implementation contract (2026-08-19)
+
+The ladder concluded (branched won); this section is the build contract for
+the productionization, decided against the 2026-08-19 codebase map.
+
+- **Feature sources**: `IcaModel(head_feature_sources: dict[str, str] | None)`
+  — maps head name → source tag; `None` (default) = legacy shared-matrix
+  behavior, byte-identical. Deployed config: `{"us": "base", "cca": "base",
+  "rel": "rel_branch"}`. `predict_ica_from_features` accepts the legacy
+  single `(n,768)` array (valid only in shared mode) or a
+  `dict[source_tag, (n,768)]` (rows aligned across sources; validated).
+  The assembled inference model gets one Input per *source*, heads wired to
+  their source — head-count- and source-count-agnostic.
+- **Cache layout**: ONE cache dir, extra 768-d array per variant per shard:
+  `shard_{idx:03d}_cls.{variant}.npy` (dotted — must NOT end in `_cls.npy`,
+  which would corrupt append-mode shard counting). `write_shard`/`load_cache`
+  gain optional variant support; `emb_row` contract unchanged; provenance
+  additively records the variant's producing backbone + graft verification.
+- **Branched embed model**: one tokenization pass, TWO black-box backbone
+  instances (pristine DAPT + grafted) in one functional model emitting
+  `{"cls": ..., "cls.rel_branch": ..., "us": ...}` — ~2× encoder compute on
+  a once-per-corpus job (2.67M rows ≈ 20 min/backbone on h200); chosen over
+  intermediate-layer graph surgery (no keras_hub precedent, real risk) —
+  true ~1.08× branching recorded as optional future optimization. The
+  clobber-fix ordering rule (override re-applied after us-weights load)
+  applies to BOTH backbones; fp32 policy at embed (`ICA_DTYPE_POLICY`).
+- **Graft builder promoted to src**: `build_grafted_backbone(base_weights,
+  donor_weights, layer_groups)` in `src/model_setup/backbone.py`, lifted
+  from `scripts/graft_test.py:build_graft_backbone` (ordering assert +
+  `layer_diff_summary` verification: nonzero ONLY at grafted groups vs
+  base, exactly 0.0 there vs donor). Deployed graft: donor =
+  `relevance/tuned_backbone.job8823087.weights.h5`, groups =
+  `{transformer_layer_11}`.
+- **Integrity guard** goes per-source: each head verified against ITS
+  feature matrix (same 0.05 atol rationale).
+- **Fusion sidecar**: additive optional `head_feature_sources` field
+  (load_fusion `.get()` back-compat); `fit_fusion` gains a
+  `--rel-feature-variant` (reads the second array off the same join —
+  single-cache assumption otherwise unchanged); `IcaModel` validates its
+  sources against the fusion's record when present.
+- **Signature threading**: `reload_and_score_ica`, `assert_scoring_integrity`,
+  `apply_ica` (reads variant arrays when the fusion/model declare them;
+  legacy caches without the variant fail loudly, not silently).
+
 ## Build order
 
 1. `loss_weight` knob (isolated; heads.py + cca_config.py + tests).
