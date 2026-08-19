@@ -333,6 +333,18 @@ baseline `cca_doca/experiments/branched_baseline_proxy.json`.
   the one-shot schedule A/B (current vs stretched-decay 12-epoch),
   selected on val-stream metrics, never gold.
 
+**Extensibility note (operator-confirmed design goal, 2026-08-19):** the
+branched build is head-count-agnostic — a NEW head (e.g. a CLAIM head from
+the team's coding scheme, roadmap §A2, or typed relevance heads, §B4) is an
+artifact triple + a feature-source mapping, entering at any of three cost
+tiers: features-mode on the pristine cache (minutes, no new embed), its own
+tuned top-K branch (+K/12 embed compute), or joint-trained with a sibling
+via `loss_weight` (stage-4 warning label applies: shared layers are
+zero-sum at these data scales). The fusion refit is the integration point
+(the ≤3-param combiner generalizes to more calibrated inputs; `fit_fusion`
+is parameterized). What a new head still needs from research: labels/
+population, a prior, calibration, and a gold-set dimension.
+
 **Productionization (the ladder's output, now unblocked):** branched
 `IcaModel` — shared pristine DAPT trunk + the July tuned layer-12 as rel's
 branch (graft-at-deploy, stage-1-proven lossless), original layer-12 for
