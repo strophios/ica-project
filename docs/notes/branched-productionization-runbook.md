@@ -10,6 +10,25 @@ spend corpus-scale compute until that review lands. Steps 1–4 are the cheap
 validation slice (~1h total) and are safe to run anytime: they validate
 machinery, not labels.*
 
+**For the strategic-review session** — triage the meeting's output by blast
+radius before touching the roadmap:
+1. *Eval-side errors* (gold codings, the 1,131-row set, holdout) —
+   invalidate measurements only; artifacts survive; re-draw/re-code + re-run
+   evals.
+2. *Label-side errors* (DoCA match, rel candidates pool, US label
+   semantics, reliable negatives) — invalidate the affected head's
+   training; caches + architecture survive; features-mode retrains are
+   minutes once labels are fixed.
+3. *Corpus/data errors* (ids, eras, text channel) — potentially invalidate
+   caches; the most expensive class; exactly why steps 5–6 hold.
+4. *Composition/definition mismatches* (us/cca/rel vs the team's
+   CA+IMM+CLAIM) — a design conversation, not a bug; the branched
+   architecture's new-head extensibility (strategy note) is the relevant
+   machinery.
+Known soft spots most likely implicated: the rel positives pool
+(descriptor provenance), the eval set's non-random draw (no random gold
+sample exists), diaspora/US-gate semantics, definitional alignment (§A2).
+
 Execution rules throughout: local runs CPU-forced; cluster embeds
 `export ICA_DTYPE_POLICY=float32`; every new artifact gets the CPU-vs-GPU
 rank-consistency acceptance check (`metal-execution-findings.md` deployment

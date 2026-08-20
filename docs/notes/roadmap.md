@@ -215,16 +215,18 @@ work.)
    these data scales; keeper findings + recorded limitations in the
    strategy note's execution record; build/design in
    `docs/design-plans/2026-08-18-stage4-joint-finetune.md`).
-   **THE LADDER IS COMPLETE. Next: branched productionization** —
-   (a) per-head-features `IcaModel` support; (b) the branched artifact
-   chain: pristine-trunk + July-layer-12 graft for rel (the CPU-portable
-   p02 probe + calibration sidecar exist in `relevance/scratch_diag/`),
-   original trunk for CCA/US, one ~1.08× embed pass emitting per-head CLS
-   caches; (c) fusion refit via the parameterized `fit_fusion.py`
-   (re-measures the composed number under correct math); (d) gold re-eval
-   + CPU-vs-GPU acceptance checks + swap decision. US gets no tuned
-   branch; VAT unbundled (post-ladder A/B); temporal evidence-gated — per
-   the note's companion decisions.
+   **THE LADDER IS COMPLETE, AND THE BRANCHED BUILD IS DONE (2026-08-19,
+   c4f2f1b)** — multi-source `IcaModel`, `build_grafted_backbone`, cache
+   variants, branched embed `--branch`, apply `--rel-variant`, fusion
+   `head_feature_sources`; 1471 tests. **Operational rollout ON HOLD
+   (2026-08-20) pending the post-meeting strategic review** (team surfaced
+   reprioritization + potential construction errors). Runbook + hold
+   points + the review's blast-radius triage framework:
+   `branched-productionization-runbook.md` — **the next session's entry
+   point**. Cheap validation slice (runbook steps 1–4, ~1h) safe anytime;
+   corpus-scale embeds/applies (steps 5–6) wait. US gets no tuned branch;
+   VAT unbundled; temporal evidence-gated — per the note's companion
+   decisions.
 3. **Apply to the expanded corpus** — post-1995 candidates through 2025.
    *Reconciled 2026-08-12 with the post-07-30 ops commits this doc had missed:*
    the coalesce `lead_fallback_column` embed knob, `--dedupe-ids` (resolves the
